@@ -11,7 +11,7 @@ Task Commander — локальное встраиваемое приложен�
 Основа — репозиторий `di-sukharev/vibe`, адаптированный под Cloudflare и Supabase. Активны поверхности `webapp` и `backend`.
 
 - `webapp`: React, Vite, TypeScript, TanStack Router/Query/Table/Form, Tailwind CSS v4, Base UI, shadcn/ui и Sonner. Приложение отображается внутри Bitrix24.
-- `backend`: Hono в Cloudflare Workers. BFF изолирует вызовы REST API Bitrix24, OAuth-сессию, разрешения, запуск операций, генерацию отчётов и аудит. Локальная разработка и deployment выполняются через Wrangler; Bun-рантайм шаблона не используется.
+- `backend`: Hono в Cloudflare Workers. BFF изолирует вызовы REST API Bitrix24, OAuth-сессию, разрешения, запуск операций, генерацию отчётов и аудит. Локальная разработка использует Bun и Cloudflare Vite plugin; deployment выполняется через Wrangler.
 - Supabase PostgreSQL: постоянное хранилище операций, результатов обработки, аудита, личных фильтров и метаданных отчётов. Схема и SQL-функции мигрируются Supabase CLI; Prisma не используется.
 - Supabase server client: единственная серверная точка доступа к данным через service-role key из Cloudflare Workers Secrets. Supabase Auth, Storage и Edge Functions не входят в архитектуру.
 - Cloudflare Queues: доставляет подтверждённые массовые операции в Worker consumer. Consumer применяет изменения в Bitrix24, сохраняет результат каждой задачи и использует идемпотентный ключ операции.
