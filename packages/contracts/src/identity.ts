@@ -25,6 +25,8 @@ export const userSummarySchema = z
   })
   .strict();
 
+export type UserSummary = z.infer<typeof userSummarySchema>;
+
 export const userAccessSchema = z
   .object({
     user: userSummarySchema,
@@ -35,3 +37,5 @@ export const userAccessSchema = z
     grantedByUserId: bitrixIdSchema.nullable(),
   })
   .strict();
+
+export type UserAccess = z.infer<typeof userAccessSchema>;
