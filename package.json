@@ -13,6 +13,7 @@
   },
   "scripts": {
     "dev": "bun run --cwd webapp dev",
+    "dev:reset": "bun scripts/reset-local-runtime.mjs",
     "build": "bun run --cwd webapp build",
     "preview": "bun run --cwd webapp preview",
     "typecheck": "bun run --cwd packages/contracts typecheck && bun run --cwd backend typecheck && bun run --cwd webapp typecheck",

@@ -1,9 +1,31 @@
 import { Hono } from 'hono';
-import { healthResponse, type ApiErrorResponse } from '@task-commander/contracts';
+import { type ApiErrorResponse } from '@task-commander/contracts';
 
-export const api = new Hono();
+import { getRuntimeReadiness, type RuntimeEnvironment } from './runtime/configuration';
+import { createRuntimeProbe } from './runtime/probe';
 
-api.get('/api/health', (context) => context.json(healthResponse));
+export const api = new Hono<{ Bindings: RuntimeEnvironment }>();
+
+api.get('/api/health', (context) => context.json(getRuntimeReadiness(context.env)));
+
+api.post('/api/_runtime/probe', async (context) => {
+  if (context.env.APP_ENV !== 'local') {
+    return context.notFound();
+  }
+
+  const probe = createRuntimeProbe();
+  const queue = (context.env as RuntimeEnvironment & Pick<Env, 'OPERATIONS_QUEUE'>)
+    .OPERATIONS_QUEUE;
+  await queue.send(probe);
+
+  return context.json(
+    {
+      messageId: probe.messageId,
+      artifactKey: probe.payload.artifactKey,
+    },
+    202,
+  );
+});
 
 api.notFound((context) => {
   const body: ApiErrorResponse = {
@@ -16,8 +38,8 @@ api.notFound((context) => {
   return context.json(body, 404);
 });
 
-api.onError((error, context) => {
-  console.error(JSON.stringify({ event: 'api_error', message: error.message }));
+api.onError((_error, context) => {
+  console.error(JSON.stringify({ event: 'api_error' }));
 
   const body: ApiErrorResponse = {
     error: {

@@ -7,7 +7,7 @@ describe('health contract', () => {
     expect(isHealthResponse(healthResponse)).toBe(true);
   });
 
-  it('rejects an incomplete response', () => {
-    expect(isHealthResponse({ status: 'ok' })).toBe(false);
+  it('rejects a response without runtime readiness', () => {
+    expect(isHealthResponse({ status: 'ok', service: 'task-commander-api' })).toBe(false);
   });
 });
