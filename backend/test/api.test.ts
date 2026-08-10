@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { healthResponse } from '@task-commander/contracts';
+import { apiErrorResponseSchema, healthResponse } from '@task-commander/contracts';
 import { api } from '../src/api';
 
 const configuredLocalEnvironment = {
@@ -83,15 +83,48 @@ describe('foundation API', () => {
     expect(response.status).toBe(404);
   });
 
+  it('rejects an invalid local probe request with a safe correlation ID', async () => {
+    const response = await api.request(
+      'https://example.test/api/_runtime/probe',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ unexpected: true }),
+      },
+      configuredLocalEnvironment,
+    );
+
+    expect(response.status).toBe(400);
+    const body = apiErrorResponseSchema.parse(await response.json());
+    expect(body).toEqual({
+      error: {
+        code: 'INVALID_REQUEST',
+        message: 'Некорректный запрос.',
+        correlationId: expect.stringMatching(/^TC-[0-9a-f-]+$/i),
+        fieldErrors: [
+          {
+            path: 'unexpected',
+            code: 'unrecognized_key',
+            message: 'Поле не поддерживается.',
+          },
+        ],
+      },
+    });
+    expect(response.headers.get('x-correlation-id')).toBe(body.error.correlationId);
+  });
+
   it('returns JSON for an unknown API route', async () => {
     const response = await api.request('https://example.test/api/missing');
 
     expect(response.status).toBe(404);
-    await expect(response.json()).resolves.toEqual({
+    const body = apiErrorResponseSchema.parse(await response.json());
+    expect(body).toEqual({
       error: {
         code: 'NOT_FOUND',
         message: 'Маршрут API не найден.',
+        correlationId: expect.stringMatching(/^TC-[0-9a-f-]+$/i),
       },
     });
+    expect(response.headers.get('x-correlation-id')).toBe(body.error.correlationId);
   });
 });

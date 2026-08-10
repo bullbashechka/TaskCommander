@@ -1,10 +1,23 @@
 import { Hono } from 'hono';
-import { type ApiErrorResponse } from '@task-commander/contracts';
+import { z } from 'zod';
 
+import { createApiErrorResponse, ApiHttpError } from './http/errors';
+import { parseJsonBody } from './http/validation';
 import { getRuntimeReadiness, type RuntimeEnvironment } from './runtime/configuration';
 import { createRuntimeProbe } from './runtime/probe';
 
-export const api = new Hono<{ Bindings: RuntimeEnvironment }>();
+type ApiVariables = {
+  correlationId: string;
+};
+
+export const api = new Hono<{ Bindings: RuntimeEnvironment; Variables: ApiVariables }>();
+
+api.use('/api/*', async (context, next) => {
+  const correlationId = `TC-${crypto.randomUUID()}`;
+  context.set('correlationId', correlationId);
+  await next();
+  context.header('x-correlation-id', correlationId);
+});
 
 api.get('/api/health', (context) => context.json(getRuntimeReadiness(context.env)));
 
@@ -12,6 +25,8 @@ api.post('/api/_runtime/probe', async (context) => {
   if (context.env.APP_ENV !== 'local') {
     return context.notFound();
   }
+
+  await parseJsonBody(context.req.raw, z.object({}).strict());
 
   const probe = createRuntimeProbe();
   const queue = (context.env as RuntimeEnvironment & Pick<Env, 'OPERATIONS_QUEUE'>)
@@ -28,25 +43,26 @@ api.post('/api/_runtime/probe', async (context) => {
 });
 
 api.notFound((context) => {
-  const body: ApiErrorResponse = {
-    error: {
-      code: 'NOT_FOUND',
-      message: 'Маршрут API не найден.',
-    },
-  };
-
+  const body = createApiErrorResponse('NOT_FOUND', context.get('correlationId'));
   return context.json(body, 404);
 });
 
-api.onError((_error, context) => {
-  console.error(JSON.stringify({ event: 'api_error' }));
+api.onError((error, context) => {
+  const correlationId = context.get('correlationId');
 
-  const body: ApiErrorResponse = {
-    error: {
-      code: 'INTERNAL_ERROR',
-      message: 'Внутренняя ошибка API.',
-    },
-  };
+  if (error instanceof ApiHttpError) {
+    return context.json(
+      createApiErrorResponse(error.code, correlationId, error.fieldErrors),
+      error.status,
+    );
+  }
 
-  return context.json(body, 500);
+  console.error(
+    JSON.stringify({
+      event: 'api_error',
+      correlationId,
+      errorName: error instanceof Error ? error.name : 'unknown',
+    }),
+  );
+  return context.json(createApiErrorResponse('INTERNAL_ERROR', correlationId), 500);
 });

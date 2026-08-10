@@ -7,7 +7,7 @@
 **Цель:** получить воспроизводимый локальный контур webapp + Workers с общими контрактами и mock-интеграцией Битрикс24.
 
 - [x] [001. Инициализировать структуру проекта и базовые проверки](tasks/001-project-foundation.md)
-- [ ] [002. Настроить Cloudflare Workers и локальные bindings](tasks/002-cloudflare-local-runtime.md)
+- [x] [002. Настроить Cloudflare Workers и локальные bindings](tasks/002-cloudflare-local-runtime.md)
 - [ ] [003. Ввести общие доменные контракты и формат ошибок](tasks/003-domain-contracts.md)
 - [ ] [004. Реализовать контракт и mock-адаптер Битрикс24](tasks/004-bitrix-adapter-mock.md)
 

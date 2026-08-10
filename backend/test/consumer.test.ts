@@ -1,7 +1,7 @@
 import { createExecutionContext, createMessageBatch, env, getQueueResult } from 'cloudflare:test';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import consumer from '../src/consumer';
+import consumer, { consumeRuntimeProbeBatch } from '../src/consumer';
 
 const queueName = 'task-commander-test-operations-v1';
 
@@ -93,7 +93,7 @@ describe('runtime probe consumer', () => {
     ]);
     const context = createExecutionContext();
 
-    await consumer.queue!(batch, { ...env, REPORTS_BUCKET: undefined } as Env, context);
+    await consumeRuntimeProbeBatch(batch, { ...env, REPORTS_BUCKET: undefined });
 
     await expect(getQueueResult(batch, context)).resolves.toEqual({
       outcome: 'ok',

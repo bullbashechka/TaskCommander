@@ -50,6 +50,8 @@ describe('local runtime probe', () => {
     await worker.scheduled!(createScheduledController(), {} as Env, context);
     await waitOnExecutionContext(context);
 
-    expect(error).toHaveBeenCalledWith(JSON.stringify({ event: 'runtime_cron_probe_configuration_error' }));
+    expect(error).toHaveBeenCalledWith(
+      JSON.stringify({ event: 'runtime_cron_probe_configuration_error' }),
+    );
   });
 });

@@ -69,7 +69,9 @@ export function getRuntimeReadiness(env: RuntimeEnvironment): HealthResponse {
   const subsystems = {
     runtime,
     queue: hasBindingMethods(env.OPERATIONS_QUEUE, ['send']) ? 'ready' : 'invalid_configuration',
-    r2: hasBindingMethods(env.REPORTS_BUCKET, ['put', 'get', 'delete']) ? 'ready' : 'invalid_configuration',
+    r2: hasBindingMethods(env.REPORTS_BUCKET, ['put', 'get', 'delete'])
+      ? 'ready'
+      : 'invalid_configuration',
     cron: runtime === 'ready' ? 'ready' : 'invalid_configuration',
     supabase: getSupabaseStatus(env),
     bitrix,

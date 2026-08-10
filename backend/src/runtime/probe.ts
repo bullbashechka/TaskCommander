@@ -1,15 +1,25 @@
+import { z } from 'zod';
+
 export const LOCAL_RUNTIME_EPOCH = 1;
 export const RUNTIME_PROBE_KIND = 'runtime.probe';
 
-export interface RuntimeProbeMessage {
-  schemaVersion: typeof LOCAL_RUNTIME_EPOCH;
-  messageId: string;
-  kind: typeof RUNTIME_PROBE_KIND;
-  createdAt: string;
-  payload: {
-    artifactKey: string;
-  };
-}
+export const runtimeProbeMessageSchema = z
+  .object({
+    schemaVersion: z.literal(LOCAL_RUNTIME_EPOCH),
+    messageId: z.string().trim().min(1).max(128),
+    kind: z.literal(RUNTIME_PROBE_KIND),
+    createdAt: z.string().datetime({ offset: true }),
+    payload: z
+      .object({
+        artifactKey: z
+          .string()
+          .regex(new RegExp(`^v${LOCAL_RUNTIME_EPOCH}/runtime-probe/json/.+\\.json$`)),
+      })
+      .strict(),
+  })
+  .strict();
+
+export type RuntimeProbeMessage = z.infer<typeof runtimeProbeMessageSchema>;
 
 export function createRuntimeProbe(): RuntimeProbeMessage {
   const messageId = crypto.randomUUID();
@@ -26,29 +36,7 @@ export function createRuntimeProbe(): RuntimeProbeMessage {
 }
 
 export function isRuntimeProbeMessage(value: unknown): value is RuntimeProbeMessage {
-  if (typeof value !== 'object' || value === null) {
-    return false;
-  }
-
-  const candidate = value as Record<string, unknown>;
-  if (
-    candidate.schemaVersion !== LOCAL_RUNTIME_EPOCH ||
-    candidate.kind !== RUNTIME_PROBE_KIND ||
-    typeof candidate.messageId !== 'string' ||
-    candidate.messageId.length === 0 ||
-    typeof candidate.createdAt !== 'string' ||
-    candidate.createdAt.length === 0 ||
-    typeof candidate.payload !== 'object' ||
-    candidate.payload === null
-  ) {
-    return false;
-  }
-
-  const payload = candidate.payload as Record<string, unknown>;
-  return (
-    typeof payload.artifactKey === 'string' &&
-    payload.artifactKey.startsWith(`v${LOCAL_RUNTIME_EPOCH}/runtime-probe/json/`)
-  );
+  return runtimeProbeMessageSchema.safeParse(value).success;
 }
 
 export async function verifyRuntimeProbeArtifact(

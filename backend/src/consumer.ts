@@ -1,6 +1,7 @@
 import {
   getRequiredR2Binding,
   RuntimeConfigurationError,
+  type RuntimeEnvironment,
 } from './runtime/configuration';
 import { isRuntimeProbeMessage, verifyRuntimeProbeArtifact } from './runtime/probe';
 
@@ -15,7 +16,7 @@ function getSafeSchemaVersion(value: unknown): number | undefined {
 
 export async function consumeRuntimeProbeBatch(
   batch: MessageBatch<unknown>,
-  env: Pick<Env, 'REPORTS_BUCKET'>,
+  env: Pick<RuntimeEnvironment, 'REPORTS_BUCKET'>,
 ): Promise<void> {
   for (const message of batch.messages) {
     if (!isRuntimeProbeMessage(message.body)) {
@@ -33,7 +34,9 @@ export async function consumeRuntimeProbeBatch(
     try {
       await verifyRuntimeProbeArtifact(getRequiredR2Binding(env.REPORTS_BUCKET), message.body);
       message.ack();
-      console.info(JSON.stringify({ event: 'runtime_probe_consumed', messageId: message.body.messageId }));
+      console.info(
+        JSON.stringify({ event: 'runtime_probe_consumed', messageId: message.body.messageId }),
+      );
     } catch (error) {
       console.error(
         JSON.stringify({
