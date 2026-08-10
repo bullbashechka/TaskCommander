@@ -17,6 +17,8 @@ export const taskFieldKindSchema = z.enum([
   'tags',
 ]);
 
+export type TaskFieldKind = z.infer<typeof taskFieldKindSchema>;
+
 export const taskFieldDefinitionSchema = z
   .object({
     id: fieldIdSchema,
@@ -26,6 +28,8 @@ export const taskFieldDefinitionSchema = z
     isEditable: z.boolean(),
   })
   .strict();
+
+export type TaskFieldDefinition = z.infer<typeof taskFieldDefinitionSchema>;
 
 const textFilterSchema = z
   .object({
@@ -107,6 +111,8 @@ export const taskFilterSchema = z.discriminatedUnion('kind', [
   userFilterSchema,
   booleanFilterSchema,
 ]);
+
+export type TaskFilter = z.infer<typeof taskFilterSchema>;
 
 const scalarValueSchema = z.union([z.string().max(4096), z.number(), z.boolean(), bitrixIdSchema]);
 

@@ -4,6 +4,8 @@ import {
   type RuntimeSubsystemStatus,
 } from '@task-commander/contracts';
 
+import { isSupportedBitrixAdapterConfiguration } from '../integrations/bitrix/factory';
+
 export interface RuntimeEnvironment {
   APP_ENV?: string;
   BITRIX_ADAPTER?: string;
@@ -26,7 +28,7 @@ function hasBindingMethods(value: unknown, methods: readonly string[]): boolean 
 }
 
 export function hasLocalRuntimeConfiguration(env: RuntimeEnvironment): boolean {
-  return env.APP_ENV === 'local' && env.BITRIX_ADAPTER === 'mock';
+  return isSupportedBitrixAdapterConfiguration(env);
 }
 
 export function getRequiredR2Binding(value: unknown): R2Bucket {
@@ -65,7 +67,7 @@ function getSupabaseStatus(env: RuntimeEnvironment): RuntimeSubsystemStatus {
 
 export function getRuntimeReadiness(env: RuntimeEnvironment): HealthResponse {
   const runtime = env.APP_ENV === 'local' ? 'ready' : 'invalid_configuration';
-  const bitrix = env.BITRIX_ADAPTER === 'mock' ? 'ready' : 'invalid_configuration';
+  const bitrix = isSupportedBitrixAdapterConfiguration(env) ? 'ready' : 'invalid_configuration';
   const subsystems = {
     runtime,
     queue: hasBindingMethods(env.OPERATIONS_QUEUE, ['send']) ? 'ready' : 'invalid_configuration',
