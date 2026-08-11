@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Apply only `supabase/migrations/20260811000000_task_commander_schema.sql` to the selected remote project.
+- Apply only `supabase/migrations/20260811000000_task_commander_schema.sql` as remote migration `task_commander_schema`.
 - Do not use a PostgreSQL connection string, password, OAuth token, or service-role key in a command, file, test, or log.
 - Do not run `supabase db reset`, seed data, down migrations, or pgTAP tests against the remote project.
 - Do not run Docker in this implementation.
@@ -88,11 +88,11 @@ Run `git diff --check`. Expected: no whitespace errors, no secret values, and Do
 **Interfaces:**
 
 - Consumes: the authenticated Supabase MCP connection and canonical migration SQL.
-- Produces: migration version `20260811000000` in remote history and the corresponding schema objects.
+- Produces: migration `task_commander_schema` in remote history and the corresponding schema objects.
 
 - [ ] **Step 1: Inspect migration history and schema**
 
-Use MCP to list migration history and public-schema tables. Record whether version `20260811000000` is absent or present. Do not execute SQL.
+Use MCP to list migration history and public-schema tables. Record whether migration `task_commander_schema` is absent or present. Do not execute SQL.
 
 - [ ] **Step 2: Apply only the missing migration**
 
@@ -104,7 +104,7 @@ supabase/migrations/20260811000000_task_commander_schema.sql
 
 - [ ] **Step 3: Confirm migration history**
 
-Use MCP to read migration history again. Expected: version `20260811000000` appears exactly once and no migration error is reported.
+Use MCP to read migration history again. Expected: `task_commander_schema` appears exactly once and no migration error is reported.
 
 ### Task 3: Verify the remote schema and complete task 005
 
@@ -121,7 +121,7 @@ Use MCP to read migration history again. Expected: version `20260811000000` appe
 
 - [ ] **Step 1: Inspect required schema objects via MCP**
 
-Confirm tables `app_users`, `saved_filters`, `operation_drafts`, `operations`, `operation_results`, `operation_reports`, and `audit_events`; RLS on each table; foreign keys from results and reports to operations; and the partial unique active-operation index.
+Confirm tables `portal`, `user_settings`, `saved_filter`, `operation_draft`, `bulk_operation`, `task_processing_result`, `protected_task_result`, `report`, `report_artifact`, and `audit_event`; RLS on each table; foreign keys from results and reports to operations; and the partial unique active-operation index.
 
 - [ ] **Step 2: Inspect critical invariant definitions**
 
