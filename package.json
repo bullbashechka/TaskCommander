@@ -26,6 +26,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "bun run --cwd packages/contracts test && bun run --cwd backend test && bun run --cwd webapp test",
+    "test:data:integration": "bun run --cwd backend test -- data-access.integration.test.ts",
     "check": "bun run format:check && bun run lint && bun run typecheck && bun run test",
     "cf-typegen": "bun run --cwd backend cf-typegen"
   },

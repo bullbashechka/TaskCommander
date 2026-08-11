@@ -32,6 +32,24 @@ Worker направляет `/api/*` в Hono. Непосредственное �
 
 Для будущей server-задачи скопируйте `backend/.dev.vars.example` в неотслеживаемый `backend/.dev.vars`, затем вручную внесите HTTPS Project URL, service-role key и точный hostname проекта. Эти значения не коммитятся и не передаются в браузер.
 
+После реализации server-only слоя данных Worker требует `SUPABASE_URL` и
+`SUPABASE_SERVICE_ROLE_KEY`. `LOCAL_SUPABASE_ALLOWED_HOSTS` содержит точный hostname
+разрешённого development-проекта. Значения отсутствуют в `wrangler.jsonc`: там объявлены
+только имена обязательных secret bindings.
+
+Интеграционный тест `backend/test/data-access.integration.test.ts` запускается только если
+в Worker runtime присутствуют оба Supabase secrets. Он создаёт изолированный синтетический
+portal и удаляет свои данные после проверки. Для локального Docker-контура используйте:
+
+```powershell
+bun run db:docker:start
+bun run db:docker:reset
+bun run test:data:integration
+```
+
+Для Docker допустим только allowlisted loopback URL: `http://127.0.0.1:54321` либо
+`http://localhost:54321`. Во всех остальных режимах Supabase URL использует HTTPS.
+
 ## Опциональная Docker-база Supabase
 
 Docker-контур сохранен для будущих open-source контрибьюторов. Supabase CLI установлен как локальная development-зависимость. Все команды этого раздела работают только с локальными контейнерами и не используют `--linked`.

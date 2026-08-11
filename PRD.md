@@ -547,8 +547,6 @@ Task Commander не выполняет:
 
 ### 8.5. Технологический стек и инфраструктура
 
-> **Технический дизайн:** [Task Commander — технический дизайн первого этапа](docs/superpowers/specs/2026-08-06-task-commander-design.md).
-
 1. Клиентское приложение реализуется на React, Vite и TypeScript с TanStack Router, Query, Table и Form; визуальная система — Tailwind CSS v4, Base UI, shadcn/ui и Sonner.
 2. API и BFF реализуются на Hono в Cloudflare Workers. Workers обслуживают API и статические assets клиентского приложения; локальная разработка и deployment выполняются через Wrangler.
 3. Постоянные данные приложения хранятся в Supabase PostgreSQL. Схема, SQL-функции и миграции управляются через Supabase CLI. Supabase Auth, Storage и Edge Functions не используются.

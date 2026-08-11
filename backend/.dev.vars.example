@@ -4,7 +4,8 @@ BITRIX_ADAPTER=mock
 
 # Set all three values only when developing a Supabase-dependent subsystem.
 # For a remote Supabase development project, use its HTTPS Project URL and service-role key.
-# LOCAL_SUPABASE_ALLOWED_HOSTS accepts the exact remote project host, without a protocol.
+# Local Docker may use http://127.0.0.1:54321 or http://localhost:54321 only.
+# LOCAL_SUPABASE_ALLOWED_HOSTS accepts the exact project or loopback host, without a protocol.
 SUPABASE_URL=
 SUPABASE_SERVICE_ROLE_KEY=
 LOCAL_SUPABASE_ALLOWED_HOSTS=
