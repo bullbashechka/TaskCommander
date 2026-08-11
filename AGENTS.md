@@ -29,6 +29,9 @@ The user runs tests and verification commands. Do not execute `bun run test`, `b
 
 ## Task Workflow
 
+Do not implement or modify project files without an explicit implementation command from the user.
+Requests to inspect, discuss, analyze, review, or plan a task authorize read-only work only.
+
 Design work starts with task 11. When task 11 is reached or requested, remind the user that the design phase begins at this task before proceeding.
 
 ## Commit & Pull Request Guidelines

@@ -240,6 +240,22 @@ function mapDraft(row: DatabaseTable<'operation_draft'>): BulkOperationDraft {
 export class TaskCommanderRepositories {
   public constructor(private readonly client: Client) {}
 
+  private async getOwnedOperation(
+    context: DataAccessContext,
+    operationId: string,
+  ): Promise<BulkOperation> {
+    const row = await requireData(
+      this.client
+        .from('bulk_operation')
+        .select('*')
+        .eq('portal_id', context.portalId)
+        .eq('initiator_id', context.actorId)
+        .eq('id', operationId)
+        .maybeSingle(),
+    );
+    return mapOperation(row);
+  }
+
   public async getCurrentUserAccess(context: DataAccessContext): Promise<UserAccess> {
     const row = await requireData(
       this.client
@@ -437,7 +453,7 @@ export class TaskCommanderRepositories {
       markCompleted?: boolean;
     },
   ): Promise<BulkOperation> {
-    const currentOperation = await this.getOperation(context, input.operationId);
+    const currentOperation = await this.getOwnedOperation(context, input.operationId);
     const row = await requireData(
       this.client.rpc('transition_bulk_operation_status', {
         p_portal_id: context.portalId,
@@ -493,7 +509,7 @@ export class TaskCommanderRepositories {
     context: DataAccessContext,
     input: RecordTaskResultInput,
   ): Promise<RecordedTaskResult> {
-    const operation = await this.getOperation(context, input.operationId);
+    const operation = await this.getOwnedOperation(context, input.operationId);
     const protectedResult = input.protectedResult;
     const payload = await requireData(
       this.client.rpc('record_task_processing_result', {

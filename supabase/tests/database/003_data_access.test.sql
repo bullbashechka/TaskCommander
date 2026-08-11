@@ -1,6 +1,6 @@
 begin;
 
-select plan(9);
+select plan(12);
 
 insert into public.portal (id, display_name)
 values ('data-access-test', 'Data access test portal');
@@ -122,6 +122,83 @@ select throws_ok(
   'P0001',
   'TC_TASK_RESULT_CONFLICT',
   'different retry is rejected'
+);
+
+select lives_ok(
+  $$select public.record_task_processing_result(
+    'data-access-test',
+    '00000000-0000-4000-8000-000000000701',
+    '8102',
+    'Second task',
+    'https://example.test/task/8102',
+    'success',
+    array[]::text[],
+    array[]::text[],
+    array[]::text[],
+    null,
+    null,
+    null,
+    false,
+    decode('0304', 'hex'),
+    decode('0b0a09080706050403020100', 'hex'),
+    'key-v2',
+    1,
+    'before-v1',
+    'after-v1'
+  );$$,
+  'stores a protected result'
+);
+
+select lives_ok(
+  $$select public.record_task_processing_result(
+    'data-access-test',
+    '00000000-0000-4000-8000-000000000701',
+    '8102',
+    'Second task',
+    'https://example.test/task/8102',
+    'success',
+    array[]::text[],
+    array[]::text[],
+    array[]::text[],
+    null,
+    null,
+    null,
+    false,
+    decode('0102', 'hex'),
+    decode('000102030405060708090a0b', 'hex'),
+    'key-v1',
+    1,
+    'before-v1',
+    'after-v1'
+  );$$,
+  'logically identical re-encrypted retry returns the existing result'
+);
+
+select throws_ok(
+  $$select public.record_task_processing_result(
+    'data-access-test',
+    '00000000-0000-4000-8000-000000000701',
+    '8102',
+    'Second task',
+    'https://example.test/task/8102',
+    'success',
+    array[]::text[],
+    array[]::text[],
+    array[]::text[],
+    null,
+    null,
+    null,
+    false,
+    decode('0102', 'hex'),
+    decode('000102030405060708090a0b', 'hex'),
+    'key-v1',
+    1,
+    'before-v1',
+    'after-v2'
+  );$$,
+  'P0001',
+  'TC_TASK_RESULT_CONFLICT',
+  'different protected retry is rejected'
 );
 
 select lives_ok(

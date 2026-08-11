@@ -29,6 +29,11 @@ if (integrationEnabled) {
     actorId: secondUserId,
     permissions: ['view_own_reports'],
   });
+  const secondViewAllContext = createDataAccessContext({
+    portalId,
+    actorId: secondUserId,
+    permissions: ['view_all_reports'],
+  });
 
   beforeAll(async () => {
     const { error: portalError } = await client
@@ -113,7 +118,35 @@ if (integrationEnabled) {
       ]),
     ).resolves.toHaveLength(2);
 
-    await expect(repositories.listOperationHistory(secondContext)).resolves.toMatchObject({ items: [] });
+    await expect(repositories.listOperationHistory(secondContext)).resolves.toMatchObject({
+      items: [],
+    });
+    await expect(
+      repositories.getOperation(secondViewAllContext, operation.id),
+    ).resolves.toMatchObject({ id: operation.id });
+    await expect(
+      repositories.transitionOperationStatus(secondViewAllContext, {
+        operationId: operation.id,
+        expectedStatuses: ['launching'],
+        nextStatus: 'running',
+      }),
+    ).rejects.toMatchObject({ code: 'UNAVAILABLE_RECORD' });
+    await expect(
+      repositories.recordTaskResult(secondViewAllContext, {
+        operationId: operation.id,
+        taskId: '9003',
+        title: 'Unauthorized result',
+        taskUrl: 'https://example.test/task/9003',
+        outcome: 'success',
+        requestedFieldIds: [],
+        appliedFieldIds: [],
+        failedFieldIds: [],
+        reasonCode: null,
+        reasonMessage: null,
+        correlationId: null,
+        canRetry: false,
+      }),
+    ).rejects.toMatchObject({ code: 'UNAVAILABLE_RECORD' });
     await expect(repositories.listTaskResults(firstContext, operation.id)).resolves.toHaveLength(2);
     await expect(repositories.getOperation(firstContext, operation.id)).resolves.toMatchObject({
       summary: expect.objectContaining({ successful: 1, failed: 1 }),
