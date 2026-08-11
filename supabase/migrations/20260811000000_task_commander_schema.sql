@@ -56,7 +56,7 @@ create table public.user_settings (
 );
 
 create table public.saved_filter (
-  id uuid primary key default extensions.gen_random_uuid(),
+  id uuid primary key default gen_random_uuid(),
   portal_id text not null,
   owner_id text not null,
   name text not null,
@@ -80,7 +80,7 @@ create table public.saved_filter (
 );
 
 create table public.operation_draft (
-  id uuid primary key default extensions.gen_random_uuid(),
+  id uuid primary key default gen_random_uuid(),
   portal_id text not null,
   owner_id text not null,
   revision integer not null default 1,
@@ -117,7 +117,7 @@ create table public.operation_draft (
 );
 
 create table public.bulk_operation (
-  id uuid primary key default extensions.gen_random_uuid(),
+  id uuid primary key default gen_random_uuid(),
   portal_id text not null,
   operation_type text not null,
   status text not null default 'launching',
@@ -219,7 +219,7 @@ create unique index bulk_operation_one_active_per_initiator
   where status in ('launching', 'running');
 
 create table public.task_processing_result (
-  id uuid primary key default extensions.gen_random_uuid(),
+  id uuid primary key default gen_random_uuid(),
   operation_id uuid not null,
   task_id text not null,
   task_title text,
@@ -302,7 +302,7 @@ create table public.protected_task_result (
 );
 
 create table public.report (
-  id uuid primary key default extensions.gen_random_uuid(),
+  id uuid primary key default gen_random_uuid(),
   operation_id uuid not null,
   storage_status text not null default 'active',
   active_until timestamptz not null,
@@ -321,7 +321,7 @@ create table public.report (
 );
 
 create table public.report_artifact (
-  id uuid primary key default extensions.gen_random_uuid(),
+  id uuid primary key default gen_random_uuid(),
   report_id uuid not null,
   format text not null,
   status text not null default 'pending',
@@ -359,7 +359,7 @@ create table public.report_artifact (
 );
 
 create table public.audit_event (
-  id uuid primary key default extensions.gen_random_uuid(),
+  id uuid primary key default gen_random_uuid(),
   portal_id text not null,
   occurred_at timestamptz not null default now(),
   action text not null,
