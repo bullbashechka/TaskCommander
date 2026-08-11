@@ -219,8 +219,17 @@ select lives_ok(
   'one failed artifact does not prevent another report format'
 );
 
-insert into public.audit_event (portal_id, action, outcome)
-values ('test-constraints', 'operation_created', 'success');
+insert into public.audit_event (
+  portal_id, action, actor_type, actor_id, actor_display_name, actor_source,
+  subject_type, subject_id, subject_display_name, related_objects, outcome,
+  correlation_id, event_key, details
+)
+values (
+  'test-constraints', 'operation_create', 'user', '2001', 'Первый оператор', null,
+  'operation_attempt', 'schema-test', 'Попытка создания операции', '[]'::jsonb, 'success',
+  'TC-123e4567-e89b-42d3-a456-426614174003', repeat('c', 64),
+  '{"kind":"operation","reasonCode":null,"summary":null}'::jsonb
+);
 
 select throws_ok(
   $$update public.audit_event set outcome = 'failure' where portal_id = 'test-constraints';$$,

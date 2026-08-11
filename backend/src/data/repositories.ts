@@ -1,6 +1,6 @@
 import {
-  auditActionSchema,
-  auditEventSchema,
+  parseAuditEventForRead,
+  type AuditEvent,
   bulkOperationDraftSchema,
   bulkOperationSchema,
   operationStatusSchema,
@@ -27,7 +27,6 @@ type Client = SupabaseClient<Database>;
 type OperationRow = DatabaseTable<'bulk_operation'>;
 type TaskResultRow = DatabaseTable<'task_processing_result'>;
 type AuditRow = DatabaseTable<'audit_event'>;
-type AuditEvent = z.infer<typeof auditEventSchema>;
 
 const recordTaskResultResponseSchema = z
   .object({
@@ -134,10 +133,7 @@ export interface CreateOperationInput {
   selectedTaskIds: string[];
   changes: Json;
   preflightSnapshot: Json;
-  summary: Pick<
-    BulkOperation['summary'],
-    'selected' | 'eligible' | 'excluded' | 'unchanged'
-  >;
+  summary: Pick<BulkOperation['summary'], 'selected' | 'eligible' | 'excluded' | 'unchanged'>;
 }
 
 function scopeKey(context: DataAccessContext, mode: 'own' | 'all' | 'audit'): string {
@@ -201,14 +197,25 @@ function mapTaskOutcome(row: TaskResultRow): TaskOutcome {
 }
 
 function mapAuditEvent(row: AuditRow): AuditEvent {
-  return auditEventSchema.parse({
+  return parseAuditEventForRead({
     id: row.id,
+    schemaVersion: row.schema_version,
     occurredAt: row.occurred_at,
-    action: auditActionSchema.parse(row.action),
-    actorId: row.actor_id,
-    subjectId: row.subject_id,
+    recordedAt: row.recorded_at,
+    action: row.action,
+    actor:
+      row.actor_type === 'user'
+        ? { type: 'user', id: row.actor_id, displayName: row.actor_display_name }
+        : { type: 'system', source: row.actor_source, displayName: row.actor_display_name },
+    subject: {
+      type: row.subject_type,
+      id: row.subject_id,
+      displayName: row.subject_display_name,
+    },
+    relatedObjects: row.related_objects,
     outcome: row.outcome,
     correlationId: row.correlation_id,
+    details: row.details,
   });
 }
 
@@ -427,7 +434,10 @@ export class TaskCommanderRepositories {
     return mapOperation(row);
   }
 
-  public async getOperation(context: DataAccessContext, operationId: string): Promise<BulkOperation> {
+  public async getOperation(
+    context: DataAccessContext,
+    operationId: string,
+  ): Promise<BulkOperation> {
     let query = this.client
       .from('bulk_operation')
       .select('*')

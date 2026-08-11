@@ -1,5 +1,9 @@
 drop trigger if exists audit_event_prevent_delete on public.audit_event;
 drop trigger if exists audit_event_prevent_update on public.audit_event;
+drop function if exists public.purge_expired_audit_events(text, uuid);
+drop function if exists public.append_audit_event(
+  text, timestamptz, text, text, text, text, text, text, text, text, jsonb, text, text, text, text, jsonb
+);
 drop trigger if exists report_artifact_set_updated_at on public.report_artifact;
 drop trigger if exists report_set_updated_at on public.report;
 drop trigger if exists task_processing_result_prevent_identity_change on public.task_processing_result;

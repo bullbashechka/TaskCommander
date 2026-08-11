@@ -1,6 +1,6 @@
 begin;
 
-select plan(15);
+select plan(17);
 
 \ir ../rollback/20260811000000_task_commander_schema.down.sql
 
@@ -35,6 +35,8 @@ select hasnt_function(
   'prevent_audit_event_mutation',
   'audit immutability helper is removed by rollback'
 );
+select hasnt_function('public', 'append_audit_event', 'audit append helper is removed by rollback');
+select hasnt_function('public', 'purge_expired_audit_events', 'audit retention helper is removed by rollback');
 
 select * from finish();
 

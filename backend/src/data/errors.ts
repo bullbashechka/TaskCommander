@@ -1,9 +1,5 @@
 export type DataAccessErrorCode =
-  | 'CONFIGURATION'
-  | 'UNAVAILABLE'
-  | 'CONFLICT'
-  | 'UNAVAILABLE_RECORD'
-  | 'INTEGRITY';
+  'CONFIGURATION' | 'UNAVAILABLE' | 'CONFLICT' | 'UNAVAILABLE_RECORD' | 'INTEGRITY';
 
 export class DataAccessError extends Error {
   public constructor(
@@ -24,16 +20,15 @@ export function toDataAccessError(error: unknown): DataAccessError {
     const code = typeof candidate.code === 'string' ? candidate.code : '';
     const message = typeof candidate.message === 'string' ? candidate.message : '';
 
+    if (code === 'P0001' && message.startsWith('TC_AUDIT_EVENT_CONFLICT')) {
+      return new DataAccessError('INTEGRITY', false);
+    }
+
     if (code === 'P0001' && message.startsWith('TC_OPERATION_UNAVAILABLE')) {
       return new DataAccessError('UNAVAILABLE_RECORD', false);
     }
 
-    if (
-      code === 'P0001' ||
-      code === '23505' ||
-      code === '40001' ||
-      code === 'PGRST116'
-    ) {
+    if (code === 'P0001' || code === '23505' || code === '40001' || code === 'PGRST116') {
       return new DataAccessError('CONFLICT', false);
     }
 

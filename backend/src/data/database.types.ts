@@ -1,10 +1,4 @@
-export type Json =
-  | string
-  | number
-  | boolean
-  | null
-  | { [key: string]: Json | undefined }
-  | Json[];
+export type Json = string | number | boolean | null | { [key: string]: Json | undefined } | Json[];
 
 type TableDefinition<Row extends Record<string, unknown>> = {
   Row: Row;
@@ -138,14 +132,21 @@ type AuditEventRow = {
   id: string;
   portal_id: string;
   occurred_at: string;
+  recorded_at: string;
+  schema_version: number;
   action: string;
+  actor_type: string;
   actor_id: string | null;
-  actor_display_name: string | null;
-  subject_type: string | null;
-  subject_id: string | null;
+  actor_display_name: string;
+  actor_source: string | null;
+  subject_type: string;
+  subject_id: string;
+  subject_display_name: string;
+  related_objects: Json;
   outcome: string;
-  correlation_id: string | null;
-  metadata: Json;
+  correlation_id: string;
+  event_key: string;
+  details: Json;
 };
 
 export interface Database {
@@ -211,6 +212,34 @@ export interface Database {
           p_protected_payload_version?: number | null;
           p_before_version?: string | null;
           p_after_version?: string | null;
+        };
+        Returns: Json;
+      };
+      append_audit_event: {
+        Args: {
+          p_portal_id: string;
+          p_occurred_at: string;
+          p_action: string;
+          p_actor_type: string;
+          p_actor_id: string | null;
+          p_actor_display_name: string;
+          p_actor_source: string | null;
+          p_subject_type: string;
+          p_subject_id: string;
+          p_subject_display_name: string;
+          p_related_objects: Json;
+          p_outcome: string;
+          p_correlation_id: string;
+          p_deduplication_scope: string;
+          p_event_slot: string;
+          p_details: Json;
+        };
+        Returns: Json;
+      };
+      purge_expired_audit_events: {
+        Args: {
+          p_correlation_id: string;
+          p_run_id: string;
         };
         Returns: Json;
       };

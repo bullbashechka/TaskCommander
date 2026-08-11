@@ -153,37 +153,6 @@ export const reportTaskEntrySchema = z
   })
   .strict();
 
-export const auditActionSchema = z.enum([
-  'operation_created',
-  'operation_started',
-  'operation_completed',
-  'operation_cancelled',
-  'operation_interrupted',
-  'operation_retried',
-  'operation_restored',
-  'access_granted',
-  'access_updated',
-  'access_revoked',
-  'allowed_fields_updated',
-  'report_exported',
-  'report_downloaded',
-  'access_auto_revoked',
-  'report_generation_failed',
-  'system_error',
-]);
-
-export const auditEventSchema = z
-  .object({
-    id: z.string().uuid(),
-    occurredAt: isoDateTimeSchema,
-    action: auditActionSchema,
-    actorId: bitrixIdSchema.nullable(),
-    subjectId: z.string().trim().min(1).max(256).nullable(),
-    outcome: z.enum(['success', 'failure']),
-    correlationId: z.string().trim().min(1).max(128).nullable(),
-  })
-  .strict();
-
 export type BulkOperationDraft = z.infer<typeof bulkOperationDraftSchema>;
 export type BulkOperation = z.infer<typeof bulkOperationSchema>;
 export type TaskOutcome = z.infer<typeof taskOutcomeSchema>;
