@@ -3,7 +3,8 @@ APP_ENV=local
 BITRIX_ADAPTER=mock
 
 # Set all three values only when developing a Supabase-dependent subsystem.
-# LOCAL_SUPABASE_ALLOWED_HOSTS accepts comma-separated local development hosts.
+# For a local Supabase CLI stack, copy the API URL and service-role key from `bun run db:start`.
+# LOCAL_SUPABASE_ALLOWED_HOSTS accepts comma-separated local development hosts, such as 127.0.0.1.
 SUPABASE_URL=
 SUPABASE_SERVICE_ROLE_KEY=
 LOCAL_SUPABASE_ALLOWED_HOSTS=
