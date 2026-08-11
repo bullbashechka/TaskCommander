@@ -1,7 +1,31 @@
 {
   "$schema": "../node_modules/wrangler/config-schema.json",
-  "name": "task-commander-test",
+  "name": "task-commander-runtime-test-v1",
   "main": "./src/index.ts",
   "compatibility_date": "2025-12-17",
   "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "APP_ENV": "local",
+    "BITRIX_ADAPTER": "mock",
+    "LOCAL_SUPABASE_ALLOWED_HOSTS": "",
+  },
+  "queues": {
+    "producers": [
+      {
+        "binding": "OPERATIONS_QUEUE",
+        "queue": "task-commander-test-operations-v1",
+        "remote": false,
+      },
+    ],
+  },
+  "r2_buckets": [
+    {
+      "binding": "REPORTS_BUCKET",
+      "bucket_name": "task-commander-test-reports-v1",
+      "remote": false,
+    },
+  ],
+  "triggers": {
+    "crons": ["*/5 * * * *"],
+  },
 }

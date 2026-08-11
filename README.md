@@ -17,6 +17,10 @@ bun run dev
 
 Откройте адрес, который выведет Vite. Приложение и Hono API работают на одном origin. Стартовая страница подтверждает ответ `GET /api/health`.
 
+Vite поднимает локальный API Worker и Queue consumer в одном Miniflare runtime. Queue, DLQ и R2 не обращаются к удалённым Cloudflare ресурсам; состояние сохраняется в `.wrangler/state/task-commander-local`. Для очистки только этого состояния используйте `bun run dev:reset`.
+
+Локальные Worker secrets и optional Supabase configuration хранятся в `backend/.dev.vars`; для начала скопируйте `backend/.dev.vars.example`.
+
 ## Проверки
 
 ```powershell

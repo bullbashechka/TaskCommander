@@ -9,8 +9,10 @@
     "cf-typegen": "wrangler types ./worker-configuration.d.ts --config wrangler.jsonc"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.112.3",
     "@task-commander/contracts": "workspace:*",
-    "hono": "^4.0.0"
+    "hono": "^4.0.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.11.0",

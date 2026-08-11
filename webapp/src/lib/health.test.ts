@@ -11,14 +11,41 @@ describe('fetchHealth', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ status: 'ok', service: 'task-commander-api' }), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        }),
+        new Response(
+          JSON.stringify({
+            status: 'ok',
+            service: 'task-commander-api',
+            readiness: 'degraded',
+            subsystems: {
+              runtime: 'ready',
+              queue: 'ready',
+              r2: 'ready',
+              cron: 'ready',
+              supabase: 'not_configured',
+              bitrix: 'ready',
+            },
+          }),
+          {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          },
+        ),
       ),
     );
 
-    await expect(fetchHealth()).resolves.toEqual({ status: 'ok', service: 'task-commander-api' });
+    await expect(fetchHealth()).resolves.toEqual({
+      status: 'ok',
+      service: 'task-commander-api',
+      readiness: 'degraded',
+      subsystems: {
+        runtime: 'ready',
+        queue: 'ready',
+        r2: 'ready',
+        cron: 'ready',
+        supabase: 'not_configured',
+        bitrix: 'ready',
+      },
+    });
   });
 
   it('rejects an invalid API response', async () => {

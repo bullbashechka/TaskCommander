@@ -1,0 +1,10 @@
+# Local-only Worker configuration. Do not commit backend/.dev.vars with real values.
+APP_ENV=local
+BITRIX_ADAPTER=mock
+
+# Set all three values only when developing a Supabase-dependent subsystem.
+# For a remote Supabase development project, use its HTTPS Project URL and service-role key.
+# LOCAL_SUPABASE_ALLOWED_HOSTS accepts the exact project host, without a protocol.
+SUPABASE_URL=
+SUPABASE_SERVICE_ROLE_KEY=
+LOCAL_SUPABASE_ALLOWED_HOSTS=

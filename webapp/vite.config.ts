@@ -17,6 +17,11 @@ export default defineConfig(({ mode }) => ({
       : [
           cloudflare({
             configPath: resolve(directory, '../backend/wrangler.jsonc'),
+            auxiliaryWorkers: [
+              { configPath: resolve(directory, '../backend/wrangler.consumer.jsonc') },
+            ],
+            persistState: { path: resolve(directory, '../.wrangler/state/task-commander-local') },
+            remoteBindings: false,
           }),
         ]),
   ],

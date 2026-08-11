@@ -1,0 +1,28 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "task-commander-local-consumer-v1",
+  "main": "./src/consumer.ts",
+  "compatibility_date": "2026-08-06",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "APP_ENV": "local",
+    "BITRIX_ADAPTER": "mock",
+    "LOCAL_SUPABASE_ALLOWED_HOSTS": "",
+  },
+  "queues": {
+    "consumers": [
+      {
+        "queue": "task-commander-local-operations-v1",
+        "max_retries": 3,
+        "dead_letter_queue": "task-commander-local-operations-dlq-v1",
+      },
+    ],
+  },
+  "r2_buckets": [
+    {
+      "binding": "REPORTS_BUCKET",
+      "bucket_name": "task-commander-local-reports-v1",
+      "remote": false,
+    },
+  ],
+}
