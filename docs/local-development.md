@@ -38,17 +38,9 @@ Worker направляет `/api/*` в Hono. Непосредственное �
 только имена обязательных secret bindings.
 
 Интеграционный тест `backend/test/data-access.integration.test.ts` запускается только если
-в Worker runtime присутствуют оба Supabase secrets. Он создаёт изолированный синтетический
-portal и удаляет свои данные после проверки. Для локального Docker-контура используйте:
-
-```powershell
-bun run db:docker:start
-bun run db:docker:reset
-bun run test:data:integration
-```
-
-Для Docker допустим только allowlisted loopback URL: `http://127.0.0.1:54321` либо
-`http://localhost:54321`. Во всех остальных режимах Supabase URL использует HTTPS.
+в Worker runtime присутствуют оба Supabase secrets отдельного development-проекта. Он создаёт
+изолированный синтетический portal и удаляет свои данные после проверки. Supabase URL всегда
+использует HTTPS.
 
 ## Опциональная Docker-база Supabase
 

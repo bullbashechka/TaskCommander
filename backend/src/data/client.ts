@@ -23,18 +23,6 @@ function isAllowedLocalSupabaseHost(env: RuntimeEnvironment, url: URL): boolean 
   return configuredHosts.some((host) => host.trim().toLowerCase() === url.hostname.toLowerCase());
 }
 
-function isAllowedProtocol(env: RuntimeEnvironment, url: URL): boolean {
-  if (url.protocol === 'https:') {
-    return true;
-  }
-
-  if (env.APP_ENV !== 'local' || url.protocol !== 'http:') {
-    return false;
-  }
-
-  return ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname.toLowerCase());
-}
-
 export function createServerSupabaseClient(
   env: RuntimeEnvironment,
   requestFetch: SupabaseFetch = fetch,
@@ -49,7 +37,7 @@ export function createServerSupabaseClient(
     throw new DataAccessError('CONFIGURATION', false);
   }
 
-  if (!isAllowedProtocol(env, parsedUrl) || !isAllowedLocalSupabaseHost(env, parsedUrl)) {
+  if (parsedUrl.protocol !== 'https:' || !isAllowedLocalSupabaseHost(env, parsedUrl)) {
     throw new DataAccessError('CONFIGURATION', false);
   }
 

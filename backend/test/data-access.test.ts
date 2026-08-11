@@ -72,17 +72,7 @@ describe('data access boundaries', () => {
     ).toThrow(DataAccessError);
   });
 
-  it('allows HTTP only for an allowlisted local Docker endpoint', () => {
-    expect(() =>
-      createServerSupabaseClient({
-        APP_ENV: 'local',
-        BITRIX_ADAPTER: 'mock',
-        SUPABASE_URL: 'http://127.0.0.1:54321',
-        SUPABASE_SERVICE_ROLE_KEY: 'test-only-key',
-        LOCAL_SUPABASE_ALLOWED_HOSTS: '127.0.0.1',
-      }),
-    ).not.toThrow();
-
+  it('rejects an HTTP Supabase endpoint even when allowlisted', () => {
     expect(() =>
       createServerSupabaseClient({
         APP_ENV: 'local',
