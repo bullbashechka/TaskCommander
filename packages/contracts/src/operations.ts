@@ -32,11 +32,13 @@ export const taskOutcomeStatusSchema = z.enum([
 ]);
 
 export const operationStatusSchema = z.enum([
+  'launching',
   'running',
   'completed',
   'completed_with_errors',
   'cancelled',
   'interrupted',
+  'launch_failed',
 ]);
 
 export const operationTypeSchema = z.enum(['bulk_change', 'retry', 'restore']);
@@ -121,7 +123,14 @@ export const bulkOperationSchema = z
   })
   .strict();
 
-export const reportArtifactStatusSchema = z.enum(['pending', 'ready', 'failed']);
+export const reportArtifactStatusSchema = z.enum([
+  'pending',
+  'generating',
+  'awaiting_upload',
+  'ready',
+  'failed',
+  'unavailable',
+]);
 
 export const reportArtifactSchema = z
   .object({
