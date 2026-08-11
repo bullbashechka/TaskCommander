@@ -26,20 +26,26 @@ Worker направляет `/api/*` в Hono. Непосредственное �
 
 Остановите `bun run dev` перед `bun run dev:reset`: Miniflare удерживает state-каталог, пока запущен. Reset не принимает путь от пользователя и удаляет ровно указанный каталог state. Повторный вызов при отсутствии каталога — успешный no-op. Команда не удаляет `backend/.dev.vars`, весь `.wrangler`, соседние state-каталоги или файлы проекта.
 
-## Локальная база Supabase
+## Supabase: удаленный режим по умолчанию
 
-Для миграций и SQL-проверок нужен Docker. Supabase CLI установлен как локальная development-зависимость, поэтому глобальная установка не требуется. Все команды этого раздела работают только с локальными контейнерами и не используют `--linked`.
+Текущая разработка использует удаленный Supabase и не требует Docker. Миграции применяются только через авторизованный Supabase MCP по инструкции в [supabase-remote-development.md](supabase-remote-development.md). На удаленном проекте запрещено запускать seed, `db reset`, down-миграции и pgTAP-тесты.
+
+Для будущей server-задачи скопируйте `backend/.dev.vars.example` в неотслеживаемый `backend/.dev.vars`, затем вручную внесите HTTPS Project URL, service-role key и точный hostname проекта. Эти значения не коммитятся и не передаются в браузер.
+
+## Опциональная Docker-база Supabase
+
+Docker-контур сохранен для будущих open-source контрибьюторов. Supabase CLI установлен как локальная development-зависимость. Все команды этого раздела работают только с локальными контейнерами и не используют `--linked`.
 
 ```powershell
-bun run db:start
-bun run db:reset
-bun run db:test
-bun run db:lint
+bun run db:docker:start
+bun run db:docker:reset
+bun run db:docker:test
+bun run db:docker:lint
 ```
 
-`db:reset` удаляет и заново создаёт только локальную базу Supabase, применяет миграции и затем development seed. `db:test` запускает pgTAP-проверки из `supabase/tests/database`; каждая проверка выполняется в транзакции. `db:lint` проверяет схему локальной базы. После работы остановите контейнеры командой `bun run db:stop`.
+`db:docker:reset` удаляет и заново создаёт только локальную базу Supabase, применяет миграции и затем development seed. `db:docker:test` запускает pgTAP-проверки из `supabase/tests/database`; каждая проверка выполняется в транзакции. `db:docker:lint` проверяет схему локальной базы. После работы остановите контейнеры командой `bun run db:docker:stop`.
 
-Rollback-файлы в `supabase/tests/rollback` не являются production-миграциями. Они подключаются только в pgTAP-тесте и откатываются вместе с его транзакцией. Запрещено запускать их вручную на linked, staging или production базе.
+Rollback-файлы в `supabase/tests/rollback` не являются production-миграциями. Они подключаются только в pgTAP-тесте и откатываются вместе с его транзакцией. Запрещено запускать их вручную на удаленной, staging или production базе.
 
 ## Секреты
 
