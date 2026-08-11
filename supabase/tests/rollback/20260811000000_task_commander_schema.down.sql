@@ -1,5 +1,20 @@
 drop trigger if exists audit_event_prevent_delete on public.audit_event;
 drop trigger if exists audit_event_prevent_update on public.audit_event;
+drop trigger if exists bulk_operation_prevent_status_bypass on public.bulk_operation;
+drop function if exists public.fail_bulk_operation_launch(text, uuid, text);
+drop function if exists public.finalize_bulk_operation(text, uuid, text);
+drop function if exists public.request_bulk_operation_stop(text, uuid, text, text, text, text);
+drop function if exists public.start_bulk_operation(text, uuid, text);
+drop function if exists public.create_bulk_operation_idempotent(
+  text, text, text, text, uuid, text, jsonb, text[], jsonb, jsonb, integer, integer, integer,
+  integer, text, jsonb
+);
+drop function if exists public.append_operation_state_error(text, uuid, text, text);
+drop function if exists public.prevent_bulk_operation_status_bypass();
+drop function if exists public.set_bulk_operation_state_machine_context();
+drop function if exists public.operation_request_fingerprint(
+  text, uuid, jsonb, text[], jsonb, jsonb, integer, integer, integer, integer
+);
 drop function if exists public.purge_expired_audit_events(text, uuid);
 drop function if exists public.append_audit_event(
   text, timestamptz, text, text, text, text, text, text, text, text, jsonb, text, text, text, text, jsonb

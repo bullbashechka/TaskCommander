@@ -31,7 +31,9 @@ type AuditRow = DatabaseTable<'audit_event'>;
 const recordTaskResultResponseSchema = z
   .object({
     inserted: z.boolean(),
-    result: z.record(z.unknown()),
+    rejected: z.boolean().optional(),
+    reasonCode: z.string().trim().min(1).max(128).optional(),
+    result: z.record(z.unknown()).optional(),
     summary: z
       .object({
         successful: z.number().int().nonnegative(),
@@ -40,7 +42,16 @@ const recordTaskResultResponseSchema = z
         partiallyApplied: z.number().int().nonnegative(),
         notProcessed: z.number().int().nonnegative(),
       })
-      .strict(),
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+const operationCommandResponseSchema = z
+  .object({
+    disposition: z.enum(['created', 'existing', 'active_operation', 'applied', 'already_applied', 'rejected']),
+    operation: z.record(z.unknown()).optional(),
+    reasonCode: z.string().trim().min(1).max(128).optional(),
   })
   .strict();
 
@@ -134,6 +145,28 @@ export interface CreateOperationInput {
   changes: Json;
   preflightSnapshot: Json;
   summary: Pick<BulkOperation['summary'], 'selected' | 'eligible' | 'excluded' | 'unchanged'>;
+  correlationId: string;
+  initialResults?: InitialTaskResult[];
+}
+
+export interface InitialTaskResult {
+  taskId: string;
+  title: string | null;
+  taskUrl: string | null;
+  outcome: 'excluded_by_preflight' | 'no_change';
+  requestedFieldIds: string[];
+  reasonCode: string | null;
+  reasonMessage: string | null;
+}
+
+export interface CreatedOperation {
+  disposition: 'created' | 'existing' | 'active_operation';
+  operation: BulkOperation;
+}
+
+export interface OperationCommandResult {
+  disposition: 'applied' | 'already_applied';
+  operation: BulkOperation;
 }
 
 function scopeKey(context: DataAccessContext, mode: 'own' | 'all' | 'audit'): string {
@@ -167,6 +200,9 @@ function mapOperation(row: OperationRow): BulkOperation {
     createdAt: row.created_at,
     startedAt: row.started_at,
     completedAt: row.completed_at,
+    cancelRequestedAt: row.cancel_requested_at,
+    interruptionRequestedAt: row.interruption_requested_at,
+    interruptionReasonCode: row.interruption_reason_code,
     summary: {
       selected: row.selected_count,
       eligible: row.eligible_count,
@@ -179,6 +215,29 @@ function mapOperation(row: OperationRow): BulkOperation {
       notProcessed: row.not_processed_count,
     },
   });
+}
+
+function toOperationCommandError(reasonCode: string | undefined): DataAccessError {
+  if (reasonCode === 'IDEMPOTENCY_PAYLOAD_MISMATCH') {
+    return new DataAccessError('IDEMPOTENCY_MISMATCH', false);
+  }
+  if (reasonCode === 'OPERATION_UNAVAILABLE') {
+    return new DataAccessError('UNAVAILABLE_RECORD', false);
+  }
+  return new DataAccessError('INVALID_OPERATION_STATE', false);
+}
+
+function parseOperationCommand(payload: unknown): {
+  disposition: z.infer<typeof operationCommandResponseSchema>['disposition'];
+  operation?: BulkOperation;
+  reasonCode?: string;
+} {
+  const parsed = operationCommandResponseSchema.parse(payload);
+  return {
+    disposition: parsed.disposition,
+    operation: parsed.operation ? mapOperation(parsed.operation as OperationRow) : undefined,
+    reasonCode: parsed.reasonCode,
+  };
 }
 
 function mapTaskOutcome(row: TaskResultRow): TaskOutcome {
@@ -408,30 +467,43 @@ export class TaskCommanderRepositories {
   public async createOperation(
     context: DataAccessContext,
     input: CreateOperationInput,
-  ): Promise<BulkOperation> {
-    const row = await requireData(
-      this.client
-        .from('bulk_operation')
-        .insert({
-          portal_id: context.portalId,
-          operation_type: input.type,
-          initiator_id: context.actorId,
-          initiator_display_name: input.initiatorDisplayName,
-          source_operation_id: input.sourceOperationId,
-          idempotency_key: input.idempotencyKey,
-          filter_snapshot: input.filterSnapshot,
-          selected_task_ids: input.selectedTaskIds,
-          changes: input.changes,
-          preflight_snapshot: input.preflightSnapshot,
-          selected_count: input.summary.selected,
-          eligible_count: input.summary.eligible,
-          excluded_count: input.summary.excluded,
-          unchanged_count: input.summary.unchanged,
-        })
-        .select('*')
-        .single(),
+  ): Promise<CreatedOperation> {
+    const payload = await requireData(
+      this.client.rpc('create_bulk_operation_idempotent', {
+        p_portal_id: context.portalId,
+        p_operation_type: input.type,
+        p_initiator_id: context.actorId,
+        p_initiator_display_name: input.initiatorDisplayName,
+        p_source_operation_id: input.sourceOperationId,
+        p_idempotency_key: input.idempotencyKey,
+        p_filter_snapshot: input.filterSnapshot,
+        p_selected_task_ids: input.selectedTaskIds,
+        p_changes: input.changes,
+        p_preflight_snapshot: input.preflightSnapshot,
+        p_selected_count: input.summary.selected,
+        p_eligible_count: input.summary.eligible,
+        p_excluded_count: input.summary.excluded,
+        p_unchanged_count: input.summary.unchanged,
+        p_correlation_id: input.correlationId,
+        p_initial_results: (input.initialResults ?? []).map((result) => ({
+          taskId: result.taskId,
+          title: result.title,
+          taskUrl: result.taskUrl,
+          outcome: result.outcome,
+          requestedFieldIds: result.requestedFieldIds,
+          reasonCode: result.reasonCode,
+          reasonMessage: result.reasonMessage,
+        })) as Json,
+      }),
     );
-    return mapOperation(row);
+    const result = parseOperationCommand(payload);
+    if (result.disposition === 'rejected' || !result.operation) {
+      throw toOperationCommandError(result.reasonCode);
+    }
+    return {
+      disposition: result.disposition as CreatedOperation['disposition'],
+      operation: result.operation,
+    };
   }
 
   public async getOperation(
@@ -452,30 +524,98 @@ export class TaskCommanderRepositories {
     return mapOperation(row);
   }
 
-  public async transitionOperationStatus(
+  public async startOperation(
+    context: DataAccessContext,
+    input: { operationId: string; correlationId: string },
+  ): Promise<OperationCommandResult> {
+    const currentOperation = await this.getOwnedOperation(context, input.operationId);
+    const payload = await requireData(
+      this.client.rpc('start_bulk_operation', {
+        p_portal_id: context.portalId,
+        p_operation_id: currentOperation.id,
+        p_correlation_id: input.correlationId,
+      }),
+    );
+    return this.resolveOperationCommand(payload);
+  }
+
+  public async requestOperationCancellation(
+    context: DataAccessContext,
+    input: { operationId: string; correlationId: string },
+  ): Promise<OperationCommandResult> {
+    return this.requestOperationStop(context, { ...input, kind: 'cancel', reasonCode: null, reasonMessage: null });
+  }
+
+  public async requestOperationInterruption(
+    context: DataAccessContext,
+    input: { operationId: string; correlationId: string; reasonCode: string; reasonMessage: string },
+  ): Promise<OperationCommandResult> {
+    return this.requestOperationStop(context, { ...input, kind: 'interrupt' });
+  }
+
+  public async finalizeOperation(
+    context: DataAccessContext,
+    input: { operationId: string; correlationId: string },
+  ): Promise<OperationCommandResult> {
+    const operation = await this.getOwnedOperation(context, input.operationId);
+    const payload = await requireData(
+      this.client.rpc('finalize_bulk_operation', {
+        p_portal_id: context.portalId,
+        p_operation_id: operation.id,
+        p_correlation_id: input.correlationId,
+      }),
+    );
+    return this.resolveOperationCommand(payload);
+  }
+
+  public async failOperationLaunch(
+    context: DataAccessContext,
+    input: { operationId: string; correlationId: string },
+  ): Promise<OperationCommandResult> {
+    const operation = await this.getOwnedOperation(context, input.operationId);
+    const payload = await requireData(
+      this.client.rpc('fail_bulk_operation_launch', {
+        p_portal_id: context.portalId,
+        p_operation_id: operation.id,
+        p_correlation_id: input.correlationId,
+      }),
+    );
+    return this.resolveOperationCommand(payload);
+  }
+
+  private async requestOperationStop(
     context: DataAccessContext,
     input: {
       operationId: string;
-      expectedStatuses: BulkOperation['status'][];
-      nextStatus: BulkOperation['status'];
-      markStarted?: boolean;
-      touchProgress?: boolean;
-      markCompleted?: boolean;
+      correlationId: string;
+      kind: 'cancel' | 'interrupt';
+      reasonCode: string | null;
+      reasonMessage: string | null;
     },
-  ): Promise<BulkOperation> {
-    const currentOperation = await this.getOwnedOperation(context, input.operationId);
-    const row = await requireData(
-      this.client.rpc('transition_bulk_operation_status', {
+  ): Promise<OperationCommandResult> {
+    const operation = await this.getOwnedOperation(context, input.operationId);
+    const payload = await requireData(
+      this.client.rpc('request_bulk_operation_stop', {
         p_portal_id: context.portalId,
-        p_operation_id: currentOperation.id,
-        p_expected_statuses: input.expectedStatuses,
-        p_next_status: input.nextStatus,
-        p_mark_started: input.markStarted ?? false,
-        p_touch_progress: input.touchProgress ?? false,
-        p_mark_completed: input.markCompleted ?? false,
+        p_operation_id: operation.id,
+        p_stop_kind: input.kind,
+        p_reason_code: input.reasonCode,
+        p_reason_message: input.reasonMessage,
+        p_correlation_id: input.correlationId,
       }),
     );
-    return mapOperation(row);
+    return this.resolveOperationCommand(payload);
+  }
+
+  private resolveOperationCommand(payload: unknown): OperationCommandResult {
+    const result = parseOperationCommand(payload);
+    if (result.disposition === 'rejected' || !result.operation) {
+      throw toOperationCommandError(result.reasonCode);
+    }
+    if (result.disposition !== 'applied' && result.disposition !== 'already_applied') {
+      throw new DataAccessError('INVALID_OPERATION_STATE', false);
+    }
+    return { disposition: result.disposition, operation: result.operation };
   }
 
   public async listOperationHistory(
@@ -545,6 +685,9 @@ export class TaskCommanderRepositories {
       }),
     );
     const parsed = recordTaskResultResponseSchema.parse(payload);
+    if (parsed.rejected || !parsed.result || !parsed.summary) {
+      throw toOperationCommandError(parsed.reasonCode);
+    }
     const resultRow = taskResultRowSchema.parse(parsed.result);
 
     return {

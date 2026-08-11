@@ -119,6 +119,9 @@ export const bulkOperationSchema = z
     createdAt: isoDateTimeSchema,
     startedAt: isoDateTimeSchema.nullable(),
     completedAt: isoDateTimeSchema.nullable(),
+    cancelRequestedAt: isoDateTimeSchema.nullable(),
+    interruptionRequestedAt: isoDateTimeSchema.nullable(),
+    interruptionReasonCode: z.string().trim().min(1).max(128).nullable(),
     summary: operationSummarySchema,
   })
   .strict();

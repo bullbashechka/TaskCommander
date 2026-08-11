@@ -1,5 +1,12 @@
 export type DataAccessErrorCode =
-  'CONFIGURATION' | 'UNAVAILABLE' | 'CONFLICT' | 'UNAVAILABLE_RECORD' | 'INTEGRITY';
+  | 'CONFIGURATION'
+  | 'UNAVAILABLE'
+  | 'CONFLICT'
+  | 'UNAVAILABLE_RECORD'
+  | 'INTEGRITY'
+  | 'ACTIVE_OPERATION'
+  | 'IDEMPOTENCY_MISMATCH'
+  | 'INVALID_OPERATION_STATE';
 
 export class DataAccessError extends Error {
   public constructor(

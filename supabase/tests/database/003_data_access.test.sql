@@ -42,7 +42,7 @@ values (
   '00000000-0000-4000-8000-000000000701',
   'data-access-test',
   'bulk_change',
-  'launching',
+  'running',
   '7001',
   'Data access operator',
   'data-access-test-operation',
@@ -103,8 +103,8 @@ select is(
   'identical retry does not increment the counter'
 );
 
-select throws_ok(
-  $$select public.record_task_processing_result(
+select is(
+  (public.record_task_processing_result(
     'data-access-test',
     '00000000-0000-4000-8000-000000000701',
     '8101',
@@ -118,10 +118,9 @@ select throws_ok(
     'Different retry',
     null,
     true
-  );$$,
-  'P0001',
-  'TC_TASK_RESULT_CONFLICT',
-  'different retry is rejected'
+  ) ->> 'rejected')::boolean,
+  true,
+  'different retry is rejected without changing the stored result'
 );
 
 select lives_ok(
@@ -174,8 +173,8 @@ select lives_ok(
   'logically identical re-encrypted retry returns the existing result'
 );
 
-select throws_ok(
-  $$select public.record_task_processing_result(
+select is(
+  (public.record_task_processing_result(
     'data-access-test',
     '00000000-0000-4000-8000-000000000701',
     '8102',
@@ -195,38 +194,29 @@ select throws_ok(
     1,
     'before-v1',
     'after-v2'
-  );$$,
-  'P0001',
-  'TC_TASK_RESULT_CONFLICT',
-  'different protected retry is rejected'
+  ) ->> 'rejected')::boolean,
+  true,
+  'different protected retry is rejected without changing the stored result'
 );
 
-select lives_ok(
-  $$select public.transition_bulk_operation_status(
+select is(
+  public.start_bulk_operation(
     'data-access-test',
     '00000000-0000-4000-8000-000000000701',
-    array['launching'],
-    'running',
-    true,
-    true,
-    false
-  );$$,
-  'conditional status transition succeeds'
+    'TC-123e4567-e89b-42d3-a456-426614174701'
+  ) ->> 'disposition',
+  'already_applied',
+  'repeated start returns the running operation'
 );
 
-select throws_ok(
-  $$select public.transition_bulk_operation_status(
+select is(
+  public.finalize_bulk_operation(
     'data-access-test',
     '00000000-0000-4000-8000-000000000701',
-    array['launching'],
-    'completed',
-    false,
-    false,
-    true
-  );$$,
-  'P0001',
-  'TC_OPERATION_TRANSITION_CONFLICT',
-  'stale status transition is rejected'
+    'TC-123e4567-e89b-42d3-a456-426614174702'
+  ) ->> 'disposition',
+  'applied',
+  'finalization computes the terminal state from saved results'
 );
 
 select * from finish();

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   apiErrorResponseSchema,
+  bulkOperationSchema,
   bulkOperationDraftSchema,
   bulkChangeCommandSchema,
   healthResponse,
@@ -138,5 +139,34 @@ describe('domain contracts', () => {
     };
 
     expect(bulkOperationDraftSchema.parse(JSON.parse(JSON.stringify(draft)))).toEqual(draft);
+  });
+
+  it('exposes safe stop state without exposing idempotency internals', () => {
+    expect(
+      bulkOperationSchema.safeParse({
+        id: '123e4567-e89b-42d3-a456-426614174000',
+        type: 'bulk_change',
+        status: 'running',
+        initiatorId: '10',
+        sourceOperationId: null,
+        createdAt: '2026-08-10T09:00:00+05:00',
+        startedAt: '2026-08-10T09:01:00+05:00',
+        completedAt: null,
+        cancelRequestedAt: '2026-08-10T09:02:00+05:00',
+        interruptionRequestedAt: null,
+        interruptionReasonCode: null,
+        summary: {
+          selected: 1,
+          eligible: 1,
+          excluded: 0,
+          unchanged: 0,
+          successful: 0,
+          failed: 0,
+          conflicted: 0,
+          partiallyApplied: 0,
+          notProcessed: 0,
+        },
+      }).success,
+    ).toBe(true);
   });
 });

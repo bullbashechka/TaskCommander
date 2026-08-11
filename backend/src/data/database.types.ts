@@ -65,11 +65,13 @@ type BulkOperationRow = {
   initiator_display_name: string;
   source_operation_id: string | null;
   idempotency_key: string;
+  request_fingerprint: string;
   filter_snapshot: Json | null;
   selected_task_ids: string[];
   changes: Json;
   preflight_snapshot: Json;
   cancel_requested_at: string | null;
+  interruption_requested_at: string | null;
   interruption_reason_code: string | null;
   interruption_reason_message: string | null;
   selected_count: number;
@@ -179,17 +181,49 @@ export interface Database {
         };
         Returns: OperationDraftRow;
       };
-      transition_bulk_operation_status: {
+      create_bulk_operation_idempotent: {
+        Args: {
+          p_portal_id: string;
+          p_operation_type: string;
+          p_initiator_id: string;
+          p_initiator_display_name: string;
+          p_source_operation_id: string | null;
+          p_idempotency_key: string;
+          p_filter_snapshot: Json | null;
+          p_selected_task_ids: string[];
+          p_changes: Json;
+          p_preflight_snapshot: Json;
+          p_selected_count: number;
+          p_eligible_count: number;
+          p_excluded_count: number;
+          p_unchanged_count: number;
+          p_correlation_id: string;
+          p_initial_results?: Json;
+        };
+        Returns: Json;
+      };
+      start_bulk_operation: {
+        Args: { p_portal_id: string; p_operation_id: string; p_correlation_id: string };
+        Returns: Json;
+      };
+      request_bulk_operation_stop: {
         Args: {
           p_portal_id: string;
           p_operation_id: string;
-          p_expected_statuses: string[];
-          p_next_status: string;
-          p_mark_started?: boolean;
-          p_touch_progress?: boolean;
-          p_mark_completed?: boolean;
+          p_stop_kind: string;
+          p_reason_code: string | null;
+          p_reason_message: string | null;
+          p_correlation_id: string;
         };
-        Returns: BulkOperationRow;
+        Returns: Json;
+      };
+      finalize_bulk_operation: {
+        Args: { p_portal_id: string; p_operation_id: string; p_correlation_id: string };
+        Returns: Json;
+      };
+      fail_bulk_operation_launch: {
+        Args: { p_portal_id: string; p_operation_id: string; p_correlation_id: string };
+        Returns: Json;
       };
       record_task_processing_result: {
         Args: {

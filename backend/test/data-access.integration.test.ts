@@ -72,7 +72,7 @@ if (integrationEnabled) {
   });
 
   it('isolates operation history and atomically records concurrent task results', async () => {
-    const operation = await repositories.createOperation(firstContext, {
+    const created = await repositories.createOperation(firstContext, {
       type: 'bulk_change',
       initiatorDisplayName: 'First integration operator',
       sourceOperationId: null,
@@ -82,8 +82,17 @@ if (integrationEnabled) {
       changes: [{ schemaVersion: 1 }],
       preflightSnapshot: {},
       summary: { selected: 2, eligible: 2, excluded: 0, unchanged: 0 },
+      correlationId: 'TC-123e4567-e89b-42d3-a456-426614174010',
     });
+    expect(created.disposition).toBe('created');
+    const operation = created.operation;
     operationIds.push(operation.id);
+    await expect(
+      repositories.startOperation(firstContext, {
+        operationId: operation.id,
+        correlationId: 'TC-123e4567-e89b-42d3-a456-426614174012',
+      }),
+    ).resolves.toMatchObject({ disposition: 'applied' });
 
     await expect(
       Promise.all([
@@ -125,10 +134,9 @@ if (integrationEnabled) {
       repositories.getOperation(secondViewAllContext, operation.id),
     ).resolves.toMatchObject({ id: operation.id });
     await expect(
-      repositories.transitionOperationStatus(secondViewAllContext, {
+      repositories.startOperation(secondViewAllContext, {
         operationId: operation.id,
-        expectedStatuses: ['launching'],
-        nextStatus: 'running',
+        correlationId: 'TC-123e4567-e89b-42d3-a456-426614174011',
       }),
     ).rejects.toMatchObject({ code: 'UNAVAILABLE_RECORD' });
     await expect(
