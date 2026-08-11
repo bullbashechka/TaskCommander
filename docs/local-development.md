@@ -26,6 +26,27 @@ Worker направляет `/api/*` в Hono. Непосредственное �
 
 Остановите `bun run dev` перед `bun run dev:reset`: Miniflare удерживает state-каталог, пока запущен. Reset не принимает путь от пользователя и удаляет ровно указанный каталог state. Повторный вызов при отсутствии каталога — успешный no-op. Команда не удаляет `backend/.dev.vars`, весь `.wrangler`, соседние state-каталоги или файлы проекта.
 
+## Supabase: удаленный режим по умолчанию
+
+Текущая разработка использует удаленный Supabase и не требует Docker. Миграции применяются только через авторизованный Supabase MCP по инструкции в [supabase-remote-development.md](supabase-remote-development.md). На удаленном проекте запрещено запускать seed, `db reset`, down-миграции и pgTAP-тесты.
+
+Для будущей server-задачи скопируйте `backend/.dev.vars.example` в неотслеживаемый `backend/.dev.vars`, затем вручную внесите HTTPS Project URL, service-role key и точный hostname проекта. Эти значения не коммитятся и не передаются в браузер.
+
+## Опциональная Docker-база Supabase
+
+Docker-контур сохранен для будущих open-source контрибьюторов. Supabase CLI установлен как локальная development-зависимость. Все команды этого раздела работают только с локальными контейнерами и не используют `--linked`.
+
+```powershell
+bun run db:docker:start
+bun run db:docker:reset
+bun run db:docker:test
+bun run db:docker:lint
+```
+
+`db:docker:reset` удаляет и заново создаёт только локальную базу Supabase, применяет миграции и затем development seed. `db:docker:test` запускает pgTAP-проверки из `supabase/tests/database`; каждая проверка выполняется в транзакции. `db:docker:lint` проверяет схему локальной базы. После работы остановите контейнеры командой `bun run db:docker:stop`.
+
+Rollback-файлы в `supabase/tests/rollback` не являются production-миграциями. Они подключаются только в pgTAP-тесте и откатываются вместе с его транзакцией. Запрещено запускать их вручную на удаленной, staging или production базе.
+
 ## Секреты
 
 Локальные значения хранятся только в `backend/.dev.vars`; файл не коммитится. Скопируйте `backend/.dev.vars.example` и заполните его только для нужной подсистемы.

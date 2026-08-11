@@ -7,6 +7,7 @@ import {
   healthResponse,
   isHealthResponse,
   operationStatusSchema,
+  reportArtifactStatusSchema,
   reportTaskEntrySchema,
   taskOutcomeStatusSchema,
 } from './index';
@@ -24,11 +25,13 @@ describe('health contract', () => {
 describe('domain contracts', () => {
   it('accepts every agreed operation and task outcome status', () => {
     const operationStatuses = [
+      'launching',
       'running',
       'completed',
       'completed_with_errors',
       'cancelled',
       'interrupted',
+      'launch_failed',
     ];
     const taskOutcomeStatuses = [
       'success',
@@ -52,6 +55,22 @@ describe('domain contracts', () => {
 
   it('rejects operation statuses that are not part of the public contract', () => {
     expect(operationStatusSchema.safeParse('queued').success).toBe(false);
+  });
+
+  it('accepts artifact lifecycle statuses and rejects unknown states', () => {
+    const artifactStatuses = [
+      'pending',
+      'generating',
+      'awaiting_upload',
+      'ready',
+      'failed',
+      'unavailable',
+    ];
+
+    expect(
+      artifactStatuses.every((status) => reportArtifactStatusSchema.safeParse(status).success),
+    ).toBe(true);
+    expect(reportArtifactStatusSchema.safeParse('uploading_forever').success).toBe(false);
   });
 
   it('accepts the agreed task outcome extensions', () => {
