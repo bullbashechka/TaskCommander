@@ -1,21 +1,41 @@
 import { describe, expect, it } from 'vitest';
 
-import { createDataAccessContext, requirePermission } from '../src/data/access';
+import {
+  createDataAccessContext,
+  requirePermission,
+  resolveEffectiveAccess,
+} from '../src/data/access';
 import { createServerSupabaseClient } from '../src/data/client';
 import { createNextCursor, resolvePageRequest } from '../src/data/cursor';
 import { DataAccessError, toDataAccessError } from '../src/data/errors';
+import { getReportVisibility, TaskCommanderRepositories } from '../src/data/repositories';
+import { createVerifiedTestPrincipal } from './verified-session-test-helper';
 
-const context = createDataAccessContext({
-  portalId: 'test-portal',
-  actorId: '1001',
-  permissions: ['view_own_reports'],
-});
+async function contextWith(permissions: string[]) {
+  return createDataAccessContext(
+    await resolveEffectiveAccess(
+      await createVerifiedTestPrincipal({
+        portalId: 'test-portal',
+        userId: '1001',
+        displayName: 'Test user',
+        isBitrixAdmin: false,
+      }),
+      {
+        findEffectiveAccessSettings: async () => ({
+          accessActive: true,
+          permissions,
+          allowedFieldIds: [],
+        }),
+      },
+    ),
+  );
+}
 
 describe('data access boundaries', () => {
   it('rejects a malformed or cross-scope cursor', () => {
-    expect(() => resolvePageRequest({ cursor: 'not-a-cursor' }, 'operation-history', 'own:a')).toThrow(
-      DataAccessError,
-    );
+    expect(() =>
+      resolvePageRequest({ cursor: 'not-a-cursor' }, 'operation-history', 'own:a'),
+    ).toThrow(DataAccessError);
 
     const cursor = createNextCursor(
       'operation-history',
@@ -50,8 +70,43 @@ describe('data access boundaries', () => {
     });
   });
 
-  it('fails closed when a permission is absent', () => {
-    expect(() => requirePermission(context, 'view_audit')).toThrow(DataAccessError);
+  it('fails closed when a permission is absent', async () => {
+    const context = await contextWith(['app_access', 'view_own_reports']);
+    expect(() => requirePermission(context, 'view_audit')).toThrow();
+  });
+
+  it('requires explicit own or all report visibility', async () => {
+    expect(getReportVisibility(await contextWith(['app_access', 'view_own_reports']))).toBe('own');
+    expect(getReportVisibility(await contextWith(['app_access', 'view_all_reports']))).toBe('all');
+    const noVisibility = await contextWith(['app_access']);
+    expect(() => getReportVisibility(noVisibility)).toThrow(DataAccessError);
+    expect(() => getReportVisibility({ ...noVisibility } as typeof noVisibility)).toThrow(
+      DataAccessError,
+    );
+  });
+
+  it('rejects forged repository contexts before representative read or write client access', async () => {
+    let clientAccesses = 0;
+    const client = new Proxy(
+      {},
+      {
+        get: () => {
+          clientAccesses += 1;
+          throw new Error('The storage client must not be reached.');
+        },
+      },
+    );
+    const repositories = new TaskCommanderRepositories(client as never);
+    const trusted = await contextWith(['app_access']);
+    const forged = { ...trusted } as typeof trusted;
+
+    await expect(repositories.listSavedFilters(forged)).rejects.toMatchObject({
+      code: 'UNAVAILABLE_RECORD',
+    });
+    await expect(
+      repositories.createSavedFilter(forged, { name: 'Forged', filterPayload: {} }),
+    ).rejects.toMatchObject({ code: 'UNAVAILABLE_RECORD' });
+    expect(clientAccesses).toBe(0);
   });
 
   it('classifies stale conditional writes as conflicts', () => {

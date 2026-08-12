@@ -1,8 +1,8 @@
 import { sessionPrincipalSchema, type SessionPrincipal } from '@task-commander/contracts';
 
-import { createBitrixAdapter } from '../integrations/bitrix/factory';
-import type { BitrixAdapter, BitrixFailure } from '../integrations/bitrix/contract';
 import { ApiHttpError } from '../http/errors';
+import type { BitrixAdapter, BitrixFailure } from '../integrations/bitrix/contract';
+import { createBitrixAdapter } from '../integrations/bitrix/factory';
 import { hasLocalIdentityConfiguration, type RuntimeEnvironment } from '../runtime/configuration';
 import {
   createSessionToken,
@@ -13,6 +13,25 @@ import {
 
 const sessionCookieName = 'tc_session';
 const maximumCookieHeaderLength = 8_192;
+const verifiedSessionPrincipalBrand = Symbol('verifiedSessionPrincipal');
+const verifiedSessionPrincipals = new WeakSet<object>();
+
+export type VerifiedSessionPrincipal = SessionPrincipal & {
+  readonly [verifiedSessionPrincipalBrand]: true;
+};
+
+export function isVerifiedSessionPrincipal(value: unknown): value is VerifiedSessionPrincipal {
+  return typeof value === 'object' && value !== null && verifiedSessionPrincipals.has(value);
+}
+
+function registerVerifiedSessionPrincipal(value: SessionPrincipal): VerifiedSessionPrincipal {
+  const verified = Object.freeze({
+    ...value,
+    [verifiedSessionPrincipalBrand]: true as const,
+  });
+  verifiedSessionPrincipals.add(verified);
+  return verified;
+}
 
 export interface SessionServiceDependencies {
   createAdapter?: (env: RuntimeEnvironment, input: { currentUserId: string }) => BitrixAdapter;
@@ -142,7 +161,7 @@ export function createSessionService(
       return { principal, cookie: serializeSessionCookie(token, 900) };
     },
 
-    async read(cookieHeader: string | null | undefined): Promise<SessionPrincipal> {
+    async read(cookieHeader: string | null | undefined): Promise<VerifiedSessionPrincipal> {
       if (!hasLocalIdentityConfiguration(env)) {
         throw new ApiHttpError(503, 'UPSTREAM_UNAVAILABLE');
       }
@@ -154,12 +173,14 @@ export function createSessionService(
 
       try {
         const claims = await verifySessionToken(token, env.SESSION_SIGNING_SECRET, now());
-        return sessionPrincipalSchema.parse({
-          portalId: claims.portalId,
-          userId: claims.userId,
-          displayName: claims.displayName,
-          isBitrixAdmin: claims.isBitrixAdmin,
-        });
+        return registerVerifiedSessionPrincipal(
+          sessionPrincipalSchema.parse({
+            portalId: claims.portalId,
+            userId: claims.userId,
+            displayName: claims.displayName,
+            isBitrixAdmin: claims.isBitrixAdmin,
+          }),
+        );
       } catch (error) {
         if (error instanceof InvalidSignedTokenError) {
           throw new ApiHttpError(401, 'UNAUTHENTICATED');

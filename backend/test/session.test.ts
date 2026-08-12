@@ -1,15 +1,19 @@
 import { describe, expect, it } from 'vitest';
 
-import { apiErrorResponseSchema, sessionResponseSchema } from '@task-commander/contracts';
+import {
+  apiErrorResponseSchema,
+  appPermissions,
+  sessionResponseSchema,
+} from '@task-commander/contracts';
 
-import { createSessionService } from '../src/auth/session-service';
-import type { BitrixFailure } from '../src/integrations/bitrix/contract';
+import { api, createApi } from '../src/api';
+import { createSessionService, isVerifiedSessionPrincipal } from '../src/auth/session-service';
 import {
   createMockLaunchContext,
   createSessionToken,
   type CreateMockLaunchContextInput,
 } from '../src/auth/signed-token';
-import { api } from '../src/api';
+import type { BitrixFailure } from '../src/integrations/bitrix/contract';
 import { createMockBitrixAdapter } from '../src/integrations/bitrix/mock';
 
 const mockLaunchSecret = 'test-mock-launch-signing-secret-0001';
@@ -218,6 +222,7 @@ describe('local Bitrix identity session', () => {
 
     expect(adapterCalls).toBe(3);
     expect(first.cookie).not.toBe(second.cookie);
+    expect(isVerifiedSessionPrincipal(first.principal)).toBe(false);
   });
 
   it('rejects an adapter identity mismatch safely', async () => {
@@ -345,6 +350,11 @@ describe('local Bitrix identity session', () => {
     expect(get.headers.get('cache-control')).toBe('no-store');
     expect(get.headers.get('vary')).toBe('Cookie');
 
+    const verified = await createSessionService(environment).read(cookie);
+    expect(isVerifiedSessionPrincipal(verified)).toBe(true);
+    expect(Object.isFrozen(verified)).toBe(true);
+    expect(isVerifiedSessionPrincipal({ ...verified })).toBe(false);
+
     const expiredToken = await createSessionToken(
       { portalId: 'portal-1', userId: '10', displayName: 'Operator', isBitrixAdmin: false },
       sessionSecret,
@@ -418,6 +428,186 @@ describe('local Bitrix identity session', () => {
       );
       expect(response.status).toBe(400);
       expect(response.headers.get('cache-control')).toBe('no-store');
+    }
+  });
+
+  it('derives protected access solely from the signed session and server-side settings', async () => {
+    const lookedUp: { portalId: string; userId: string }[] = [];
+    const protectedApi = createApi({
+      createSettingsReader: () => ({
+        findEffectiveAccessSettings: async (input) => {
+          lookedUp.push({ portalId: input.portalId, userId: input.userId });
+          return {
+            accessActive: true,
+            permissions: ['app_access'],
+            allowedFieldIds: ['title'],
+          };
+        },
+      }),
+    });
+    const login = await protectedApi.request(
+      'https://example.test/api/session',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ launchContext: await liveLaunchContext('10') }),
+      },
+      environment,
+    );
+    const cookie = cookieValue(login.headers.get('set-cookie'));
+    const response = await protectedApi.request(
+      'https://example.test/api/access?portalId=other-portal&userId=1&permissions=manage_access',
+      {
+        headers: {
+          cookie,
+          'x-portal-id': 'other-portal',
+          'x-user-id': '1',
+          'x-permissions': 'manage_access',
+        },
+      },
+      environment,
+    );
+
+    const responseText = await response.clone().text();
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('vary')).toBe('Cookie');
+    expect(await response.json()).toEqual({
+      permissions: ['app_access'],
+      fieldScope: { kind: 'subset', fieldIds: ['title'] },
+    });
+    expect(lookedUp).toEqual([{ portalId: 'portal-1', userId: '10' }]);
+    expect(responseText).not.toContain('other-portal');
+
+    const noCookie = await protectedApi.request(
+      'https://example.test/api/access',
+      undefined,
+      environment,
+    );
+    expect(noCookie.status).toBe(401);
+    expect(noCookie.headers.get('cache-control')).toBe('no-store');
+    expect(noCookie.headers.get('vary')).toBe('Cookie');
+
+    const deniedApi = createApi({
+      createSettingsReader: () => ({
+        findEffectiveAccessSettings: async () => ({
+          accessActive: false,
+          permissions: ['app_access'],
+          allowedFieldIds: [],
+        }),
+      }),
+    });
+    const denied = await deniedApi.request(
+      'https://example.test/api/access',
+      { headers: { cookie } },
+      environment,
+    );
+    expect(denied.status).toBe(403);
+    expect(denied.headers.get('cache-control')).toBe('no-store');
+    expect(denied.headers.get('vary')).toBe('Cookie');
+    expect(JSON.stringify(await denied.json())).not.toContain('accessActive');
+  });
+
+  it('does not construct the settings repository for a Bitrix administrator', async () => {
+    let factoryCalls = 0;
+    const administratorApi = createApi({
+      createSettingsReader: () => {
+        factoryCalls += 1;
+        throw new Error('Supabase must not be constructed for an administrator.');
+      },
+    });
+    const login = await administratorApi.request(
+      'https://example.test/api/session',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ launchContext: await liveLaunchContext('1') }),
+      },
+      environment,
+    );
+    const response = await administratorApi.request(
+      'https://example.test/api/access',
+      { headers: { cookie: cookieValue(login.headers.get('set-cookie')) } },
+      environment,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      permissions: appPermissions,
+      fieldScope: { kind: 'all' },
+    });
+    expect(factoryCalls).toBe(0);
+  });
+
+  it('maps access repository, reader, permission, and malformed-row failures safely', async () => {
+    const login = await api.request(
+      'https://example.test/api/session',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ launchContext: await liveLaunchContext('10') }),
+      },
+      environment,
+    );
+    const cookie = cookieValue(login.headers.get('set-cookie'));
+    const cases = [
+      {
+        expectedStatus: 503,
+        accessApi: createApi({
+          createSettingsReader: () => {
+            throw new Error('private construction detail');
+          },
+        }),
+      },
+      {
+        expectedStatus: 503,
+        accessApi: createApi({
+          createSettingsReader: () => ({
+            findEffectiveAccessSettings: async () => {
+              throw new Error('private query detail');
+            },
+          }),
+        }),
+      },
+      {
+        expectedStatus: 403,
+        accessApi: createApi({
+          createSettingsReader: () => ({
+            findEffectiveAccessSettings: async () => ({
+              accessActive: true,
+              permissions: ['view_own_reports'],
+              allowedFieldIds: [],
+            }),
+          }),
+        }),
+      },
+      {
+        expectedStatus: 403,
+        accessApi: createApi({
+          createSettingsReader: () => ({
+            findEffectiveAccessSettings: async () => ({
+              accessActive: 'false',
+              permissions: ['app_access'],
+              allowedFieldIds: [],
+              extra: true,
+            }),
+          }),
+        }),
+      },
+    ];
+
+    for (const testCase of cases) {
+      const response = await testCase.accessApi.request(
+        'https://example.test/api/access',
+        { headers: { cookie } },
+        environment,
+      );
+      expect(response.status).toBe(testCase.expectedStatus);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      expect(response.headers.get('vary')).toBe('Cookie');
+      const text = await response.text();
+      expect(text).not.toContain('private');
+      expect(text).not.toContain('accessActive');
     }
   });
 });

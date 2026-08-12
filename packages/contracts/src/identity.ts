@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { permissionSchema } from './access';
 import { bitrixIdSchema, fieldIdSchema, isoDateTimeSchema } from './primitives';
 
 export const portalIdSchema = z.string().trim().min(1).max(128);
@@ -27,21 +28,6 @@ export const sessionResponseSchema = z.object({ principal: sessionPrincipalSchem
 
 export type SessionResponse = z.infer<typeof sessionResponseSchema>;
 
-export const permissionSchema = z.enum([
-  'app_access',
-  'run_bulk_operations',
-  'change_allowed_fields',
-  'retry_operations',
-  'restore_operations',
-  'view_own_reports',
-  'view_all_reports',
-  'export_reports',
-  'view_audit',
-  'manage_access',
-]);
-
-export type Permission = z.infer<typeof permissionSchema>;
-
 export const userSummarySchema = z
   .object({
     id: bitrixIdSchema,
@@ -55,8 +41,14 @@ export type UserSummary = z.infer<typeof userSummarySchema>;
 export const userAccessSchema = z
   .object({
     user: userSummarySchema,
-    permissions: z.array(permissionSchema).max(10),
-    allowedFieldIds: z.array(fieldIdSchema).max(256),
+    permissions: z
+      .array(permissionSchema)
+      .max(10)
+      .refine((permissions) => new Set(permissions).size === permissions.length),
+    allowedFieldIds: z
+      .array(fieldIdSchema)
+      .max(256)
+      .refine((fieldIds) => new Set(fieldIds).size === fieldIds.length),
     grantedAt: isoDateTimeSchema,
     updatedAt: isoDateTimeSchema,
     grantedByUserId: bitrixIdSchema.nullable(),
