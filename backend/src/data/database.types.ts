@@ -66,6 +66,8 @@ type BulkOperationRow = {
   source_operation_id: string | null;
   idempotency_key: string;
   request_fingerprint: string;
+  state_version: number;
+  launch_attempt: number;
   filter_snapshot: Json | null;
   selected_task_ids: string[];
   changes: Json;
@@ -80,6 +82,7 @@ type BulkOperationRow = {
   unchanged_count: number;
   successful_count: number;
   failed_count: number;
+  unconfirmed_count: number;
   conflicted_count: number;
   partially_applied_count: number;
   not_processed_count: number;
@@ -104,8 +107,24 @@ type TaskProcessingResultRow = {
   reason_message: string | null;
   correlation_id: string | null;
   can_retry: boolean;
+  result_fingerprint: string;
   created_at: string;
   updated_at: string;
+};
+
+type TaskResultRefinementRow = {
+  id: string;
+  source_task_processing_result_id: string;
+  outcome: string;
+  applied_field_ids: string[];
+  failed_field_ids: string[];
+  reason_code: string | null;
+  reason_message: string | null;
+  can_retry: boolean;
+  result_fingerprint: string;
+  before_version: string | null;
+  after_version: string | null;
+  created_at: string;
 };
 
 type ProtectedTaskResultRow = {
@@ -160,6 +179,7 @@ export interface Database {
       operation_draft: TableDefinition<OperationDraftRow>;
       bulk_operation: TableDefinition<BulkOperationRow>;
       task_processing_result: TableDefinition<TaskProcessingResultRow>;
+      task_result_refinement: TableDefinition<TaskResultRefinementRow>;
       protected_task_result: TableDefinition<ProtectedTaskResultRow>;
       report: TableDefinition<ReportRow>;
       audit_event: TableDefinition<AuditEventRow>;
@@ -202,33 +222,61 @@ export interface Database {
         };
         Returns: Json;
       };
-      start_bulk_operation: {
-        Args: { p_portal_id: string; p_operation_id: string; p_correlation_id: string };
-        Returns: Json;
-      };
-      request_bulk_operation_stop: {
+      start_bulk_operation_with_attempt: {
         Args: {
           p_portal_id: string;
           p_operation_id: string;
-          p_stop_kind: string;
-          p_reason_code: string | null;
-          p_reason_message: string | null;
+          p_expected_launch_attempt: number;
           p_correlation_id: string;
         };
         Returns: Json;
       };
-      finalize_bulk_operation: {
-        Args: { p_portal_id: string; p_operation_id: string; p_correlation_id: string };
-        Returns: Json;
-      };
-      fail_bulk_operation_launch: {
-        Args: { p_portal_id: string; p_operation_id: string; p_correlation_id: string };
-        Returns: Json;
-      };
-      record_task_processing_result: {
+      request_bulk_operation_cancellation: {
         Args: {
           p_portal_id: string;
           p_operation_id: string;
+          p_correlation_id: string;
+        };
+        Returns: Json;
+      };
+      request_bulk_operation_interruption_with_attempt: {
+        Args: {
+          p_portal_id: string;
+          p_operation_id: string;
+          p_expected_launch_attempt: number;
+          p_reason_code: string;
+          p_reason_message: string;
+          p_correlation_id: string;
+        };
+        Returns: Json;
+      };
+      finalize_bulk_operation_with_attempt: {
+        Args: {
+          p_portal_id: string;
+          p_operation_id: string;
+          p_expected_launch_attempt: number;
+          p_correlation_id: string;
+        };
+        Returns: Json;
+      };
+      fail_bulk_operation_launch_with_attempt: {
+        Args: {
+          p_portal_id: string;
+          p_operation_id: string;
+          p_expected_launch_attempt: number;
+          p_correlation_id: string;
+        };
+        Returns: Json;
+      };
+      retry_bulk_operation_launch: {
+        Args: { p_portal_id: string; p_operation_id: string; p_correlation_id: string };
+        Returns: Json;
+      };
+      record_task_processing_result_with_attempt: {
+        Args: {
+          p_portal_id: string;
+          p_operation_id: string;
+          p_expected_launch_attempt: number;
           p_task_id: string;
           p_task_title: string | null;
           p_task_url: string | null;
@@ -248,6 +296,42 @@ export interface Database {
           p_after_version?: string | null;
         };
         Returns: Json;
+      };
+      record_task_result_refinement: {
+        Args: {
+          p_portal_id: string;
+          p_operation_id: string;
+          p_task_id: string;
+          p_outcome: string;
+          p_applied_field_ids: string[];
+          p_failed_field_ids: string[];
+          p_reason_code: string | null;
+          p_reason_message: string | null;
+          p_correlation_id: string;
+          p_can_retry: boolean;
+        };
+        Returns: Json;
+      };
+      record_task_result_refinement_with_versions: {
+        Args: {
+          p_portal_id: string;
+          p_operation_id: string;
+          p_task_id: string;
+          p_outcome: string;
+          p_applied_field_ids: string[];
+          p_failed_field_ids: string[];
+          p_reason_code: string | null;
+          p_reason_message: string | null;
+          p_correlation_id: string;
+          p_can_retry: boolean;
+          p_before_version: string | null;
+          p_after_version: string | null;
+        };
+        Returns: Json;
+      };
+      purge_integration_test_fixture: {
+        Args: { p_portal_id: string };
+        Returns: undefined;
       };
       append_audit_event: {
         Args: {

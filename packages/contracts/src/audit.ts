@@ -83,6 +83,7 @@ const operationDetailsSchema = z
         selected: nonNegativeIntegerSchema,
         successful: nonNegativeIntegerSchema,
         failed: nonNegativeIntegerSchema,
+        unconfirmed: nonNegativeIntegerSchema.default(0),
         conflicted: nonNegativeIntegerSchema,
         partiallyApplied: nonNegativeIntegerSchema,
         notProcessed: nonNegativeIntegerSchema,

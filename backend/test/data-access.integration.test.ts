@@ -18,7 +18,6 @@ if (integrationEnabled) {
   const secondUserId = '900000000002';
   const client = createServerSupabaseClient(env);
   const repositories = new TaskCommanderRepositories(client);
-  const operationIds: string[] = [];
   const firstContext = createDataAccessContext({
     portalId,
     actorId: firstUserId,
@@ -61,14 +60,10 @@ if (integrationEnabled) {
   });
 
   afterAll(async () => {
-    if (operationIds.length > 0) {
-      await client.from('task_processing_result').delete().in('operation_id', operationIds);
-    }
-    await client.from('bulk_operation').delete().eq('portal_id', portalId);
-    await client.from('operation_draft').delete().eq('portal_id', portalId);
-    await client.from('saved_filter').delete().eq('portal_id', portalId);
-    await client.from('user_settings').delete().eq('portal_id', portalId);
-    await client.from('portal').delete().eq('id', portalId);
+    const { error } = await client.rpc('purge_integration_test_fixture', {
+      p_portal_id: portalId,
+    });
+    expect(error).toBeNull();
   });
 
   it('isolates operation history and atomically records concurrent task results', async () => {
@@ -86,10 +81,10 @@ if (integrationEnabled) {
     });
     expect(created.disposition).toBe('created');
     const operation = created.operation;
-    operationIds.push(operation.id);
     await expect(
       repositories.startOperation(firstContext, {
         operationId: operation.id,
+        launchAttempt: operation.launchAttempt,
         correlationId: 'TC-123e4567-e89b-42d3-a456-426614174012',
       }),
     ).resolves.toMatchObject({ disposition: 'applied' });
@@ -98,6 +93,7 @@ if (integrationEnabled) {
       Promise.all([
         repositories.recordTaskResult(firstContext, {
           operationId: operation.id,
+          launchAttempt: operation.launchAttempt,
           taskId: '9001',
           title: 'First task',
           taskUrl: 'https://example.test/task/9001',
@@ -112,6 +108,7 @@ if (integrationEnabled) {
         }),
         repositories.recordTaskResult(firstContext, {
           operationId: operation.id,
+          launchAttempt: operation.launchAttempt,
           taskId: '9002',
           title: 'Second task',
           taskUrl: 'https://example.test/task/9002',
@@ -136,12 +133,14 @@ if (integrationEnabled) {
     await expect(
       repositories.startOperation(secondViewAllContext, {
         operationId: operation.id,
+        launchAttempt: operation.launchAttempt,
         correlationId: 'TC-123e4567-e89b-42d3-a456-426614174011',
       }),
     ).rejects.toMatchObject({ code: 'UNAVAILABLE_RECORD' });
     await expect(
       repositories.recordTaskResult(secondViewAllContext, {
         operationId: operation.id,
+        launchAttempt: operation.launchAttempt,
         taskId: '9003',
         title: 'Unauthorized result',
         taskUrl: 'https://example.test/task/9003',

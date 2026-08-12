@@ -57,9 +57,10 @@ select is(
 );
 
 select is(
-  public.start_bulk_operation(
+  public.start_bulk_operation_with_attempt(
     'state-machine-test',
     (select id from public.bulk_operation where idempotency_key = 'state-machine-primary'),
+    1,
     'TC-123e4567-e89b-42d3-a456-426614174804'
   ) ->> 'disposition',
   'applied',
@@ -67,9 +68,10 @@ select is(
 );
 
 select lives_ok(
-  $$select public.record_task_processing_result(
+  $$select public.record_task_processing_result_with_attempt(
     'state-machine-test',
     (select id from public.bulk_operation where idempotency_key = 'state-machine-primary'),
+    1,
     '9101', 'Task', 'https://example.test/task/9101', 'success',
     array[]::text[], array[]::text[], array[]::text[], null, null,
     'TC-123e4567-e89b-42d3-a456-426614174805', false

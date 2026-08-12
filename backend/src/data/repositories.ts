@@ -13,6 +13,7 @@ import {
   type BulkOperationDraft,
   type Permission,
   type TaskOutcome,
+  type TaskOutcomeRefinement,
   type UserAccess,
 } from '@task-commander/contracts';
 import { type SupabaseClient } from '@supabase/supabase-js';
@@ -27,6 +28,7 @@ type Client = SupabaseClient<Database>;
 type OperationRow = DatabaseTable<'bulk_operation'>;
 type TaskResultRow = DatabaseTable<'task_processing_result'>;
 type AuditRow = DatabaseTable<'audit_event'>;
+const taskResultRefinementBatchSize = 100;
 
 const recordTaskResultResponseSchema = z
   .object({
@@ -38,12 +40,37 @@ const recordTaskResultResponseSchema = z
       .object({
         successful: z.number().int().nonnegative(),
         failed: z.number().int().nonnegative(),
+        unconfirmed: z.number().int().nonnegative(),
         conflicted: z.number().int().nonnegative(),
         partiallyApplied: z.number().int().nonnegative(),
         notProcessed: z.number().int().nonnegative(),
       })
       .strict()
       .optional(),
+  })
+  .strict();
+
+const taskResultRefinementRowSchema = z
+  .object({
+    id: z.string().uuid(),
+    source_task_processing_result_id: z.string().uuid(),
+    outcome: z.enum([
+      'success',
+      'error',
+      'conflict',
+      'restored',
+      'restore_error',
+      'partially_applied',
+    ]),
+    applied_field_ids: z.array(z.string().trim().min(1).max(128)).max(256),
+    failed_field_ids: z.array(z.string().trim().min(1).max(128)).max(256),
+    reason_code: z.string().trim().min(1).max(128).nullable(),
+    reason_message: z.string().trim().min(1).max(512).nullable(),
+    can_retry: z.boolean(),
+    result_fingerprint: z.string().regex(/^[0-9a-f]{64}$/),
+    before_version: z.string().trim().min(1).max(256).nullable(),
+    after_version: z.string().trim().min(1).max(256).nullable(),
+    created_at: z.string().datetime({ offset: true }),
   })
   .strict();
 
@@ -70,6 +97,7 @@ const taskResultRowSchema = z
     reason_message: z.string().trim().min(1).max(512).nullable(),
     correlation_id: z.string().trim().min(1).max(128).nullable(),
     can_retry: z.boolean(),
+    result_fingerprint: z.string().regex(/^[0-9a-f]{64}$/),
     created_at: z.string().datetime({ offset: true }),
     updated_at: z.string().datetime({ offset: true }),
   })
@@ -109,6 +137,7 @@ export interface EncryptedProtectedResult {
 
 export interface RecordTaskResultInput {
   operationId: string;
+  launchAttempt: number;
   taskId: string;
   title: string | null;
   taskUrl: string | null;
@@ -129,10 +158,25 @@ export interface RecordedTaskResult {
   summary: {
     successful: number;
     failed: number;
+    unconfirmed: number;
     conflicted: number;
     partiallyApplied: number;
     notProcessed: number;
   };
+}
+
+export interface RecordTaskResultRefinementInput {
+  operationId: string;
+  taskId: string;
+  outcome: TaskOutcomeRefinement['outcome'];
+  appliedFieldIds: string[];
+  failedFieldIds: string[];
+  reasonCode: string | null;
+  reasonMessage: string | null;
+  correlationId: string;
+  canRetry: boolean;
+  beforeVersion: string | null;
+  afterVersion: string | null;
 }
 
 export interface CreateOperationInput {
@@ -195,6 +239,8 @@ function mapOperation(row: OperationRow): BulkOperation {
     id: row.id,
     type: operationTypeSchema.parse(row.operation_type),
     status: operationStatusSchema.parse(row.status),
+    stateVersion: row.state_version,
+    launchAttempt: row.launch_attempt,
     initiatorId: row.initiator_id,
     sourceOperationId: row.source_operation_id,
     createdAt: row.created_at,
@@ -210,6 +256,7 @@ function mapOperation(row: OperationRow): BulkOperation {
       unchanged: row.unchanged_count,
       successful: row.successful_count,
       failed: row.failed_count,
+      unconfirmed: row.unconfirmed_count,
       conflicted: row.conflicted_count,
       partiallyApplied: row.partially_applied_count,
       notProcessed: row.not_processed_count,
@@ -223,6 +270,15 @@ function toOperationCommandError(reasonCode: string | undefined): DataAccessErro
   }
   if (reasonCode === 'OPERATION_UNAVAILABLE') {
     return new DataAccessError('UNAVAILABLE_RECORD', false);
+  }
+  if (
+    reasonCode === 'TASK_RESULT_CONFLICT' ||
+    reasonCode === 'TASK_RESULT_REFINEMENT_CONFLICT'
+  ) {
+    return new DataAccessError('TASK_RESULT_MISMATCH', false);
+  }
+  if (reasonCode === 'ACTIVE_OPERATION') {
+    return new DataAccessError('ACTIVE_OPERATION', false);
   }
   return new DataAccessError('INVALID_OPERATION_STATE', false);
 }
@@ -240,7 +296,10 @@ function parseOperationCommand(payload: unknown): {
   };
 }
 
-function mapTaskOutcome(row: TaskResultRow): TaskOutcome {
+function mapTaskOutcome(
+  row: TaskResultRow,
+  refinement: TaskOutcomeRefinement | null = null,
+): TaskOutcome {
   return taskOutcomeSchema.parse({
     taskId: row.task_id,
     title: row.task_title,
@@ -252,7 +311,22 @@ function mapTaskOutcome(row: TaskResultRow): TaskOutcome {
     reasonCode: row.reason_code,
     reasonMessage: row.reason_message,
     canRetry: row.can_retry,
+    refinement,
   });
+}
+
+function mapTaskOutcomeRefinement(
+  row: z.infer<typeof taskResultRefinementRowSchema>,
+): TaskOutcomeRefinement {
+  return {
+    outcome: row.outcome,
+    appliedFieldIds: row.applied_field_ids,
+    failedFieldIds: row.failed_field_ids,
+    reasonCode: row.reason_code,
+    reasonMessage: row.reason_message,
+    canRetry: row.can_retry,
+    refinedAt: row.created_at,
+  };
 }
 
 function mapAuditEvent(row: AuditRow): AuditEvent {
@@ -526,13 +600,14 @@ export class TaskCommanderRepositories {
 
   public async startOperation(
     context: DataAccessContext,
-    input: { operationId: string; correlationId: string },
+    input: { operationId: string; launchAttempt: number; correlationId: string },
   ): Promise<OperationCommandResult> {
     const currentOperation = await this.getOwnedOperation(context, input.operationId);
     const payload = await requireData(
-      this.client.rpc('start_bulk_operation', {
+      this.client.rpc('start_bulk_operation_with_attempt', {
         p_portal_id: context.portalId,
         p_operation_id: currentOperation.id,
+        p_expected_launch_attempt: input.launchAttempt,
         p_correlation_id: input.correlationId,
       }),
     );
@@ -543,25 +618,43 @@ export class TaskCommanderRepositories {
     context: DataAccessContext,
     input: { operationId: string; correlationId: string },
   ): Promise<OperationCommandResult> {
-    return this.requestOperationStop(context, { ...input, kind: 'cancel', reasonCode: null, reasonMessage: null });
+    return this.requestOperationStop(context, { ...input, kind: 'cancel' });
   }
 
   public async requestOperationInterruption(
     context: DataAccessContext,
-    input: { operationId: string; correlationId: string; reasonCode: string; reasonMessage: string },
+    input: {
+      operationId: string;
+      launchAttempt: number;
+      correlationId: string;
+      reasonCode: string;
+      reasonMessage: string;
+    },
   ): Promise<OperationCommandResult> {
-    return this.requestOperationStop(context, { ...input, kind: 'interrupt' });
+    const operation = await this.getOwnedOperation(context, input.operationId);
+    const payload = await requireData(
+      this.client.rpc('request_bulk_operation_interruption_with_attempt', {
+        p_portal_id: context.portalId,
+        p_operation_id: operation.id,
+        p_expected_launch_attempt: input.launchAttempt,
+        p_reason_code: input.reasonCode,
+        p_reason_message: input.reasonMessage,
+        p_correlation_id: input.correlationId,
+      }),
+    );
+    return this.resolveOperationCommand(payload);
   }
 
   public async finalizeOperation(
     context: DataAccessContext,
-    input: { operationId: string; correlationId: string },
+    input: { operationId: string; launchAttempt: number; correlationId: string },
   ): Promise<OperationCommandResult> {
     const operation = await this.getOwnedOperation(context, input.operationId);
     const payload = await requireData(
-      this.client.rpc('finalize_bulk_operation', {
+      this.client.rpc('finalize_bulk_operation_with_attempt', {
         p_portal_id: context.portalId,
         p_operation_id: operation.id,
+        p_expected_launch_attempt: input.launchAttempt,
         p_correlation_id: input.correlationId,
       }),
     );
@@ -570,11 +663,27 @@ export class TaskCommanderRepositories {
 
   public async failOperationLaunch(
     context: DataAccessContext,
+    input: { operationId: string; launchAttempt: number; correlationId: string },
+  ): Promise<OperationCommandResult> {
+    const operation = await this.getOwnedOperation(context, input.operationId);
+    const payload = await requireData(
+      this.client.rpc('fail_bulk_operation_launch_with_attempt', {
+        p_portal_id: context.portalId,
+        p_operation_id: operation.id,
+        p_expected_launch_attempt: input.launchAttempt,
+        p_correlation_id: input.correlationId,
+      }),
+    );
+    return this.resolveOperationCommand(payload);
+  }
+
+  public async retryOperationLaunch(
+    context: DataAccessContext,
     input: { operationId: string; correlationId: string },
   ): Promise<OperationCommandResult> {
     const operation = await this.getOwnedOperation(context, input.operationId);
     const payload = await requireData(
-      this.client.rpc('fail_bulk_operation_launch', {
+      this.client.rpc('retry_bulk_operation_launch', {
         p_portal_id: context.portalId,
         p_operation_id: operation.id,
         p_correlation_id: input.correlationId,
@@ -585,22 +694,13 @@ export class TaskCommanderRepositories {
 
   private async requestOperationStop(
     context: DataAccessContext,
-    input: {
-      operationId: string;
-      correlationId: string;
-      kind: 'cancel' | 'interrupt';
-      reasonCode: string | null;
-      reasonMessage: string | null;
-    },
+    input: { operationId: string; correlationId: string; kind: 'cancel' },
   ): Promise<OperationCommandResult> {
     const operation = await this.getOwnedOperation(context, input.operationId);
     const payload = await requireData(
-      this.client.rpc('request_bulk_operation_stop', {
+      this.client.rpc('request_bulk_operation_cancellation', {
         p_portal_id: context.portalId,
         p_operation_id: operation.id,
-        p_stop_kind: input.kind,
-        p_reason_code: input.reasonCode,
-        p_reason_message: input.reasonMessage,
         p_correlation_id: input.correlationId,
       }),
     );
@@ -662,9 +762,10 @@ export class TaskCommanderRepositories {
     const operation = await this.getOwnedOperation(context, input.operationId);
     const protectedResult = input.protectedResult;
     const payload = await requireData(
-      this.client.rpc('record_task_processing_result', {
+      this.client.rpc('record_task_processing_result_with_attempt', {
         p_portal_id: context.portalId,
         p_operation_id: operation.id,
+        p_expected_launch_attempt: input.launchAttempt,
         p_task_id: input.taskId,
         p_task_title: input.title,
         p_task_url: input.taskUrl,
@@ -697,6 +798,42 @@ export class TaskCommanderRepositories {
     };
   }
 
+  public async recordTaskResultRefinement(
+    context: DataAccessContext,
+    input: RecordTaskResultRefinementInput,
+  ): Promise<{ inserted: boolean; refinement: TaskOutcomeRefinement }> {
+    const operation = await this.getOwnedOperation(context, input.operationId);
+    const payload = await requireData(
+      this.client.rpc('record_task_result_refinement_with_versions', {
+        p_portal_id: context.portalId,
+        p_operation_id: operation.id,
+        p_task_id: input.taskId,
+        p_outcome: input.outcome,
+        p_applied_field_ids: input.appliedFieldIds,
+        p_failed_field_ids: input.failedFieldIds,
+        p_reason_code: input.reasonCode,
+        p_reason_message: input.reasonMessage,
+        p_correlation_id: input.correlationId,
+        p_can_retry: input.canRetry,
+        p_before_version: input.beforeVersion,
+        p_after_version: input.afterVersion,
+      }),
+    );
+    const parsed = z
+      .object({
+        inserted: z.boolean(),
+        rejected: z.boolean().optional(),
+        reasonCode: z.string().trim().min(1).max(128).optional(),
+        refinement: taskResultRefinementRowSchema.optional(),
+      })
+      .strict()
+      .parse(payload);
+    if (parsed.rejected || !parsed.refinement) {
+      throw toOperationCommandError(parsed.reasonCode);
+    }
+    return { inserted: parsed.inserted, refinement: mapTaskOutcomeRefinement(parsed.refinement) };
+  }
+
   public async listTaskResults(
     context: DataAccessContext,
     operationId: string,
@@ -709,7 +846,33 @@ export class TaskCommanderRepositories {
         .eq('operation_id', operation.id)
         .order('created_at', { ascending: true }),
     );
-    return rows.map(mapTaskOutcome);
+    const resultIds = rows.map((row) => row.id);
+    const refinementBatches = await Promise.all(
+      Array.from(
+        { length: Math.ceil(resultIds.length / taskResultRefinementBatchSize) },
+        (_, batchIndex) =>
+          requireData(
+            this.client
+              .from('task_result_refinement')
+              .select('*')
+              .in(
+                'source_task_processing_result_id',
+                resultIds.slice(
+                  batchIndex * taskResultRefinementBatchSize,
+                  (batchIndex + 1) * taskResultRefinementBatchSize,
+                ),
+              ),
+          ),
+      ),
+    );
+    const refinements = refinementBatches.flat();
+    const refinementsBySource = new Map(
+      refinements.map((refinement) => [
+        refinement.source_task_processing_result_id,
+        mapTaskOutcomeRefinement(taskResultRefinementRowSchema.parse(refinement)),
+      ]),
+    );
+    return rows.map((row) => mapTaskOutcome(row, refinementsBySource.get(row.id) ?? null));
   }
 
   public async getReportByOperation(

@@ -36,6 +36,7 @@ describe('audit contracts', () => {
             selected: 10,
             successful: 8,
             failed: 1,
+            unconfirmed: 0,
             conflicted: 1,
             partiallyApplied: 0,
             notProcessed: 0,

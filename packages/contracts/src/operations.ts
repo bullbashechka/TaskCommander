@@ -22,6 +22,7 @@ export const preflightDispositionSchema = z.enum([
 export const taskOutcomeStatusSchema = z.enum([
   'success',
   'error',
+  'unconfirmed',
   'conflict',
   'excluded_by_preflight',
   'not_processed',
@@ -51,9 +52,29 @@ export const operationSummarySchema = z
     unchanged: nonNegativeIntegerSchema,
     successful: nonNegativeIntegerSchema,
     failed: nonNegativeIntegerSchema,
+    unconfirmed: nonNegativeIntegerSchema,
     conflicted: nonNegativeIntegerSchema,
     partiallyApplied: nonNegativeIntegerSchema,
     notProcessed: nonNegativeIntegerSchema,
+  })
+  .strict();
+
+export const taskOutcomeRefinementSchema = z
+  .object({
+    outcome: z.enum([
+      'success',
+      'error',
+      'conflict',
+      'restored',
+      'restore_error',
+      'partially_applied',
+    ]),
+    appliedFieldIds: z.array(fieldIdSchema).max(256),
+    failedFieldIds: z.array(fieldIdSchema).max(256),
+    reasonCode: z.string().trim().min(1).max(128).nullable(),
+    reasonMessage: z.string().trim().min(1).max(512).nullable(),
+    canRetry: z.boolean(),
+    refinedAt: isoDateTimeSchema,
   })
   .strict();
 
@@ -106,6 +127,7 @@ export const taskOutcomeSchema = z
     reasonCode: z.string().trim().min(1).max(128).nullable(),
     reasonMessage: z.string().trim().min(1).max(512).nullable(),
     canRetry: z.boolean(),
+    refinement: taskOutcomeRefinementSchema.nullable(),
   })
   .strict();
 
@@ -114,6 +136,8 @@ export const bulkOperationSchema = z
     id: operationIdSchema,
     type: operationTypeSchema,
     status: operationStatusSchema,
+    stateVersion: positiveIntegerSchema,
+    launchAttempt: positiveIntegerSchema,
     initiatorId: bitrixIdSchema,
     sourceOperationId: operationIdSchema.nullable(),
     createdAt: isoDateTimeSchema,
@@ -159,3 +183,4 @@ export const reportTaskEntrySchema = z
 export type BulkOperationDraft = z.infer<typeof bulkOperationDraftSchema>;
 export type BulkOperation = z.infer<typeof bulkOperationSchema>;
 export type TaskOutcome = z.infer<typeof taskOutcomeSchema>;
+export type TaskOutcomeRefinement = z.infer<typeof taskOutcomeRefinementSchema>;

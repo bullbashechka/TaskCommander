@@ -6,6 +6,7 @@ export type DataAccessErrorCode =
   | 'INTEGRITY'
   | 'ACTIVE_OPERATION'
   | 'IDEMPOTENCY_MISMATCH'
+  | 'TASK_RESULT_MISMATCH'
   | 'INVALID_OPERATION_STATE';
 
 export class DataAccessError extends Error {

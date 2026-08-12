@@ -1,7 +1,44 @@
 drop trigger if exists audit_event_prevent_delete on public.audit_event;
 drop trigger if exists audit_event_prevent_update on public.audit_event;
 drop trigger if exists bulk_operation_prevent_status_bypass on public.bulk_operation;
+drop trigger if exists task_result_refinement_prevent_delete on public.task_result_refinement;
+drop trigger if exists task_result_refinement_prevent_update on public.task_result_refinement;
+drop trigger if exists z_task_processing_result_prevent_mutation on public.task_processing_result;
+drop function if exists public.record_task_result_refinement(
+  text, uuid, text, text, text[], text[], text, text, text, boolean
+);
+drop function if exists public.record_task_result_refinement_with_versions(
+  text, uuid, text, text, text[], text[], text, text, text, boolean, text, text
+);
+drop function if exists public.purge_integration_test_fixture(text);
+drop function if exists public.retry_bulk_operation_launch(text, uuid, text);
+drop function if exists public.request_bulk_operation_cancellation(text, uuid, text);
+drop function if exists public.request_bulk_operation_interruption_with_attempt(
+  text, uuid, integer, text, text, text
+);
+drop function if exists public.finalize_bulk_operation_with_attempt(text, uuid, integer, text);
+drop function if exists public.start_bulk_operation_with_attempt(text, uuid, integer, text);
+drop function if exists public.prevent_task_result_refinement_mutation();
+drop function if exists public.prevent_task_processing_result_mutation();
+drop function if exists public.task_result_refinement_fingerprint(
+  text, text[], text[], text, text, boolean, text, text
+);
+drop function if exists public.task_processing_result_fingerprint(
+  text, text, text, text[], text[], text[], text, text, boolean, text, text
+);
+drop function if exists public.operation_request_fingerprint_with_initial_results(
+  text, uuid, jsonb, text[], jsonb, jsonb, integer, integer, integer, integer, jsonb
+);
+drop function if exists public.fail_bulk_operation_launch_with_attempt(text, uuid, integer, text);
 drop function if exists public.fail_bulk_operation_launch(text, uuid, text);
+drop function if exists public.record_task_processing_result_with_attempt(
+  text, uuid, integer, text, text, text, text, text[], text[], text[], text, text, text,
+  boolean, bytea, bytea, text, smallint, text, text
+);
+drop function if exists public.record_task_processing_result(
+  text, uuid, text, text, text, text, text[], text[], text[], text, text, text, boolean,
+  bytea, bytea, text, smallint, text, text
+);
 drop function if exists public.finalize_bulk_operation(text, uuid, text);
 drop function if exists public.request_bulk_operation_stop(text, uuid, text, text, text, text);
 drop function if exists public.start_bulk_operation(text, uuid, text);
@@ -30,6 +67,7 @@ drop trigger if exists saved_filter_set_updated_at on public.saved_filter;
 drop trigger if exists user_settings_set_updated_at on public.user_settings;
 drop trigger if exists portal_set_updated_at on public.portal;
 
+drop table if exists public.task_result_refinement;
 drop table if exists public.protected_task_result;
 drop table if exists public.task_processing_result;
 drop table if exists public.report_artifact;

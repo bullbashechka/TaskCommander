@@ -10,6 +10,7 @@ import {
   operationStatusSchema,
   reportArtifactStatusSchema,
   reportTaskEntrySchema,
+  taskOutcomeSchema,
   taskOutcomeStatusSchema,
 } from './index';
 
@@ -37,6 +38,7 @@ describe('domain contracts', () => {
     const taskOutcomeStatuses = [
       'success',
       'error',
+      'unconfirmed',
       'conflict',
       'excluded_by_preflight',
       'not_processed',
@@ -77,6 +79,33 @@ describe('domain contracts', () => {
   it('accepts the agreed task outcome extensions', () => {
     expect(taskOutcomeStatusSchema.safeParse('no_change').success).toBe(true);
     expect(taskOutcomeStatusSchema.safeParse('partially_applied').success).toBe(true);
+    expect(taskOutcomeStatusSchema.safeParse('unconfirmed').success).toBe(true);
+  });
+
+  it('exposes a late refinement without rewriting the source outcome', () => {
+    expect(
+      taskOutcomeSchema.safeParse({
+        taskId: '42',
+        title: 'Visible task',
+        taskUrl: 'https://example.test/task/42',
+        outcome: 'unconfirmed',
+        changedFieldIds: ['deadline'],
+        appliedFieldIds: [],
+        failedFieldIds: [],
+        reasonCode: 'UPSTREAM_OUTCOME_UNKNOWN',
+        reasonMessage: 'The update result could not be confirmed.',
+        canRetry: false,
+        refinement: {
+          outcome: 'success',
+          appliedFieldIds: ['deadline'],
+          failedFieldIds: [],
+          reasonCode: null,
+          reasonMessage: null,
+          canRetry: false,
+          refinedAt: '2026-08-12T09:00:00+05:00',
+        },
+      }).success,
+    ).toBe(true);
   });
 
   it('rejects an invalid mixed date change command', () => {
@@ -147,6 +176,8 @@ describe('domain contracts', () => {
         id: '123e4567-e89b-42d3-a456-426614174000',
         type: 'bulk_change',
         status: 'running',
+        stateVersion: 2,
+        launchAttempt: 1,
         initiatorId: '10',
         sourceOperationId: null,
         createdAt: '2026-08-10T09:00:00+05:00',
@@ -162,6 +193,7 @@ describe('domain contracts', () => {
           unchanged: 0,
           successful: 0,
           failed: 0,
+          unconfirmed: 0,
           conflicted: 0,
           partiallyApplied: 0,
           notProcessed: 0,
