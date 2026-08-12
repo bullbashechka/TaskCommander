@@ -34,6 +34,8 @@ Requests to inspect, discuss, analyze, review, or plan a task authorize read-onl
 
 Design work starts with task 11. When task 11 is reached or requested, remind the user that the design phase begins at this task before proceeding.
 
+Task 11 approval gate: do not perform, start, plan, prepare, or modify anything related to task 11 without the user's explicit prior consent. Merely reaching or mentioning task 11 is not consent. Stop and wait for explicit authorization before taking any action.
+
 ## Commit & Pull Request Guidelines
 
 Use short, imperative, sentence-style English commit subjects, matching history: `Document Bun and Cloudflare Vite plugin development setup`. Keep commits scoped to one logical change. Pull requests should explain purpose, summarize implementation, link the relevant task or issue, and list verification performed. Include screenshots for visible UI changes and call out configuration or migration impacts.
