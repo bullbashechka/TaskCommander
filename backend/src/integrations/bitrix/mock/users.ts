@@ -37,7 +37,7 @@ export function createMockUsers(
       if (failure) return { ok: false, failure };
 
       const user = state.users.get(state.currentUserId);
-      if (!user || !user.isActive) return { ok: false, failure: { kind: 'not_authenticated' } };
+      if (!user) return { ok: false, failure: { kind: 'not_authenticated' } };
       return { ok: true, value: toBitrixUser(user) };
     },
     async getByIds(userIds) {

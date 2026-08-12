@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   apiErrorResponseSchema,
+  createSessionRequestSchema,
   bulkOperationSchema,
   bulkOperationDraftSchema,
   bulkChangeCommandSchema,
@@ -25,6 +26,22 @@ describe('health contract', () => {
 });
 
 describe('domain contracts', () => {
+  it('accepts only a bounded strict session creation request', () => {
+    expect(createSessionRequestSchema.safeParse({ launchContext: 'signed-context' }).success).toBe(
+      true,
+    );
+    expect(createSessionRequestSchema.safeParse({ launchContext: '' }).success).toBe(false);
+    expect(createSessionRequestSchema.safeParse({ launchContext: 'x'.repeat(4_097) }).success).toBe(
+      false,
+    );
+    expect(
+      createSessionRequestSchema.safeParse({
+        launchContext: 'signed-context',
+        extra: true,
+      }).success,
+    ).toBe(false);
+  });
+
   it('accepts every agreed operation and task outcome status', () => {
     const operationStatuses = [
       'launching',

@@ -2,6 +2,31 @@ import { z } from 'zod';
 
 import { bitrixIdSchema, fieldIdSchema, isoDateTimeSchema } from './primitives';
 
+export const portalIdSchema = z.string().trim().min(1).max(128);
+
+export const createSessionRequestSchema = z
+  .object({
+    launchContext: z.string().trim().min(1).max(4_096),
+  })
+  .strict();
+
+export type CreateSessionRequest = z.infer<typeof createSessionRequestSchema>;
+
+export const sessionPrincipalSchema = z
+  .object({
+    portalId: portalIdSchema,
+    userId: bitrixIdSchema,
+    displayName: z.string().trim().min(1).max(256),
+    isBitrixAdmin: z.boolean(),
+  })
+  .strict();
+
+export type SessionPrincipal = z.infer<typeof sessionPrincipalSchema>;
+
+export const sessionResponseSchema = z.object({ principal: sessionPrincipalSchema }).strict();
+
+export type SessionResponse = z.infer<typeof sessionResponseSchema>;
+
 export const permissionSchema = z.enum([
   'app_access',
   'run_bulk_operations',

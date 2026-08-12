@@ -63,6 +63,29 @@ Rollback-файлы в `supabase/tests/rollback` не являются productio
 
 Базовый runtime требует `APP_ENV=local` и `BITRIX_ADAPTER=mock`. Supabase считается не настроенным, пока не заданы одновременно `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` и `LOCAL_SUPABASE_ALLOWED_HOSTS`. Allowlist содержит точные host names development-проектов через запятую; URL, отсутствующий в allowlist, безопасно отмечается как некорректная конфигурация. Readiness API сообщает только состояние подсистем и никогда не возвращает имена либо значения секретов.
 
+Базовые runtime и cron требуют только local mock adapter. Identity readiness и session endpoints
+дополнительно требуют оба независимых signing secrets.
+
+Для задачи 009 локальный вход использует два разных secret bindings длиной не менее 32 UTF-8
+байт: `MOCK_LAUNCH_SIGNING_SECRET` проверяет короткоживущий подписанный mock launch context,
+а `SESSION_SIGNING_SECRET` подписывает cookie сессии. Скопируйте `backend/.dev.vars.example` в
+`backend/.dev.vars` и задайте оба значения только локально. После изменения
+`backend/wrangler.jsonc` требуется сгенерировать типы отдельной командой `bun run cf-typegen`;
+сгенерированный `backend/worker-configuration.d.ts` вручную не редактируется.
+
+Локальный API использует только `POST`, `GET` и `DELETE /api/session`. `POST` принимает
+подписанный mock launch context, заново читает текущего пользователя mock Bitrix24 и выдаёт
+новую stateless HttpOnly cookie. Cookie ограничена `/api`, использует `Secure` и `SameSite=Lax`;
+это политика локального mock-контура, а не утверждение о финальной cookie-политике embedded
+iframe. Production OAuth, атрибуты cookie для реального iframe и защита межсайтового запуска
+относятся к задаче 035. Cookie не содержит OAuth-токенов, разрешений или иных данных Bitrix24
+помимо подписанных session claims.
+
+Mock launch context является короткоживущим bearer token и может повторно использоваться в пределах TTL.
+`nonce` служит только для уникальности и корреляции, не реализует атомарную защиту от replay.
+Single-use state, CSRF и production-политика запуска откладываются до задачи 035; этот local mock
+контур не создаёт для них storage, миграции или Durable Objects.
+
 ## Product boundary
 
-Локальная страница является foundation shell, а не самостоятельным способом доступа к продукту. Проверка запуска из Битрикс24, OAuth и права доступа появятся в задачах 009–012 и 035.
+Локальная страница является foundation shell, а не самостоятельным способом доступа к продукту. Задача 009 добавляет только signed mock launch context и защищённую локальную сессию. Production OAuth появится в задаче 035, а модель прикладных прав — в задачах 010–012.

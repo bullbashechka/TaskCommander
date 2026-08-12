@@ -8,9 +8,12 @@ export function isSupportedBitrixAdapterConfiguration(env: RuntimeEnvironment): 
   return env.APP_ENV === 'local' && env.BITRIX_ADAPTER === 'mock';
 }
 
-export function createBitrixAdapter(env: RuntimeEnvironment): BitrixAdapter {
+export function createBitrixAdapter(
+  env: RuntimeEnvironment,
+  options: { currentUserId?: string } = {},
+): BitrixAdapter {
   if (isSupportedBitrixAdapterConfiguration(env)) {
-    return createMockBitrixAdapter();
+    return createMockBitrixAdapter(options);
   }
 
   throw new BitrixAdapterConfigurationError(

@@ -27,7 +27,7 @@ describe('mock Bitrix users, organization and calendar', () => {
     ).toEqual(['2']);
   });
 
-  it('reports a deactivated current user as unauthenticated', async () => {
+  it('returns a deactivated current user so the identity layer can deny access explicitly', async () => {
     const state = createMockPortalState();
     const users = createMockUsers(
       state,
@@ -40,8 +40,14 @@ describe('mock Bitrix users, organization and calendar', () => {
     );
 
     await expect(users.getCurrent()).resolves.toEqual({
-      ok: false,
-      failure: { kind: 'not_authenticated' },
+      ok: true,
+      value: {
+        id: '10',
+        displayName: 'Operator',
+        isActive: false,
+        isAdmin: false,
+        departmentIds: ['1'],
+      },
     });
   });
 

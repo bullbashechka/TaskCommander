@@ -2,6 +2,11 @@
 APP_ENV=local
 BITRIX_ADAPTER=mock
 
+# Separate local-only secrets. Each value must be at least 32 UTF-8 bytes.
+# Never use either value in a browser bundle, log, fixture snapshot, or production configuration.
+MOCK_LAUNCH_SIGNING_SECRET=
+SESSION_SIGNING_SECRET=
+
 # Set all three values only when developing a Supabase-dependent subsystem.
 # For a remote Supabase development project, use its HTTPS Project URL and service-role key.
 # LOCAL_SUPABASE_ALLOWED_HOSTS accepts the exact project host, without a protocol.

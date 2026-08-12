@@ -6,9 +6,11 @@ import { api } from '../src/api';
 const configuredLocalEnvironment = {
   APP_ENV: 'local',
   BITRIX_ADAPTER: 'mock',
+  MOCK_LAUNCH_SIGNING_SECRET: 'test-mock-launch-signing-secret-0001',
   SUPABASE_URL: 'https://dev.supabase.test',
   SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
   LOCAL_SUPABASE_ALLOWED_HOSTS: 'dev.supabase.test',
+  SESSION_SIGNING_SECRET: 'test-session-signing-secret-0000001',
 };
 
 describe('foundation API', () => {
@@ -37,8 +39,10 @@ describe('foundation API', () => {
     const response = await api.request('https://example.test/api/health', undefined, {
       APP_ENV: 'local',
       BITRIX_ADAPTER: 'mock',
+      MOCK_LAUNCH_SIGNING_SECRET: 'test-mock-launch-signing-secret-0001',
       SUPABASE_URL: 'https://dev.supabase.test',
       SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
+      SESSION_SIGNING_SECRET: 'test-session-signing-secret-0000001',
     });
 
     expect(response.status).toBe(200);

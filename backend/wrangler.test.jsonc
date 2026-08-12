@@ -8,6 +8,8 @@
     "APP_ENV": "local",
     "BITRIX_ADAPTER": "mock",
     "LOCAL_SUPABASE_ALLOWED_HOSTS": "",
+    "MOCK_LAUNCH_SIGNING_SECRET": "test-mock-launch-signing-secret-0001",
+    "SESSION_SIGNING_SECRET": "test-session-signing-secret-0000001",
   },
   "queues": {
     "producers": [
