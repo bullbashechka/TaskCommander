@@ -1,15 +1,23 @@
 import { z } from 'zod';
 
-import { portalIdSchema, sessionPrincipalSchema } from '@task-commander/contracts';
+import {
+  accessManagementLimits,
+  bitrixIdSchema,
+  portalIdSchema,
+  sessionPrincipalSchema,
+} from '@task-commander/contracts';
 
 const encoder = new TextEncoder();
 
 const mockLaunchAudience = 'task-commander.mock-launch';
 const sessionAudience = 'task-commander.session';
+const accessConfirmationAudience = 'task-commander.access-confirmation';
 const mockLaunchHeader = { alg: 'HS256', typ: 'TC-MOCK-LAUNCH' } as const;
 const sessionHeader = { alg: 'HS256', typ: 'TC-SESSION' } as const;
+const accessConfirmationHeader = { alg: 'HS256', typ: 'TC-ACCESS-CONFIRMATION' } as const;
 const mockLaunchLifetimeSeconds = 300;
 const sessionLifetimeSeconds = 900;
+const accessConfirmationLifetimeSeconds = accessManagementLimits.confirmationTtlSeconds;
 const clockSkewSeconds = 60;
 
 const timestampSchema = z.number().int().nonnegative();
@@ -37,9 +45,23 @@ const sessionClaimsSchema = z
     exp: timestampSchema,
   })
   .strict();
+const accessConfirmationClaimsSchema = z
+  .object({
+    v: z.literal(1),
+    aud: z.literal(accessConfirmationAudience),
+    confirmationId: z.string().uuid(),
+    portalId: portalIdSchema,
+    actorUserId: bitrixIdSchema,
+    preflightId: z.string().uuid(),
+    draftRevision: z.number().int().positive(),
+    iat: timestampSchema,
+    exp: timestampSchema,
+  })
+  .strict();
 
 export type MockLaunchClaims = z.infer<typeof mockLaunchClaimsSchema>;
 export type SessionClaims = z.infer<typeof sessionClaimsSchema>;
+export type AccessConfirmationClaims = z.infer<typeof accessConfirmationClaimsSchema>;
 
 export class SignedTokenConfigurationError extends Error {
   public constructor() {
@@ -271,5 +293,44 @@ export async function verifySessionToken(
     throw new InvalidSignedTokenError();
   }
   assertTimestampWindow(parsed.data, now, sessionLifetimeSeconds);
+  return parsed.data;
+}
+
+export async function createAccessConfirmationToken(
+  input: {
+    portalId: string;
+    actorUserId: string;
+    preflightId: string;
+    draftRevision: number;
+  },
+  secret: string | undefined,
+  now = new Date(),
+  confirmationId = crypto.randomUUID(),
+): Promise<{ token: string; claims: AccessConfirmationClaims }> {
+  const issuedAt = getCurrentTimestamp(now);
+  const claims = accessConfirmationClaimsSchema.parse({
+    v: 1,
+    aud: accessConfirmationAudience,
+    confirmationId,
+    ...input,
+    iat: issuedAt,
+    exp: issuedAt + accessConfirmationLifetimeSeconds,
+  });
+  return {
+    token: await encodeSignedToken(accessConfirmationHeader, claims, secret),
+    claims,
+  };
+}
+
+export async function verifyAccessConfirmationToken(
+  token: string,
+  secret: string | undefined,
+  now = new Date(),
+): Promise<AccessConfirmationClaims> {
+  const parsed = accessConfirmationClaimsSchema.safeParse(
+    await verifySignedToken(token, accessConfirmationHeader, secret),
+  );
+  if (!parsed.success) throw new InvalidSignedTokenError();
+  assertTimestampWindow(parsed.data, now, accessConfirmationLifetimeSeconds);
   return parsed.data;
 }

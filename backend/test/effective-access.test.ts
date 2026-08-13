@@ -75,10 +75,6 @@ describe('effective access', () => {
       { ...defaultSettings, allowedFieldIds: [''] },
       { ...defaultSettings, allowedFieldIds: ['x'.repeat(129)] },
       { ...defaultSettings, allowedFieldIds: [1] },
-      {
-        ...defaultSettings,
-        allowedFieldIds: Array.from({ length: 257 }, (_, index) => `field_${index}`),
-      },
       { ...defaultSettings, extra: true },
     ];
 
@@ -275,7 +271,7 @@ describe('effective access', () => {
     ).rejects.toMatchObject({ kind: 'upstream_unavailable' });
   });
 
-  it('deduplicates requested fields and rejects invalid, oversized, partial, or native-denied sets', async () => {
+  it('deduplicates requested fields and rejects invalid, partial, or native-denied sets', async () => {
     const access = await resolve({
       permissions: ['app_access', 'change_allowed_fields'],
       allowedFieldIds: ['title', 'description'],
@@ -293,7 +289,6 @@ describe('effective access', () => {
       'title',
       [''],
       [1],
-      Array.from({ length: 257 }, () => 'title'),
       ['title', 'status'],
     ]) {
       await expect(
@@ -303,6 +298,13 @@ describe('effective access', () => {
         }),
       ).rejects.toMatchObject({ kind: 'forbidden' });
     }
+
+    await expect(
+      requireAuthorizedTaskFields(access, adapter, {
+        taskId: mockFixtureIds.visibleTask,
+        fieldIds: Array.from({ length: 257 }, () => 'title'),
+      }),
+    ).resolves.toEqual(['title']);
 
     const administrator = await resolveEffectiveAccess(
       await createVerifiedTestPrincipal({

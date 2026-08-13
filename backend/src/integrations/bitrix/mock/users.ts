@@ -1,4 +1,5 @@
-import type { BitrixFailure, BitrixUsers } from '../contract';
+import { employeeSearchRequestSchema } from '../schemas';
+import type { BitrixEmployeeProfile, BitrixFailure, BitrixUsers } from '../contract';
 import type { MockScenarioController, MockScenarioEffect } from './scenario';
 import type { MockPortalState, MockUserRecord } from './state';
 
@@ -23,6 +24,16 @@ function toBitrixUser(user: {
   departmentIds: string[];
 }) {
   return { ...user, departmentIds: [...user.departmentIds] };
+}
+
+function toEmployeeProfile(user: MockUserRecord): BitrixEmployeeProfile {
+  return {
+    ...toBitrixUser(user),
+    email: user.email ?? null,
+    position: user.position ?? null,
+    photoUrl: user.photoUrl ?? null,
+    profileUrl: user.profileUrl ?? `https://example.bitrix24.test/company/personal/user/${user.id}/`,
+  };
 }
 
 export function createMockUsers(
@@ -53,6 +64,53 @@ export function createMockUsers(
           .filter((user): user is MockUserRecord => user !== undefined)
           .map(toBitrixUser),
       };
+    },
+    async searchEmployees(input) {
+      const effects = scenario.take('users.searchEmployees');
+      applyUserEffects(state, effects);
+      const failure = getFailure(effects);
+      if (failure) return { ok: false, failure };
+
+      const request = employeeSearchRequestSchema.parse(input);
+      const offset = request.cursor === null ? 0 : Number(request.cursor);
+      if (!Number.isSafeInteger(offset) || offset < 0) {
+        return { ok: false, failure: { kind: 'invalid_external_response' } };
+      }
+      const query = request.query.toLocaleLowerCase('ru');
+      const matches = [...state.users.values()]
+        .filter((user) => request.includeInactive || user.isActive)
+        .filter(
+          (user) =>
+            request.departmentId === null || user.departmentIds.includes(request.departmentId),
+        )
+        .filter((user) => {
+          if (query === '') return true;
+          return [user.displayName, user.position ?? '', user.email ?? ''].some((value) =>
+            value.toLocaleLowerCase('ru').includes(query),
+          );
+        })
+        .sort((left, right) => left.displayName.localeCompare(right.displayName, 'ru'));
+      const items = matches.slice(offset, offset + request.pageSize).map(toEmployeeProfile);
+      const nextOffset = offset + items.length;
+      return {
+        ok: true,
+        value: {
+          items,
+          total: matches.length,
+          nextCursor: nextOffset < matches.length ? String(nextOffset) : null,
+        },
+      };
+    },
+    async getEmployeeProfile(userId) {
+      const effects = scenario.take('users.getEmployeeProfile', userId);
+      applyUserEffects(state, effects);
+      const failure = getFailure(effects);
+      if (failure) return { ok: false, failure };
+
+      const user = state.users.get(userId);
+      return user
+        ? { ok: true, value: toEmployeeProfile(user) }
+        : { ok: false, failure: { kind: 'not_found_or_forbidden' } };
     },
   };
 }

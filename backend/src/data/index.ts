@@ -1,9 +1,11 @@
 import type { RuntimeEnvironment } from '../runtime/configuration';
+import { AccessManagementRepository } from './access-management-repository';
 import { AuditWriter } from './audit';
 import { createServerSupabaseClient, type SupabaseFetch } from './client';
 import { TaskCommanderRepositories } from './repositories';
 
 export * from './access';
+export * from './access-management-repository';
 export * from './audit';
 export * from './cursor';
 export * from './errors';
@@ -21,4 +23,11 @@ export function createAuditWriter(
   requestFetch?: SupabaseFetch,
 ): AuditWriter {
   return new AuditWriter(createServerSupabaseClient(env, requestFetch));
+}
+
+export function createAccessManagementRepository(
+  env: RuntimeEnvironment,
+  requestFetch?: SupabaseFetch,
+): AccessManagementRepository {
+  return new AccessManagementRepository(createServerSupabaseClient(env, requestFetch));
 }

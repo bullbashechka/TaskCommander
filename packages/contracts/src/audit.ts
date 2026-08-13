@@ -6,6 +6,7 @@ import {
   fieldIdSchema,
   isoDateTimeSchema,
   nonNegativeIntegerSchema,
+  positiveIntegerSchema,
 } from './primitives';
 
 const displayNameSchema = z.string().trim().min(1).max(256);
@@ -94,7 +95,7 @@ const operationDetailsSchema = z
   })
   .strict();
 
-const accessDetailsSchema = z
+const legacyAccessDetailsSchema = z
   .object({
     kind: z.literal('access'),
     addedPermissions: z.array(z.string().trim().min(1).max(64)).max(10).default([]),
@@ -102,6 +103,21 @@ const accessDetailsSchema = z
     addedFieldIds: z.array(fieldIdSchema).max(256).default([]),
     removedFieldIds: z.array(fieldIdSchema).max(256).default([]),
     reasonCode: reasonCodeSchema.nullable().default(null),
+  })
+  .strict();
+
+const redactedAccessDetailsSchema = z
+  .object({
+    kind: z.literal('access'),
+    version: z.literal(2),
+    previousAccessVersion: positiveIntegerSchema.nullable(),
+    newAccessVersion: positiveIntegerSchema,
+    accessState: z.enum(['active', 'revoked']),
+    addedPermissions: z.array(z.string().trim().min(1).max(64)).max(10),
+    removedPermissions: z.array(z.string().trim().min(1).max(64)).max(10),
+    addedFieldCount: nonNegativeIntegerSchema,
+    removedFieldCount: nonNegativeIntegerSchema,
+    reasonCode: reasonCodeSchema.nullable(),
   })
   .strict();
 
@@ -145,9 +161,10 @@ const systemDetailsSchema = z
   })
   .strict();
 
-export const auditDetailsSchema = z.discriminatedUnion('kind', [
+export const auditDetailsSchema = z.union([
   operationDetailsSchema,
-  accessDetailsSchema,
+  legacyAccessDetailsSchema,
+  redactedAccessDetailsSchema,
   reportDetailsSchema,
   auditViewDetailsSchema,
   retentionDetailsSchema,

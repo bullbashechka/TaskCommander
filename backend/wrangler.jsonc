@@ -24,6 +24,11 @@
         "queue": "task-commander-local-operations-v1",
         "remote": false,
       },
+      {
+        "binding": "ACCESS_COMMANDS_QUEUE",
+        "queue": "task-commander-local-access-commands-v1",
+        "remote": false,
+      },
     ],
   },
   "r2_buckets": [

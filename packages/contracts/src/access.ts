@@ -19,16 +19,15 @@ export const permissionSchema = z.enum(appPermissions);
 
 export type Permission = z.infer<typeof permissionSchema>;
 
-const uniquePermissionsSchema = z
+export const uniquePermissionsSchema = z
   .array(permissionSchema)
   .max(appPermissions.length)
   .refine((permissions) => new Set(permissions).size === permissions.length, {
     message: 'Permissions must be unique.',
   });
 
-const uniqueFieldIdsSchema = z
+export const uniqueFieldIdsSchema = z
   .array(fieldIdSchema)
-  .max(256)
   .refine((fieldIds) => new Set(fieldIds).size === fieldIds.length, {
     message: 'Field IDs must be unique.',
   });

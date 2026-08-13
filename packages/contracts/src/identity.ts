@@ -47,7 +47,6 @@ export const userAccessSchema = z
       .refine((permissions) => new Set(permissions).size === permissions.length),
     allowedFieldIds: z
       .array(fieldIdSchema)
-      .max(256)
       .refine((fieldIds) => new Set(fieldIds).size === fieldIds.length),
     grantedAt: isoDateTimeSchema,
     updatedAt: isoDateTimeSchema,

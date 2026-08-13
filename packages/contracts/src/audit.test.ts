@@ -85,4 +85,35 @@ describe('audit contracts', () => {
       }),
     ).toMatchObject({ action: 'future_action', details: null });
   });
+
+  it('reads the redacted access-management audit payload without field identifiers', () => {
+    expect(
+      parseAuditEventForRead({
+        id: '123e4567-e89b-42d3-a456-426614174001',
+        schemaVersion: 1,
+        occurredAt: timestamp,
+        recordedAt: timestamp,
+        action: 'access_update',
+        actor: { type: 'user', id: '42', displayName: 'Иван Петров' },
+        subject: { type: 'access', id: '77', displayName: 'Анна Смирнова' },
+        relatedObjects: [],
+        outcome: 'success',
+        correlationId,
+        details: {
+          kind: 'access',
+          version: 2,
+          previousAccessVersion: 3,
+          newAccessVersion: 4,
+          accessState: 'active',
+          addedPermissions: ['view_own_reports'],
+          removedPermissions: [],
+          addedFieldCount: 300,
+          removedFieldCount: 0,
+          reasonCode: null,
+        },
+      }),
+    ).toMatchObject({
+      details: { kind: 'access', version: 2, addedFieldCount: 300 },
+    });
+  });
 });

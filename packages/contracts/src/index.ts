@@ -1,4 +1,5 @@
 export * from './access';
+export * from './access-management';
 export * from './audit';
 export * from './errors';
 export * from './health';

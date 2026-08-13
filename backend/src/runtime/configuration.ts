@@ -12,6 +12,7 @@ export interface RuntimeEnvironment {
   MOCK_LAUNCH_SIGNING_SECRET?: string;
   LOCAL_SUPABASE_ALLOWED_HOSTS?: string;
   OPERATIONS_QUEUE?: unknown;
+  ACCESS_COMMANDS_QUEUE?: unknown;
   REPORTS_BUCKET?: unknown;
   SUPABASE_SERVICE_ROLE_KEY?: string;
   SUPABASE_URL?: string;
@@ -95,7 +96,11 @@ export function getRuntimeReadiness(env: RuntimeEnvironment): HealthResponse {
   const bitrix = hasLocalIdentityConfiguration(env) ? 'ready' : 'invalid_configuration';
   const subsystems = {
     runtime,
-    queue: hasBindingMethods(env.OPERATIONS_QUEUE, ['send']) ? 'ready' : 'invalid_configuration',
+    queue:
+      hasBindingMethods(env.OPERATIONS_QUEUE, ['send']) &&
+      hasBindingMethods(env.ACCESS_COMMANDS_QUEUE, ['send'])
+        ? 'ready'
+        : 'invalid_configuration',
     r2: hasBindingMethods(env.REPORTS_BUCKET, ['put', 'get', 'delete'])
       ? 'ready'
       : 'invalid_configuration',

@@ -16,6 +16,13 @@
         "max_retries": 3,
         "dead_letter_queue": "task-commander-local-operations-dlq-v1",
       },
+      {
+        "queue": "task-commander-local-access-commands-v1",
+        "max_batch_size": 5,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "task-commander-local-access-commands-dlq-v1",
+      },
     ],
   },
   "r2_buckets": [

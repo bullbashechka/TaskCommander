@@ -55,5 +55,26 @@ export function createMockOrganization(
           .map(toDepartment),
       };
     },
+    async snapshotDepartmentMembers(departmentId) {
+      const effects = scenario.take('organization.snapshotDepartmentMembers', departmentId);
+      applyOrganizationEffects(state, effects);
+      const failure = getFailure(effects);
+      if (failure) return { ok: false, failure };
+      if (!state.departments.has(departmentId)) {
+        return { ok: false, failure: { kind: 'not_found_or_forbidden' } };
+      }
+
+      return {
+        ok: true,
+        value: {
+          departmentId,
+          capturedAt: state.now,
+          memberIds: [...state.users.values()]
+            .filter((user) => user.isActive && user.departmentIds.includes(departmentId))
+            .map((user) => user.id)
+            .sort((left, right) => Number(left) - Number(right)),
+        },
+      };
+    },
   };
 }

@@ -40,7 +40,7 @@ describe('access contracts', () => {
     ).toBe(false);
   });
 
-  it('rejects duplicate or oversized public permission and field lists', () => {
+  it('rejects duplicates without imposing an assignment-size cap', () => {
     expect(
       effectiveAccessResponseSchema.safeParse({
         permissions: ['app_access', 'app_access'],
@@ -58,7 +58,7 @@ describe('access contracts', () => {
         kind: 'subset',
         fieldIds: Array.from({ length: 257 }, (_, index) => `field_${index}`),
       }).success,
-    ).toBe(false);
+    ).toBe(true);
     expect(
       fieldScopeSchema.safeParse({ kind: 'subset', fieldIds: ['title', 'title'] }).success,
     ).toBe(false);

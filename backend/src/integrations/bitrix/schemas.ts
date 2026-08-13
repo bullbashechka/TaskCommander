@@ -160,6 +160,42 @@ export const bitrixUserSchema = z
   })
   .strict();
 
+export const bitrixEmployeeProfileSchema = bitrixUserSchema.extend({
+  email: z.string().email().max(320).nullable(),
+  position: z.string().trim().min(1).max(256).nullable(),
+  photoUrl: z.string().url().max(2_048).nullable(),
+  profileUrl: z.string().url().max(2_048).nullable(),
+});
+
+export const employeeSearchRequestSchema = z
+  .object({
+    query: z.string().trim().max(256).default(''),
+    cursor: z.string().trim().min(1).max(128).nullable().default(null),
+    pageSize: z.number().int().min(1).max(50).default(50),
+    departmentId: bitrixIdSchema.nullable().default(null),
+    includeInactive: z.boolean().default(true),
+  })
+  .strict();
+
+export const employeeSearchPageSchema = z
+  .object({
+    items: z.array(bitrixEmployeeProfileSchema).max(50),
+    nextCursor: z.string().trim().min(1).max(128).nullable(),
+    total: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const departmentMemberSnapshotSchema = z
+  .object({
+    departmentId: bitrixIdSchema,
+    capturedAt: z.string().datetime({ offset: true }),
+    memberIds: z
+      .array(bitrixIdSchema)
+      .max(10_000)
+      .refine((ids) => new Set(ids).size === ids.length),
+  })
+  .strict();
+
 export const bitrixDepartmentSchema = z
   .object({
     id: bitrixIdSchema,

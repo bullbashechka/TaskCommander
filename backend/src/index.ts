@@ -1,3 +1,4 @@
+import { dispatchPendingAccessCommands } from './access-management/dispatch';
 import { api } from './api';
 import { hasLocalRuntimeConfiguration } from './runtime/configuration';
 
@@ -7,7 +8,7 @@ const worker: ExportedHandler<Env> = {
   fetch(request, env, context) {
     return api.fetch(request, env, context);
   },
-  scheduled(controller, env) {
+  scheduled(controller, env, context) {
     if (!hasLocalRuntimeConfiguration(env)) {
       console.error(JSON.stringify({ event: 'runtime_cron_probe_configuration_error' }));
       return;
@@ -19,6 +20,7 @@ const worker: ExportedHandler<Env> = {
         scheduledTime: controller.scheduledTime,
       }),
     );
+    context.waitUntil(dispatchPendingAccessCommands(env));
   },
 };
 

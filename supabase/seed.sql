@@ -38,7 +38,7 @@ values
     '1002',
     'Тестовый оператор',
     true,
-    array['app_access', 'run_bulk_operations', 'view_own_reports']::text[],
+    array['app_access', 'run_bulk_operations', 'change_allowed_fields', 'view_own_reports']::text[],
     array['deadline']::text[],
     now()
   )
@@ -50,7 +50,8 @@ set
   allowed_field_ids = excluded.allowed_field_ids,
   granted_at = excluded.granted_at,
   granted_by_user_id = null,
-  access_revoked_at = null;
+  access_revoked_at = null,
+  access_version = public.user_settings.access_version + 1;
 
 insert into public.saved_filter (portal_id, owner_id, name, filter_payload)
 values (

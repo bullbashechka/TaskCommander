@@ -4,6 +4,7 @@
 interface __BaseEnv_Env {
 	REPORTS_BUCKET: R2Bucket;
 	OPERATIONS_QUEUE: Queue;
+	ACCESS_COMMANDS_QUEUE: Queue;
 	APP_ENV: "local";
 	BITRIX_ADAPTER: "mock";
 	LOCAL_SUPABASE_ALLOWED_HOSTS: "";

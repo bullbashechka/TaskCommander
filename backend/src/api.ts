@@ -12,7 +12,12 @@ import {
   createSessionService,
   type VerifiedSessionPrincipal,
 } from './auth/session-service';
-import { createTaskCommanderRepositories } from './data';
+import { createAccessManagementRoutes } from './access-management/routes';
+import {
+  createAccessManagementRepository,
+  createTaskCommanderRepositories,
+  type AccessManagementRepository,
+} from './data';
 import {
   EffectiveAccessError,
   getEffectiveAccessResponse,
@@ -22,6 +27,8 @@ import {
   type EffectiveAccessSettingsReader,
 } from './data/access';
 import { createApiErrorResponse, ApiHttpError } from './http/errors';
+import type { BitrixAdapter } from './integrations/bitrix/contract';
+import { createBitrixAdapter } from './integrations/bitrix/factory';
 import { parseJsonBody } from './http/validation';
 import { getRuntimeReadiness, type RuntimeEnvironment } from './runtime/configuration';
 import { createRuntimeProbe } from './runtime/probe';
@@ -31,11 +38,22 @@ type ApiVariables = {
 };
 
 export interface ApiDependencies {
+  readonly readPrincipal?: (
+    env: RuntimeEnvironment,
+    cookie: string | null,
+  ) => Promise<VerifiedSessionPrincipal>;
   readonly readEffectiveAccess?: (
     env: RuntimeEnvironment,
     principal: VerifiedSessionPrincipal,
   ) => Promise<EffectiveAccess>;
   readonly createSettingsReader?: (env: RuntimeEnvironment) => EffectiveAccessSettingsReader;
+  readonly createBitrixAdapter?: (
+    env: RuntimeEnvironment,
+    input: { currentUserId: string },
+  ) => BitrixAdapter;
+  readonly createAccessManagementRepository?: (
+    env: RuntimeEnvironment,
+  ) => AccessManagementRepository;
 }
 
 function toApiHttpError(error: EffectiveAccessError): ApiHttpError {
@@ -61,6 +79,7 @@ export function createApi(dependencies: ApiDependencies = {}) {
         findEffectiveAccessSettings: async (input) =>
           createSettingsReader(env).findEffectiveAccessSettings(input),
       }));
+  const bitrixAdapterFactory = dependencies.createBitrixAdapter ?? createBitrixAdapter;
 
   api.use('/api/*', async (context, next) => {
     const correlationId = `TC-${crypto.randomUUID()}`;
@@ -82,6 +101,17 @@ export function createApi(dependencies: ApiDependencies = {}) {
     context.header('vary', 'Cookie');
     await next();
   });
+  api.route(
+    '/api/access-management',
+    createAccessManagementRoutes({
+      readPrincipal:
+        dependencies.readPrincipal ?? ((env, cookie) => createSessionService(env).read(cookie)),
+      readEffectiveAccess,
+      createAdapter: bitrixAdapterFactory,
+      createRepository:
+        dependencies.createAccessManagementRepository ?? createAccessManagementRepository,
+    }),
+  );
 
   api.get('/api/health', (context) => context.json(getRuntimeReadiness(context.env)));
 

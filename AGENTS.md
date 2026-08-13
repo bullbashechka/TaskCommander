@@ -34,6 +34,21 @@ Requests to inspect, discuss, analyze, review, or plan a task authorize read-onl
 
 Design work starts with task 11. When task 11 is reached or requested, remind the user that the design phase begins at this task before proceeding.
 
+Design work is expected in the following tasks:
+
+- 011: access management and allowed-fields interface.
+- 013: application shell, navigation, and shared UI states.
+- 015: filter builder, sorting, and saved-filter flows.
+- 016: task table, pagination, and selection states.
+- 017: bulk-change editor and dynamic field forms.
+- 020: preflight preview, exclusions, warnings, and confirmation flow.
+- 023: operation progress, cancellation, and interruption states.
+- 024: retry flow through renewed validation, preview, and confirmation.
+- 025: task selection and preview flow for restoring previous values.
+- 028: operation history, report details, actions, and archive interface.
+- 030: read-only audit journal interface.
+- 034: UX accessibility, empty/error/offline states, and desktop-browser compatibility review and refinement.
+
 Task 11 approval gate: do not perform, start, plan, prepare, or modify anything related to task 11 without the user's explicit prior consent. Merely reaching or mentioning task 11 is not consent. Stop and wait for explicit authorization before taking any action.
 
 ## Commit & Pull Request Guidelines

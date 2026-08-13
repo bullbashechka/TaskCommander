@@ -37,12 +37,11 @@ const effectiveAccessSettingsSchema = z
       .refine((permissions) => new Set(permissions).size === permissions.length),
     allowedFieldIds: z
       .array(canonicalPersistedFieldIdSchema)
-      .max(256)
       .refine((fieldIds) => new Set(fieldIds).size === fieldIds.length),
   })
   .strict();
 
-const requestedFieldIdsSchema = z.array(fieldIdSchema).max(256);
+const requestedFieldIdsSchema = z.array(fieldIdSchema);
 
 const reportActionInputSchema = z
   .object({

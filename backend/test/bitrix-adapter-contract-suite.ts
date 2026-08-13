@@ -35,8 +35,19 @@ export async function expectBitrixAdapterContract(adapter: BitrixAdapter): Promi
 
   expectSuccess(await adapter.users.getCurrent());
   expectSuccess(await adapter.users.getByIds(['10']));
+  expectSuccess(
+    await adapter.users.searchEmployees({
+      query: '',
+      cursor: null,
+      pageSize: 10,
+      departmentId: null,
+      includeInactive: true,
+    }),
+  );
+  expectSuccess(await adapter.users.getEmployeeProfile('10'));
   expectSuccess(await adapter.organization.getDepartments());
   expectSuccess(await adapter.organization.getLeadership('20'));
+  expectSuccess(await adapter.organization.snapshotDepartmentMembers('1'));
   expectSuccess(await adapter.calendar.getPortalCalendar({ fromYear: 2026, toYear: 2026 }));
   expectSuccess(
     await adapter.notifications.sendOnce({

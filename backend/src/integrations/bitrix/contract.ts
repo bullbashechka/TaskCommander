@@ -3,11 +3,15 @@ import type { z } from 'zod';
 import {
   bitrixDepartmentSchema,
   bitrixFailureSchema,
+  bitrixEmployeeProfileSchema,
   bitrixUserSchema,
+  departmentMemberSnapshotSchema,
   diskFileSchema,
   diskPutReportRequestSchema,
   notificationRequestSchema,
   notificationSchema,
+  employeeSearchPageSchema,
+  employeeSearchRequestSchema,
   portalCalendarSchema,
   taskApplyOutcomeSchema,
   taskApplyRequestSchema,
@@ -29,6 +33,10 @@ export type TaskReadForChangeRequest = z.infer<typeof taskReadForChangeRequestSc
 export type TaskApplyRequest = z.infer<typeof taskApplyRequestSchema>;
 export type TaskApplyOutcome = z.infer<typeof taskApplyOutcomeSchema>;
 export type BitrixUser = z.infer<typeof bitrixUserSchema>;
+export type BitrixEmployeeProfile = z.infer<typeof bitrixEmployeeProfileSchema>;
+export type EmployeeSearchRequest = z.infer<typeof employeeSearchRequestSchema>;
+export type EmployeeSearchPage = z.infer<typeof employeeSearchPageSchema>;
+export type DepartmentMemberSnapshot = z.infer<typeof departmentMemberSnapshotSchema>;
 export type BitrixDepartment = z.infer<typeof bitrixDepartmentSchema>;
 export type PortalCalendar = z.infer<typeof portalCalendarSchema>;
 export type NotificationRequest = z.infer<typeof notificationRequestSchema>;
@@ -46,11 +54,16 @@ export interface BitrixTasks {
 export interface BitrixUsers {
   getCurrent(): Promise<BitrixResult<BitrixUser>>;
   getByIds(userIds: readonly string[]): Promise<BitrixResult<readonly BitrixUser[]>>;
+  searchEmployees(request: EmployeeSearchRequest): Promise<BitrixResult<EmployeeSearchPage>>;
+  getEmployeeProfile(userId: string): Promise<BitrixResult<BitrixEmployeeProfile>>;
 }
 
 export interface BitrixOrganization {
   getDepartments(): Promise<BitrixResult<readonly BitrixDepartment[]>>;
   getLeadership(userId: string): Promise<BitrixResult<readonly BitrixDepartment[]>>;
+  snapshotDepartmentMembers(
+    departmentId: string,
+  ): Promise<BitrixResult<DepartmentMemberSnapshot>>;
 }
 
 export interface BitrixCalendar {
