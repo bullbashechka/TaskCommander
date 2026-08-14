@@ -1,24 +1,74 @@
 const channelName = 'task-commander:access';
-const messageType = 'access-invalidated';
+const accessInvalidatedMessageType = 'access-invalidated';
+const securityContextInvalidatedMessageType = 'security-context-invalidated';
+const synchronizationSourceId = (() => {
+  try {
+    return globalThis.crypto.randomUUID();
+  } catch {
+    return `${Date.now()}-${Math.random()}`;
+  }
+})();
 
-export function notifyAccessInvalidated(): void {
+type InvalidationMessageType =
+  typeof accessInvalidatedMessageType | typeof securityContextInvalidatedMessageType;
+
+function notify(type: InvalidationMessageType): void {
   if (typeof BroadcastChannel === 'undefined') return;
-  const channel = new BroadcastChannel(channelName);
-  channel.postMessage({ type: messageType });
-  channel.close();
+  let channel: BroadcastChannel | undefined;
+  try {
+    channel = new BroadcastChannel(channelName);
+    channel.postMessage({ sourceId: synchronizationSourceId, type });
+  } catch {
+    // Cross-tab synchronization is best-effort; the initiating tab still refreshes locally.
+  } finally {
+    try {
+      channel?.close();
+    } catch {
+      // A broken BroadcastChannel must not change the result of the completed user action.
+    }
+  }
 }
 
-export function listenForAccessInvalidation(onInvalidate: () => void): () => void {
+export function notifyAccessInvalidated(): void {
+  notify(accessInvalidatedMessageType);
+}
+
+export function notifySecurityContextInvalidated(): void {
+  notify(securityContextInvalidatedMessageType);
+}
+
+function listenFor(type: InvalidationMessageType, onInvalidate: () => void): () => void {
   if (typeof BroadcastChannel === 'undefined') return () => undefined;
-  const channel = new BroadcastChannel(channelName);
+  let channel: BroadcastChannel;
+  try {
+    channel = new BroadcastChannel(channelName);
+  } catch {
+    return () => undefined;
+  }
   channel.onmessage = (event: MessageEvent<unknown>) => {
+    const message = event.data as { sourceId?: unknown; type?: unknown };
     if (
       typeof event.data === 'object' &&
       event.data !== null &&
-      (event.data as { type?: unknown }).type === messageType
+      message.type === type &&
+      message.sourceId !== synchronizationSourceId
     ) {
       onInvalidate();
     }
   };
-  return () => channel.close();
+  return () => {
+    try {
+      channel.close();
+    } catch {
+      // Cleanup stays safe if the browser channel has already failed.
+    }
+  };
+}
+
+export function listenForAccessInvalidation(onInvalidate: () => void): () => void {
+  return listenFor(accessInvalidatedMessageType, onInvalidate);
+}
+
+export function listenForSecurityContextInvalidation(onInvalidate: () => void): () => void {
+  return listenFor(securityContextInvalidatedMessageType, onInvalidate);
 }

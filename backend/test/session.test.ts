@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   apiErrorResponseSchema,
@@ -21,6 +21,7 @@ const sessionSecret = 'test-session-signing-secret-0000001';
 const fixedNow = new Date('2026-08-12T10:00:00.000Z');
 const fixedTimestamp = Math.floor(fixedNow.getTime() / 1_000);
 const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+const localDevSessionUrl = 'http://localhost/api/_dev/session';
 const environment = {
   APP_ENV: 'local',
   BITRIX_ADAPTER: 'mock',
@@ -67,6 +68,167 @@ function cookieValue(setCookie: string | null): string {
 }
 
 describe('local Bitrix identity session', () => {
+  it('creates local developer sessions without exposing the launch context or secrets', async () => {
+    const principals = {
+      '1': {
+        portalId: 'local-demo',
+        userId: '1',
+        displayName: 'Portal administrator',
+        isBitrixAdmin: true,
+      },
+      '10': {
+        portalId: 'local-demo',
+        userId: '10',
+        displayName: 'Operator',
+        isBitrixAdmin: false,
+      },
+    } as const;
+
+    for (const userId of ['1', '10'] as const) {
+      const login = await api.request(
+        localDevSessionUrl,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ userId }),
+        },
+        environment,
+      );
+
+      expect(login.status).toBe(204);
+      expect(login.headers.get('cache-control')).toBe('no-store');
+      expect(login.headers.get('set-cookie')).toMatch(
+        /^tc_session=[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+; Path=\/api; HttpOnly; Secure; SameSite=Lax; Max-Age=900$/,
+      );
+      const responseText = await login.clone().text();
+      expect(responseText).toBe('');
+      expect(responseText).not.toContain(mockLaunchSecret);
+      expect(responseText).not.toContain(sessionSecret);
+
+      const session = await api.request(
+        'https://example.test/api/session',
+        { headers: { cookie: cookieValue(login.headers.get('set-cookie')) } },
+        environment,
+      );
+      expect(sessionResponseSchema.parse(await session.json())).toEqual({
+        principal: principals[userId],
+      });
+    }
+
+    const administratorLogin = await api.request(
+      localDevSessionUrl,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ userId: '1' }),
+      },
+      environment,
+    );
+    const access = await api.request(
+      'https://example.test/api/access',
+      { headers: { cookie: cookieValue(administratorLogin.headers.get('set-cookie')) } },
+      environment,
+    );
+    expect(await access.json()).toEqual({
+      permissions: appPermissions,
+      fieldScope: { kind: 'all' },
+    });
+  });
+
+  it('hides local developer sessions outside the local runtime before parsing the request', async () => {
+    const response = await api.request(
+      'https://example.test/api/_dev/session',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'text/plain' },
+        body: '{',
+      },
+      {
+        APP_ENV: 'production',
+        BITRIX_ADAPTER: 'mock',
+        MOCK_LAUNCH_SIGNING_SECRET: mockLaunchSecret,
+        SESSION_SIGNING_SECRET: sessionSecret,
+      },
+    );
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get('set-cookie')).toBeNull();
+    expect(apiErrorResponseSchema.parse(await response.json()).error.code).toBe('NOT_FOUND');
+  });
+
+  it('hides local developer sessions on a non-loopback host even in the local runtime', async () => {
+    for (const url of [
+      'https://example.test/api/_dev/session',
+      'https://127.attacker.test/api/_dev/session',
+    ]) {
+      const response = await api.request(
+        url,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'text/plain' },
+          body: '{',
+        },
+        environment,
+      );
+
+      expect(response.status).toBe(404);
+      expect(response.headers.get('set-cookie')).toBeNull();
+      expect(apiErrorResponseSchema.parse(await response.json()).error.code).toBe('NOT_FOUND');
+    }
+  });
+
+  it('rejects invalid local developer session requests without issuing a cookie', async () => {
+    const invalidRequests = [
+      { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ userId: '99' }) },
+      { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ userId: '999' }) },
+      { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ userId: 1 }) },
+      {
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ userId: '1', extra: true }),
+      },
+      { headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) },
+      { headers: { 'content-type': 'text/plain' }, body: JSON.stringify({ userId: '1' }) },
+    ];
+
+    for (const request of invalidRequests) {
+      const response = await api.request(
+        localDevSessionUrl,
+        { method: 'POST', ...request },
+        environment,
+      );
+      expect(response.status).toBe(400);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      expect(response.headers.get('set-cookie')).toBeNull();
+      expect(apiErrorResponseSchema.parse(await response.json()).error.code).toBe(
+        'INVALID_REQUEST',
+      );
+    }
+  });
+
+  it('fails local developer session setup safely when signing configuration is incomplete', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const response = await api.request(
+        localDevSessionUrl,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ userId: '1' }),
+        },
+        { APP_ENV: 'local', BITRIX_ADAPTER: 'mock', SESSION_SIGNING_SECRET: sessionSecret },
+      );
+
+      const responseText = await response.clone().text();
+      expect(response.status).toBe(503);
+      expect(response.headers.get('set-cookie')).toBeNull();
+      expect(responseText).not.toContain(mockLaunchSecret);
+      expect(responseText).not.toContain(sessionSecret);
+      expect(error).not.toHaveBeenCalled();
+    } finally {
+      error.mockRestore();
+    }
+  });
+
   it('creates a safe session for an active operator and does not leak the launch context', async () => {
     const context = await liveLaunchContext('10');
     const response = await api.request(

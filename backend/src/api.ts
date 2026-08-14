@@ -12,6 +12,10 @@ import {
   createSessionService,
   type VerifiedSessionPrincipal,
 } from './auth/session-service';
+import {
+  createLocalDevSession,
+  createLocalDevSessionRequestSchema,
+} from './auth/local-dev-session';
 import { createAccessManagementRoutes } from './access-management/routes';
 import {
   CurrentIdentityError,
@@ -33,7 +37,7 @@ import {
 import { createApiErrorResponse, ApiHttpError } from './http/errors';
 import type { BitrixAdapter } from './integrations/bitrix/contract';
 import { createBitrixAdapter } from './integrations/bitrix/factory';
-import { parseJsonBody } from './http/validation';
+import { parseJsonBody, requireJsonContentType } from './http/validation';
 import { getRuntimeReadiness, type RuntimeEnvironment } from './runtime/configuration';
 import { createRuntimeProbe } from './runtime/probe';
 
@@ -96,8 +100,8 @@ export function createApi(dependencies: ApiDependencies = {}) {
       }));
   const bitrixAdapterFactory = dependencies.createBitrixAdapter ?? createBitrixAdapter;
   const readSignedPrincipal =
-    dependencies.readPrincipal ?? ((env: RuntimeEnvironment, cookie: string | null) =>
-      createSessionService(env).read(cookie));
+    dependencies.readPrincipal ??
+    ((env: RuntimeEnvironment, cookie: string | null) => createSessionService(env).read(cookie));
   const readCurrentPrincipal = async (
     env: RuntimeEnvironment,
     cookie: string | null,
@@ -109,7 +113,7 @@ export function createApi(dependencies: ApiDependencies = {}) {
         env,
         principal,
         adapter: bitrixAdapterFactory(env, { currentUserId: principal.userId }),
-        repository:
+        createRepository: () =>
           dependencies.createAccessManagementRepository?.(env) ??
           createAccessManagementRepository(env),
         correlationId,
@@ -135,6 +139,11 @@ export function createApi(dependencies: ApiDependencies = {}) {
     await next();
   });
 
+  api.use('/api/_dev/session', async (context, next) => {
+    context.header('cache-control', 'no-store');
+    await next();
+  });
+
   api.use('/api/access', async (context, next) => {
     context.header('cache-control', 'no-store');
     context.header('vary', 'Cookie');
@@ -143,8 +152,8 @@ export function createApi(dependencies: ApiDependencies = {}) {
   api.route(
     '/api/access-management',
     createAccessManagementRoutes({
-      readPrincipal:
-        (env, cookie) => readCurrentPrincipal(env, cookie, `TC-${crypto.randomUUID()}`),
+      readPrincipal: (env, cookie) =>
+        readCurrentPrincipal(env, cookie, `TC-${crypto.randomUUID()}`),
       readEffectiveAccess,
       createAdapter: bitrixAdapterFactory,
       createRepository:
@@ -172,6 +181,25 @@ export function createApi(dependencies: ApiDependencies = {}) {
 
   api.delete('/api/session', (context) => {
     context.header('set-cookie', clearSessionCookie());
+    return context.body(null, 204);
+  });
+
+  api.post('/api/_dev/session', async (context) => {
+    const hostname = new URL(context.req.url).hostname.toLowerCase();
+    const isLoopback =
+      hostname === 'localhost' ||
+      hostname.endsWith('.localhost') ||
+      /^127(?:\.\d{1,3}){3}$/.test(hostname) ||
+      hostname === '[::1]' ||
+      hostname === '::1';
+    if (context.env.APP_ENV !== 'local' || !isLoopback) {
+      return context.notFound();
+    }
+
+    requireJsonContentType(context.req.raw);
+    const request = await parseJsonBody(context.req.raw, createLocalDevSessionRequestSchema, 64);
+    const session = await createLocalDevSession(context.env, request.userId);
+    context.header('set-cookie', session.cookie);
     return context.body(null, 204);
   });
 

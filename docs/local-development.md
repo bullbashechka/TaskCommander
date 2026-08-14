@@ -73,13 +73,28 @@ Rollback-файлы в `supabase/tests/rollback` не являются productio
 `backend/wrangler.jsonc` требуется сгенерировать типы отдельной командой `bun run cf-typegen`;
 сгенерированный `backend/worker-configuration.d.ts` вручную не редактируется.
 
-Локальный API использует только `POST`, `GET` и `DELETE /api/session`. `POST` принимает
+Локальный API использует `POST`, `GET` и `DELETE /api/session`. Обычный `POST` принимает
 подписанный mock launch context, заново читает текущего пользователя mock Bitrix24 и выдаёт
 новую stateless HttpOnly cookie. Cookie ограничена `/api`, использует `Secure` и `SameSite=Lax`;
 это политика локального mock-контура, а не утверждение о финальной cookie-политике embedded
 iframe. Production OAuth, атрибуты cookie для реального iframe и защита межсайтового запуска
 относятся к задаче 035. Cookie не содержит OAuth-токенов, разрешений или иных данных Bitrix24
 помимо подписанных session claims.
+
+Для быстрого локального запуска доступен endpoint `POST /api/_dev/session`. Он работает только при
+`APP_ENV=local` и обращении через loopback-host (`localhost`, `*.localhost`, `127.*` или `::1`),
+принимает строгий JSON с заранее разрешённым `userId` (`"1"` или `"10"`), сам создаёт
+короткоживущий подписанный launch context и выдаёт ту же session cookie. Ответ всегда пустой
+(`204`); launch context и значения signing secrets не покидают Worker. Вне local runtime или на
+не-localhost адресе endpoint возвращает `404`.
+
+После заполнения обоих secrets запустите `bun run dev` и откройте URL Vite через `localhost`.
+На экране «Сессия завершена» в dev-режиме нажмите «Войти локально»: будет создана сессия
+mock-администратора с `userId: "1"` и `portalId: "local-demo"`, которая не требует Supabase для
+базового доступа к приложению. Пользователь `"10"` доступен для прямых API-тестов роли оператора;
+его прикладовые права, как и у обычного пользователя, требуют настроенной Supabase. Session cookie
+действует 15 минут, после чего локальный вход нужно повторить вручную. Production-сборка не
+показывает эту кнопку.
 
 Mock launch context является короткоживущим bearer token и может повторно использоваться в пределах TTL.
 `nonce` служит только для уникальности и корреляции, не реализует атомарную защиту от replay.

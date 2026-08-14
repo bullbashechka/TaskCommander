@@ -98,3 +98,17 @@ export async function parseJsonBody<T>(
 
   return parsed.data;
 }
+
+export function requireJsonContentType(request: Request): void {
+  const contentType = request.headers.get('content-type');
+  const mediaType = contentType?.split(';', 1)[0]?.trim().toLowerCase();
+  if (mediaType === 'application/json') return;
+
+  throw new ApiHttpError(400, 'INVALID_REQUEST', [
+    {
+      path: '$',
+      code: 'invalid_content_type',
+      message: 'Ожидается JSON.',
+    },
+  ]);
+}

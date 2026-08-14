@@ -68,6 +68,7 @@ export async function verifyCurrentSessionPrincipal(input: {
   principal: VerifiedSessionPrincipal;
   adapter: BitrixAdapter;
   repository?: AccessManagementRepository;
+  createRepository?: () => AccessManagementRepository;
   correlationId: string;
 }): Promise<VerifiedSessionPrincipal> {
   let current: Awaited<ReturnType<BitrixAdapter['users']['getCurrent']>>;
@@ -77,7 +78,10 @@ export async function verifyCurrentSessionPrincipal(input: {
     throw new CurrentIdentityError('unavailable');
   }
   if (!current.ok) {
-    if (current.failure.kind === 'not_authenticated' || current.failure.kind === 'permission_denied') {
+    if (
+      current.failure.kind === 'not_authenticated' ||
+      current.failure.kind === 'permission_denied'
+    ) {
       throw new CurrentIdentityError('unauthenticated');
     }
     if (isTransientFailure(current.failure) || current.failure.kind === 'not_found_or_forbidden') {
@@ -89,9 +93,10 @@ export async function verifyCurrentSessionPrincipal(input: {
     throw new CurrentIdentityError('unauthenticated');
   }
   if (!current.value.isActive) {
-    if (input.repository) {
-      try {
-        await applyObservation(input.repository, {
+    try {
+      const repository = input.repository ?? input.createRepository?.();
+      if (repository) {
+        await applyObservation(repository, {
           portalId: input.principal.portalId,
           userId: current.value.id,
           displayName: current.value.displayName,
@@ -100,10 +105,10 @@ export async function verifyCurrentSessionPrincipal(input: {
           source: 'request',
           correlationId: input.correlationId,
         });
-      } catch {
-        // Bitrix24 already confirmed the user is inactive, so the current request must remain denied
-        // even if the durable audit/revocation transaction will need a later Cron retry.
       }
+    } catch {
+      // Bitrix24 already confirmed the user is inactive, so the current request must remain denied
+      // even if the durable audit/revocation transaction will need a later Cron retry.
     }
     throw new CurrentIdentityError('revoked');
   }
@@ -147,7 +152,10 @@ export async function runAutomaticAccessReconciliation(
     try {
       departments = await adapter.organization.getDepartments();
     } catch {
-      departments = { ok: false, failure: { kind: 'temporary_failure', reasonCode: 'REQUEST_FAILED' } };
+      departments = {
+        ok: false,
+        failure: { kind: 'temporary_failure', reasonCode: 'REQUEST_FAILED' },
+      };
     }
     const managerIds = new Set(
       departments.ok
@@ -163,7 +171,10 @@ export async function runAutomaticAccessReconciliation(
       try {
         statuses = await adapter.users.getAccessStatuses(chunk);
       } catch {
-        statuses = { ok: false, failure: { kind: 'temporary_failure', reasonCode: 'REQUEST_FAILED' } };
+        statuses = {
+          ok: false,
+          failure: { kind: 'temporary_failure', reasonCode: 'REQUEST_FAILED' },
+        };
       }
       const statusSnapshotIsComplete =
         statuses.ok && hasCompleteStatusSnapshot(chunk, statuses.value);

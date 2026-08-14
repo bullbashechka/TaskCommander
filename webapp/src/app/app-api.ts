@@ -53,7 +53,11 @@ function errorKind(status: number, code: ApiErrorCode | undefined): AppApiErrorK
   if (status === 401 || code === 'UNAUTHENTICATED') return 'session_required';
   if (status === 403 || code === 'FORBIDDEN' || code === 'ACCESS_REVOKED') return 'access_denied';
   if (status === 429 || code === 'RATE_LIMITED') return 'rate_limited';
-  if (status >= 500 || code === 'UPSTREAM_UNAVAILABLE' || code === 'ACCESS_VERIFICATION_UNAVAILABLE') {
+  if (
+    status >= 500 ||
+    code === 'UPSTREAM_UNAVAILABLE' ||
+    code === 'ACCESS_VERIFICATION_UNAVAILABLE'
+  ) {
     return 'temporary';
   }
   return 'internal';
@@ -94,11 +98,19 @@ function composeAbortSignal(signal: AbortSignal | undefined): {
   };
 }
 
-async function requestJson<T>(path: string, schema: SafeParser<T>, signal?: AbortSignal): Promise<T> {
+async function request<T>(
+  path: string,
+  parseSuccess: (payload: unknown, response: Response) => T,
+  signal?: AbortSignal,
+  init?: RequestInit,
+): Promise<T> {
   const abort = composeAbortSignal(signal);
   try {
+    const headers = new Headers(init?.headers);
+    if (!headers.has('accept')) headers.set('accept', 'application/json');
     const response = await fetch(path, {
-      headers: { accept: 'application/json' },
+      ...init,
+      headers,
       signal: abort.signal,
     });
     const payload: unknown = await response.json().catch(() => null);
@@ -112,7 +124,9 @@ async function requestJson<T>(path: string, schema: SafeParser<T>, signal?: Abor
           : undefined;
       const code = parsed.success ? parsed.data.error.code : undefined;
       throw new AppApiError(
-        parsed.success ? parsed.data.error.message : 'Не удалось безопасно обработать ответ сервера.',
+        parsed.success
+          ? parsed.data.error.message
+          : 'Не удалось безопасно обработать ответ сервера.',
         errorKind(response.status, code),
         response.status,
         code,
@@ -120,18 +134,7 @@ async function requestJson<T>(path: string, schema: SafeParser<T>, signal?: Abor
         parseRetryAfter(response.headers.get('retry-after')),
       );
     }
-    const parsed = schema.safeParse(payload);
-    if (!parsed.success) {
-      const eventId = correlationIdSchema.safeParse(response.headers.get('x-correlation-id'));
-      throw new AppApiError(
-        'Сервер вернул неожиданный ответ.',
-        'invalid_response',
-        response.status,
-        undefined,
-        eventId.success ? eventId.data : undefined,
-      );
-    }
-    return parsed.data;
+    return parseSuccess(payload, response);
   } catch (error) {
     if (error instanceof AppApiError) throw error;
     if (abort.didTimeout()) {
@@ -146,12 +149,71 @@ async function requestJson<T>(path: string, schema: SafeParser<T>, signal?: Abor
   }
 }
 
+async function requestJson<T>(
+  path: string,
+  schema: SafeParser<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  return request(
+    path,
+    (payload, response) => {
+      const parsed = schema.safeParse(payload);
+      if (!parsed.success) {
+        const eventId = correlationIdSchema.safeParse(response.headers.get('x-correlation-id'));
+        throw new AppApiError(
+          'Сервер вернул неожиданный ответ.',
+          'invalid_response',
+          response.status,
+          undefined,
+          eventId.success ? eventId.data : undefined,
+        );
+      }
+      return parsed.data;
+    },
+    signal,
+  );
+}
+
+async function requestEmpty(
+  path: string,
+  signal: AbortSignal | undefined,
+  init: RequestInit,
+): Promise<void> {
+  await request(
+    path,
+    (payload, response) => {
+      if (response.status !== 204 || payload !== null) {
+        const eventId = correlationIdSchema.safeParse(response.headers.get('x-correlation-id'));
+        throw new AppApiError(
+          'Сервер вернул неожиданный ответ.',
+          'invalid_response',
+          response.status,
+          undefined,
+          eventId.success ? eventId.data : undefined,
+        );
+      }
+    },
+    signal,
+    init,
+  );
+}
+
 export function fetchSession(signal?: AbortSignal): Promise<SessionPrincipal> {
-  return requestJson('/api/session', sessionResponseSchema, signal).then((response) => response.principal);
+  return requestJson('/api/session', sessionResponseSchema, signal).then(
+    (response) => response.principal,
+  );
 }
 
 export function fetchEffectiveAccess(signal?: AbortSignal): Promise<EffectiveAccessResponse> {
   return requestJson('/api/access', effectiveAccessResponseSchema, signal);
+}
+
+export function createLocalDevSession(signal?: AbortSignal): Promise<void> {
+  return requestEmpty('/api/_dev/session', signal, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ userId: '1' }),
+  });
 }
 
 export async function verifyManageAccess(signal?: AbortSignal): Promise<true> {
@@ -160,5 +222,7 @@ export async function verifyManageAccess(signal?: AbortSignal): Promise<true> {
 }
 
 export function isRetryableAppError(error: unknown): error is AppApiError {
-  return error instanceof AppApiError && (error.kind === 'rate_limited' || error.kind === 'temporary');
+  return (
+    error instanceof AppApiError && (error.kind === 'rate_limited' || error.kind === 'temporary')
+  );
 }
