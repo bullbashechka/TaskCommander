@@ -14,6 +14,10 @@ import {
 } from './auth/session-service';
 import { createAccessManagementRoutes } from './access-management/routes';
 import {
+  CurrentIdentityError,
+  verifyCurrentSessionPrincipal,
+} from './access-management/automatic-revocation';
+import {
   createAccessManagementRepository,
   createTaskCommanderRepositories,
   type AccessManagementRepository,
@@ -67,6 +71,17 @@ function toApiHttpError(error: EffectiveAccessError): ApiHttpError {
   }
 }
 
+function toCurrentIdentityApiError(error: CurrentIdentityError): ApiHttpError {
+  switch (error.kind) {
+    case 'revoked':
+      return new ApiHttpError(403, 'ACCESS_REVOKED');
+    case 'unauthenticated':
+      return new ApiHttpError(401, 'UNAUTHENTICATED');
+    case 'unavailable':
+      return new ApiHttpError(503, 'ACCESS_VERIFICATION_UNAVAILABLE');
+  }
+}
+
 export function createApi(dependencies: ApiDependencies = {}) {
   const api = new Hono<{ Bindings: RuntimeEnvironment; Variables: ApiVariables }>();
   const createSettingsReader =
@@ -80,6 +95,30 @@ export function createApi(dependencies: ApiDependencies = {}) {
           createSettingsReader(env).findEffectiveAccessSettings(input),
       }));
   const bitrixAdapterFactory = dependencies.createBitrixAdapter ?? createBitrixAdapter;
+  const readSignedPrincipal =
+    dependencies.readPrincipal ?? ((env: RuntimeEnvironment, cookie: string | null) =>
+      createSessionService(env).read(cookie));
+  const readCurrentPrincipal = async (
+    env: RuntimeEnvironment,
+    cookie: string | null,
+    correlationId: string,
+  ): Promise<VerifiedSessionPrincipal> => {
+    const principal = await readSignedPrincipal(env, cookie);
+    try {
+      return await verifyCurrentSessionPrincipal({
+        env,
+        principal,
+        adapter: bitrixAdapterFactory(env, { currentUserId: principal.userId }),
+        repository:
+          dependencies.createAccessManagementRepository?.(env) ??
+          createAccessManagementRepository(env),
+        correlationId,
+      });
+    } catch (error) {
+      if (error instanceof CurrentIdentityError) throw toCurrentIdentityApiError(error);
+      throw error;
+    }
+  };
 
   api.use('/api/*', async (context, next) => {
     const correlationId = `TC-${crypto.randomUUID()}`;
@@ -105,7 +144,7 @@ export function createApi(dependencies: ApiDependencies = {}) {
     '/api/access-management',
     createAccessManagementRoutes({
       readPrincipal:
-        dependencies.readPrincipal ?? ((env, cookie) => createSessionService(env).read(cookie)),
+        (env, cookie) => readCurrentPrincipal(env, cookie, `TC-${crypto.randomUUID()}`),
       readEffectiveAccess,
       createAdapter: bitrixAdapterFactory,
       createRepository:
@@ -123,8 +162,10 @@ export function createApi(dependencies: ApiDependencies = {}) {
   });
 
   api.get('/api/session', async (context) => {
-    const principal = await createSessionService(context.env).read(
+    const principal = await readCurrentPrincipal(
+      context.env,
       context.req.header('cookie') ?? null,
+      context.get('correlationId'),
     );
     return context.json(sessionResponseSchema.parse({ principal }));
   });
@@ -135,8 +176,10 @@ export function createApi(dependencies: ApiDependencies = {}) {
   });
 
   api.get('/api/access', async (context) => {
-    const principal = await createSessionService(context.env).read(
+    const principal = await readCurrentPrincipal(
+      context.env,
       context.req.header('cookie') ?? null,
+      context.get('correlationId'),
     );
     let access: EffectiveAccess;
     try {

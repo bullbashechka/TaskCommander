@@ -65,6 +65,26 @@ export function createMockUsers(
           .map(toBitrixUser),
       };
     },
+    async getAccessStatuses(userIds) {
+      const effects = scenario.take('users.getAccessStatuses');
+      applyUserEffects(state, effects);
+      const failure = getFailure(effects);
+      if (failure) return { ok: false, failure };
+
+      const uniqueIds = [...new Set(userIds)];
+      if (uniqueIds.length !== userIds.length || uniqueIds.length > 50) {
+        return { ok: false, failure: { kind: 'invalid_external_response' } };
+      }
+      return {
+        ok: true,
+        value: uniqueIds.map((userId) => {
+          const user = state.users.get(userId);
+          return user
+            ? { state: user.isActive ? ('active' as const) : ('inactive' as const), user: toBitrixUser(user) }
+            : { state: 'missing' as const, userId };
+        }),
+      };
+    },
     async searchEmployees(input) {
       const effects = scenario.take('users.searchEmployees');
       applyUserEffects(state, effects);

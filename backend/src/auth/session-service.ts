@@ -24,6 +24,22 @@ export function isVerifiedSessionPrincipal(value: unknown): value is VerifiedSes
   return typeof value === 'object' && value !== null && verifiedSessionPrincipals.has(value);
 }
 
+/** Rebinds a signed session identity to facts just read from Bitrix24. */
+export function refreshVerifiedSessionPrincipal(
+  principal: VerifiedSessionPrincipal,
+  current: Pick<SessionPrincipal, 'userId' | 'displayName' | 'isBitrixAdmin'>,
+): VerifiedSessionPrincipal {
+  if (!isVerifiedSessionPrincipal(principal) || current.userId !== principal.userId) {
+    throw new ApiHttpError(401, 'UNAUTHENTICATED');
+  }
+  return registerVerifiedSessionPrincipal({
+    portalId: principal.portalId,
+    userId: current.userId,
+    displayName: current.displayName,
+    isBitrixAdmin: current.isBitrixAdmin,
+  });
+}
+
 function registerVerifiedSessionPrincipal(value: SessionPrincipal): VerifiedSessionPrincipal {
   const verified = Object.freeze({
     ...value,

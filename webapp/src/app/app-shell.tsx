@@ -1,14 +1,15 @@
-import { sessionResponseSchema } from '@task-commander/contracts';
-import { useQuery } from '@tanstack/react-query';
-import { Link, Outlet } from '@tanstack/react-router';
+import { Link, Outlet, useRouterState } from '@tanstack/react-router';
+import { useEffect, useState } from 'react';
 
+import type { AppAccessSnapshot } from '@/app/app-context';
+import { createNavigationModel } from '@/app/navigation-model';
 import { Icons } from '@/components/ui/icons';
 
-const tasks = [
-  ['Массовое изменение', '/tasks'],
-  ['Операции', '/operations'],
-  ['Отчёты', '/reports'],
-] as const;
+function initials(displayName: string): string {
+  const value = displayName.trim();
+  if (!value) return 'П';
+  return value.split(/\s+/).slice(0, 2).map((part) => part.charAt(0)).join('').toUpperCase();
+}
 
 function Brand() {
   return (
@@ -19,63 +20,56 @@ function Brand() {
   );
 }
 
-export function AppShell() {
-  const session = useQuery({
-    queryKey: ['session'],
-    queryFn: async () => {
-      const response = await fetch('/api/session', { headers: { accept: 'application/json' } });
-      if (!response.ok) return null;
-      return sessionResponseSchema.parse(await response.json()).principal;
-    },
-    retry: false,
-  });
-  const displayName = session.data?.displayName ?? 'Пользователь Bitrix24';
-  const initials = displayName
-    .split(/\s+/)
-    .slice(0, 2)
-    .map((part) => part[0])
-    .join('');
-  const role = session.data?.isBitrixAdmin ? 'Администратор' : 'Руководитель';
+export function AppShell({ snapshot }: { snapshot: AppAccessSnapshot }) {
+  const navigation = createNavigationModel(snapshot);
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const currentTaskRoute = pathname === '/tasks' || pathname === '/operations' || pathname === '/reports';
+  const [tasksExpanded, setTasksExpanded] = useState(currentTaskRoute);
+  const displayName = snapshot.principal.displayName.trim() || 'Пользователь Bitrix24';
+  const role = snapshot.principal.isBitrixAdmin ? 'Администратор Bitrix24' : 'Пользователь';
+  const showTasks = navigation.taskLinks.length > 0;
+
+  useEffect(() => {
+    const heading = document.querySelector<HTMLElement>('.workspace h1[tabindex="-1"]');
+    heading?.focus({ preventScroll: true });
+  }, [pathname]);
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <Brand />
         <nav aria-label="Основная навигация" className="sidebar-nav">
-          <Link aria-label="Главная" title="Главная" activeOptions={{ exact: true }} activeProps={{ 'aria-current': 'page' }} className="sidebar-link" to="/">
+          <Link activeOptions={{ exact: true }} activeProps={{ 'aria-current': 'page' }} aria-label="Главная" className="sidebar-link" title="Главная" to="/">
             <Icons.home /><span>Главная</span>
           </Link>
 
-          <p className="sidebar-section">Инструменты</p>
-          <div className="sidebar-group">
-            <div aria-label="Задачи" className="sidebar-link sidebar-group-title" title="Задачи"><Icons.tasks /><span>Задачи</span><Icons.chevronDown className="sidebar-chevron" /></div>
-            <div className="sidebar-children">
-              {tasks.map(([label, to]) => (
-                <Link aria-label={label} className="sidebar-child" key={to} title={label} to={to}><span>{label}</span></Link>
-              ))}
+          {showTasks ? <>
+            <p className="sidebar-section">Инструменты</p>
+            <div className="sidebar-group">
+              <button aria-controls="tasks-navigation" aria-expanded={tasksExpanded || currentTaskRoute} className="sidebar-link sidebar-group-title" onClick={() => setTasksExpanded((expanded) => !expanded)} type="button">
+                <Icons.tasks /><span>Задачи</span><Icons.chevronDown className="sidebar-chevron" />
+              </button>
+              {tasksExpanded || currentTaskRoute ? <div className="sidebar-children" id="tasks-navigation">
+                {navigation.taskLinks.map((item) => <Link aria-label={item.label} className="sidebar-child" key={item.to} title={item.label} to={item.to as never}><span>{item.label}</span></Link>)}
+              </div> : null}
             </div>
-          </div>
-          <Link aria-label="Данные" className="sidebar-link" title="Данные" to="/data"><Icons.database /><span>Данные</span><Icons.arrow className="sidebar-chevron" /></Link>
+          </> : null}
 
-          <p className="sidebar-section">Система</p>
-          <Link aria-label="Доступ" activeProps={{ 'aria-current': 'page' }} className="sidebar-link" title="Доступ" to="/access"><Icons.users /><span>Доступ</span></Link>
-          <Link aria-label="Аудит" className="sidebar-link" title="Аудит" to="/audit"><Icons.audit /><span>Аудит</span></Link>
+          {navigation.systemLinks.length > 0 ? <>
+            <p className="sidebar-section">Система</p>
+            {navigation.systemLinks.map((item) => <Link activeProps={{ 'aria-current': 'page' }} aria-label={item.label} className="sidebar-link" key={item.to} title={item.label} to={item.to as never}>
+              {item.route === 'access' ? <Icons.users /> : <Icons.audit />}<span>{item.label}</span>
+            </Link>)}
+          </> : null}
         </nav>
-
         <div className="sidebar-bottom">
-          <Link aria-label="Настройки" className="sidebar-link" title="Настройки" to="/settings"><Icons.settings /><span>Настройки</span></Link>
-          <button aria-label={`Профиль: ${displayName}`} className="profile-button" title={displayName} type="button">
-            <span className="avatar avatar-current" aria-hidden="true">{initials}</span>
+          <div aria-label={`Профиль: ${displayName}, ${role}`} className="profile-static" title={displayName}>
+            <span aria-hidden="true" className="avatar avatar-current">{initials(displayName)}</span>
             <span className="profile-copy"><strong>{displayName}</strong><small>{role}</small></span>
-            <Icons.chevronDown />
-          </button>
+          </div>
         </div>
       </aside>
       <main className="workspace">
-        <header className="topbar">
-          <div className="topbar-spacer" />
-          <button aria-label="Уведомления: есть новые" className="icon-button notification-button" type="button"><Icons.bell /><span /></button>
-          <button aria-label="Открыть профиль" className="topbar-avatar" type="button"><span className="avatar avatar-current" aria-hidden="true">{initials}</span></button>
-        </header>
         <Outlet />
       </main>
     </div>

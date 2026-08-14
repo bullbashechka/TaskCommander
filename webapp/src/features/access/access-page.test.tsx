@@ -5,6 +5,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { router } from '@/app/router';
 
+const app = {
+  principal: {
+    portalId: 'portal.test',
+    userId: '1',
+    displayName: 'Кирилл Сайдашев',
+    isBitrixAdmin: true,
+  },
+  access: {
+    permissions: ['app_access', 'manage_access'],
+    fieldScope: { kind: 'all' as const },
+  },
+  accessManagement: 'allowed' as const,
+  generation: 0,
+  canMutate: true,
+};
+
 const capabilities = {
   actor: { id: '1', displayName: 'Кирилл Сайдашев', isAdministrator: true },
   manageablePermissions: [
@@ -66,12 +82,12 @@ function response(value: unknown) {
 
 async function renderAccessPage() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  await router.navigate({ to: '/access' });
   render(
     <QueryClientProvider client={queryClient}>
-      <RouterProvider router={router} />
+      <RouterProvider context={{ queryClient, app }} router={router} />
     </QueryClientProvider>,
   );
+  await router.navigate({ to: '/access' });
   await screen.findByRole('heading', { name: 'Управление доступом' });
 }
 

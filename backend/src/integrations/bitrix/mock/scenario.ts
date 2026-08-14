@@ -7,6 +7,7 @@ export type MockScenarioMethod =
   | 'tasks.applyChange'
   | 'users.getCurrent'
   | 'users.getByIds'
+  | 'users.getAccessStatuses'
   | 'users.searchEmployees'
   | 'users.getEmployeeProfile'
   | 'organization.getDepartments'

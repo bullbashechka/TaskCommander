@@ -2,6 +2,7 @@ import type { z } from 'zod';
 
 import {
   bitrixDepartmentSchema,
+  bitrixAccessStatusSchema,
   bitrixFailureSchema,
   bitrixEmployeeProfileSchema,
   bitrixUserSchema,
@@ -33,6 +34,7 @@ export type TaskReadForChangeRequest = z.infer<typeof taskReadForChangeRequestSc
 export type TaskApplyRequest = z.infer<typeof taskApplyRequestSchema>;
 export type TaskApplyOutcome = z.infer<typeof taskApplyOutcomeSchema>;
 export type BitrixUser = z.infer<typeof bitrixUserSchema>;
+export type BitrixAccessStatus = z.infer<typeof bitrixAccessStatusSchema>;
 export type BitrixEmployeeProfile = z.infer<typeof bitrixEmployeeProfileSchema>;
 export type EmployeeSearchRequest = z.infer<typeof employeeSearchRequestSchema>;
 export type EmployeeSearchPage = z.infer<typeof employeeSearchPageSchema>;
@@ -54,6 +56,13 @@ export interface BitrixTasks {
 export interface BitrixUsers {
   getCurrent(): Promise<BitrixResult<BitrixUser>>;
   getByIds(userIds: readonly string[]): Promise<BitrixResult<readonly BitrixUser[]>>;
+  /**
+   * Returns one authoritative result for every requested ID. A missing result is distinct from an
+   * upstream failure so automatic revocation never guesses from a partial response.
+   */
+  getAccessStatuses(
+    userIds: readonly string[],
+  ): Promise<BitrixResult<readonly BitrixAccessStatus[]>>;
   searchEmployees(request: EmployeeSearchRequest): Promise<BitrixResult<EmployeeSearchPage>>;
   getEmployeeProfile(userId: string): Promise<BitrixResult<BitrixEmployeeProfile>>;
 }

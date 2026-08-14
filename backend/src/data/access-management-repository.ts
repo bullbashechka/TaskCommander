@@ -332,7 +332,58 @@ export class AccessManagementRepository {
         })
         .eq('portal_id', portalId)
         .eq('command_id', commandId)
-        .eq('status', 'pending'),
+      .eq('status', 'pending'),
+    );
+  }
+
+  public async claimAutomaticAccessReconciliationJobs(
+    leaseToken: string,
+    limit = 100,
+  ): Promise<{ portalId: string; userId: string }[]> {
+    const rows = await unwrap(
+      this.client.rpc('claim_access_reconciliation_jobs', {
+        p_lease_token: leaseToken,
+        p_limit: Math.min(Math.max(limit, 1), 100),
+      }),
+    );
+    return rows.map((row) => ({ portalId: row.portal_id, userId: row.user_id }));
+  }
+
+  public async recordAutomaticAccessReconciliationUnknown(input: {
+    portalId: string;
+    userId: string;
+    leaseToken: string | null;
+  }): Promise<void> {
+    await unwrap(
+      this.client.rpc('record_access_reconciliation_unknown', {
+        p_portal_id: input.portalId,
+        p_user_id: input.userId,
+        p_lease_token: input.leaseToken,
+      }),
+    );
+  }
+
+  public async applyAutomaticAccessReconciliation(input: {
+    portalId: string;
+    userId: string;
+    displayName: string;
+    employmentState: 'active' | 'inactive' | 'missing';
+    isManager: boolean;
+    source: 'request' | 'cron' | 'queue';
+    correlationId: string;
+    leaseToken?: string | null;
+  }): Promise<unknown> {
+    return unwrap(
+      this.client.rpc('apply_automatic_access_reconciliation', {
+        p_portal_id: input.portalId,
+        p_user_id: input.userId,
+        p_display_name: input.displayName,
+        p_employment_state: input.employmentState,
+        p_is_manager: input.isManager,
+        p_source: input.source,
+        p_correlation_id: input.correlationId,
+        p_lease_token: input.leaseToken ?? null,
+      }),
     );
   }
 }

@@ -355,6 +355,16 @@ type AccessRateLimitBucketRow = {
   updated_at: string;
 };
 
+type AccessReconciliationJobRow = {
+  portal_id: string;
+  user_id: string;
+  available_at: string;
+  lease_token: string | null;
+  lease_expires_at: string | null;
+  last_checked_at: string | null;
+  last_outcome: string | null;
+};
+
 export interface Database {
   public: {
     Tables: {
@@ -380,6 +390,7 @@ export interface Database {
       access_change_evidence: TableDefinition<AccessChangeEvidenceRow>;
       notification_outbox: TableDefinition<NotificationOutboxRow>;
       access_rate_limit_bucket: TableDefinition<AccessRateLimitBucketRow>;
+      access_reconciliation_job: TableDefinition<AccessReconciliationJobRow>;
     };
     Views: Record<never, never>;
     Functions: {
@@ -462,6 +473,27 @@ export interface Database {
           p_command_id: string;
           p_expected_state_version: number;
           p_reason_code: string;
+        };
+        Returns: Json;
+      };
+      claim_access_reconciliation_jobs: {
+        Args: { p_lease_token: string; p_limit: number };
+        Returns: { portal_id: string; user_id: string }[];
+      };
+      record_access_reconciliation_unknown: {
+        Args: { p_portal_id: string; p_user_id: string; p_lease_token: string | null };
+        Returns: undefined;
+      };
+      apply_automatic_access_reconciliation: {
+        Args: {
+          p_portal_id: string;
+          p_user_id: string;
+          p_display_name: string;
+          p_employment_state: string;
+          p_is_manager: boolean;
+          p_source: string;
+          p_correlation_id: string;
+          p_lease_token?: string | null;
         };
         Returns: Json;
       };

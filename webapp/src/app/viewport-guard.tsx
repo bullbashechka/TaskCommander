@@ -3,11 +3,12 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { ru } from '@/locales/ru';
 
 const desktopMediaQuery = '(min-width: 1024px)';
+const desktopPointerMediaQuery = '(any-pointer: fine)';
 
 function getDesktopState() {
   return typeof window === 'undefined' || !window.matchMedia
     ? true
-    : window.matchMedia(desktopMediaQuery).matches;
+    : window.matchMedia(desktopMediaQuery).matches || window.matchMedia(desktopPointerMediaQuery).matches;
 }
 
 export function ViewportGuard({ children }: { children: ReactNode }) {
@@ -15,11 +16,16 @@ export function ViewportGuard({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const mediaQuery = window.matchMedia(desktopMediaQuery);
-    const update = () => setIsDesktop(mediaQuery.matches);
+    const pointerMediaQuery = window.matchMedia(desktopPointerMediaQuery);
+    const update = () => setIsDesktop(mediaQuery.matches || pointerMediaQuery.matches);
 
     update();
     mediaQuery.addEventListener('change', update);
-    return () => mediaQuery.removeEventListener('change', update);
+    pointerMediaQuery.addEventListener('change', update);
+    return () => {
+      mediaQuery.removeEventListener('change', update);
+      pointerMediaQuery.removeEventListener('change', update);
+    };
   }, []);
 
   if (isDesktop) {

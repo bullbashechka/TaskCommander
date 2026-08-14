@@ -160,6 +160,21 @@ export const bitrixUserSchema = z
   })
   .strict();
 
+export const bitrixAccessStatusSchema = z.discriminatedUnion('state', [
+  z
+    .object({
+      state: z.enum(['active', 'inactive']),
+      user: bitrixUserSchema,
+    })
+    .strict(),
+  z
+    .object({
+      state: z.literal('missing'),
+      userId: bitrixIdSchema,
+    })
+    .strict(),
+]);
+
 export const bitrixEmployeeProfileSchema = bitrixUserSchema.extend({
   email: z.string().email().max(320).nullable(),
   position: z.string().trim().min(1).max(256).nullable(),

@@ -85,7 +85,6 @@ function createFixture(
     deadlineManagedBySubtasks: false,
     values,
     ...taskOverrides,
-    values,
   };
 }
 

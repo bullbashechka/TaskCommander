@@ -36,3 +36,9 @@
 ## Зависимости
 
 001, 009, 010.
+
+## Зафиксированные решения и план
+
+- [Утверждённые продуктовые решения](../docs/decisions/2026-08-14-task-013-app-shell-navigation-decisions.md)
+- [Исходный опросник по эдж-кейсам](013-app-shell-navigation-product-choices.md)
+- [Технический план реализации](013-app-shell-navigation-implementation-plan.md)

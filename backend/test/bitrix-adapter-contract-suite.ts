@@ -35,6 +35,7 @@ export async function expectBitrixAdapterContract(adapter: BitrixAdapter): Promi
 
   expectSuccess(await adapter.users.getCurrent());
   expectSuccess(await adapter.users.getByIds(['10']));
+  expectSuccess(await adapter.users.getAccessStatuses(['10']));
   expectSuccess(
     await adapter.users.searchEmployees({
       query: '',

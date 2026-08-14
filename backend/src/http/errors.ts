@@ -11,6 +11,8 @@ const safeMessages: Record<ApiErrorCode, string> = {
   INVALID_REQUEST: 'Некорректный запрос.',
   UNAUTHENTICATED: 'Требуется авторизация.',
   FORBIDDEN: 'Недостаточно прав для выполнения действия.',
+  ACCESS_REVOKED: 'Доступ к Task Commander закрыт.',
+  ACCESS_VERIFICATION_UNAVAILABLE: 'Не удалось проверить доступ. Повторите попытку позже.',
   NOT_FOUND: 'Маршрут API не найден.',
   CONFLICT: 'Данные изменились. Обновите страницу и повторите действие.',
   RATE_LIMITED: 'Слишком много запросов. Повторите попытку позже.',

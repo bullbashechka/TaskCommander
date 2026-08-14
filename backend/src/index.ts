@@ -1,4 +1,5 @@
 import { dispatchPendingAccessCommands } from './access-management/dispatch';
+import { runAutomaticAccessReconciliation } from './access-management/automatic-revocation';
 import { api } from './api';
 import { hasLocalRuntimeConfiguration } from './runtime/configuration';
 
@@ -20,7 +21,22 @@ const worker: ExportedHandler<Env> = {
         scheduledTime: controller.scheduledTime,
       }),
     );
-    context.waitUntil(dispatchPendingAccessCommands(env));
+    context.waitUntil(
+      Promise.allSettled([dispatchPendingAccessCommands(env), runAutomaticAccessReconciliation(env)]).then(
+        (results) => {
+          for (const result of results) {
+            if (result.status === 'rejected') {
+              console.error(
+                JSON.stringify({
+                  event: 'scheduled_access_maintenance_failed',
+                  errorName: result.reason instanceof Error ? result.reason.name : 'unknown',
+                }),
+              );
+            }
+          }
+        },
+      ),
+    );
   },
 };
 

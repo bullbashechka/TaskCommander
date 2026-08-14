@@ -2,11 +2,12 @@ import type { AccessChangeMode, AccessChangeReason } from '@task-commander/contr
 import { Button } from '@base-ui/react/button';
 import { Dialog } from '@base-ui/react/dialog';
 import { useForm } from '@tanstack/react-form';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
+import { notifyAccessInvalidated } from '@/app/access-sync';
 import { Icons } from '@/components/ui/icons';
 
 import {
@@ -300,6 +301,7 @@ export function AccessConfigurePage({ subjectIds }: { subjectIds: string[] }) {
 
 export function AccessReviewPage({ preflightId }: { preflightId: string }) {
   const navigate = useNavigate({ from: '/access/review' });
+  const queryClient = useQueryClient();
   const [acknowledged, setAcknowledged] = useState(false);
   const [confirmationOpen, setConfirmationOpen] = useState(false);
   const [clock, setClock] = useState(() => Date.now());
@@ -334,7 +336,11 @@ export function AccessReviewPage({ preflightId }: { preflightId: string }) {
         confirmationToken: confirmation?.token,
       });
     },
-    onSuccess: async (result) => { await navigate({ to: '/access/commands/$commandId', params: { commandId: result.commandId } }); },
+    onSuccess: async (result) => {
+      await queryClient.invalidateQueries({ queryKey: ['app'] });
+      notifyAccessInvalidated();
+      await navigate({ to: '/access/commands/$commandId', params: { commandId: result.commandId } });
+    },
   });
   const targets = preflight.data?.targets ?? [];
   useEffect(() => {

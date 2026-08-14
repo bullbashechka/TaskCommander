@@ -1,13 +1,16 @@
+import type { QueryClient } from '@tanstack/react-query';
 import { useForm } from '@tanstack/react-form';
 import {
   Link,
-  createRootRoute,
+  createRootRouteWithContext,
   createRoute,
   createRouter,
-  useNavigate,
 } from '@tanstack/react-router';
 
+import { canVisitRoute, type ProductRoute } from '@/app/access-policy';
+import type { AppAccessSnapshot } from '@/app/app-context';
 import { AppShell } from '@/app/app-shell';
+import { AppState } from '@/components/ui/app-state';
 import { Card } from '@/components/ui/card';
 import { AccessPage } from '@/features/access/access-page';
 import {
@@ -17,8 +20,14 @@ import {
   AccessReviewPage,
 } from '@/features/access/access-workflow';
 import { ApiStatusCard, useHealth } from '@/features/health/api-status-card';
+import { HomeDashboard } from '@/features/home/home-dashboard';
 import { RuntimeTable } from '@/features/status/runtime-table';
 import { ru } from '@/locales/ru';
+
+type RouterContext = {
+  queryClient: QueryClient;
+  app: AppAccessSnapshot;
+};
 
 export type StatusPanel = 'api' | 'runtime';
 
@@ -45,32 +54,55 @@ export function parsePreflightSearch(search: Record<string, unknown>): { preflig
   };
 }
 
-function FoundationPage() {
-  return (
-    <div className="page-content foundation-page">
-      <p className="eyebrow">Рабочее пространство</p>
-      <h1>Task Commander</h1>
-      <p>Безопасная работа с задачами и системными инструментами Bitrix24.</p>
-      <Link className="button-primary" to="/access">Открыть управление доступом</Link>
-    </div>
-  );
+class RouteAccessError extends Error {
+  public constructor(public readonly kind: 'forbidden' | 'unavailable') {
+    super(kind);
+  }
+}
+
+function routeGuard(route: ProductRoute) {
+  return ({ context }: { context: RouterContext }) => {
+    if (route === 'access' && context.app.accessManagement === 'unavailable') {
+      throw new RouteAccessError('unavailable');
+    }
+    if (!canVisitRoute(context.app, route)) throw new RouteAccessError('forbidden');
+  };
+}
+
+function ProtectedLayout() {
+  const { app } = protectedRoute.useRouteContext();
+  return <AppShell snapshot={app} />;
+}
+
+function RouteErrorState({ error }: { error: unknown }) {
+  const unavailable = error instanceof RouteAccessError && error.kind === 'unavailable';
+  return <div className="page-content"><AppState compact title={unavailable ? 'Управление доступом временно недоступно' : 'Нет доступа к разделу'} description={unavailable ? 'Не удалось безопасно подтвердить полномочия. Повторите проверку позже.' : 'Ваши текущие права не позволяют открыть этот раздел.'} action={<Link className="button-primary" to="/">На главную</Link>} /></div>;
 }
 
 function PlaceholderPage({ title }: { title: string }) {
-  return <div className="page-content"><nav aria-label="Хлебные крошки" className="breadcrumbs"><span>Task Commander</span><i>/</i><strong>{title}</strong></nav><Card className="placeholder-card"><h1>{title}</h1><p>Раздел будет реализован на соответствующем этапе проекта.</p></Card></div>;
+  return <div className="page-content"><nav aria-label="Хлебные крошки" className="breadcrumbs"><span>Task Commander</span><i>/</i><strong>{title}</strong></nav><Card className="placeholder-card"><h1 tabIndex={-1}>{title}</h1><p>Раздел будет реализован на соответствующем этапе проекта.</p></Card></div>;
 }
 
 function StatusPanelForm({ panel }: { panel: StatusPanel }) {
-  const navigate = useNavigate({ from: '/status' });
-  const form = useForm({ defaultValues: { panel }, onSubmit: async ({ value }) => { await navigate({ search: { panel: value.panel } }); } });
-  return <form className="mt-4 flex items-end gap-3" onSubmit={(event) => { event.preventDefault(); void form.handleSubmit(); }}><form.Field name="panel">{(field) => <label className="grid gap-1 text-sm font-medium">{ru.status.panelLabel}<select className="rounded-md border border-border bg-background px-3 py-2" name={field.name} onBlur={field.handleBlur} onChange={(event) => field.handleChange(event.target.value as StatusPanel)} value={field.state.value}><option value="api">{ru.status.apiPanel}</option><option value="runtime">{ru.status.runtimePanel}</option></select></label>}</form.Field><button className="button-secondary" type="submit">Применить</button></form>;
+  const form = useForm({ defaultValues: { panel } });
+  return <form className="mt-4 flex items-end gap-3" onSubmit={(event) => event.preventDefault()}><form.Field name="panel">{(field) => <label className="grid gap-1 text-sm font-medium">{ru.status.panelLabel}<select className="rounded-md border border-border bg-background px-3 py-2" name={field.name} onBlur={field.handleBlur} onChange={(event) => field.handleChange(event.target.value as StatusPanel)} value={field.state.value}><option value="api">{ru.status.apiPanel}</option><option value="runtime">{ru.status.runtimePanel}</option></select></label>}</form.Field></form>;
 }
 
 function StatusPage() {
   const { panel } = statusRoute.useSearch();
   const health = useHealth();
   const state = health.isPending ? ru.status.checking : health.isError ? ru.status.unavailable : ru.status.ready;
-  return <div className="page-content"><Card><h1 className="text-xl font-semibold">{ru.status.title}</h1><StatusPanelForm panel={panel} />{panel === 'api' ? <ApiStatusCard /> : <RuntimeTable state={state} />}</Card></div>;
+  return <div className="page-content"><Card><h1 tabIndex={-1}>{ru.status.title}</h1><StatusPanelForm panel={panel} />{panel === 'api' ? <ApiStatusCard /> : <RuntimeTable state={state} />}</Card></div>;
+}
+
+function LocalOnlyStatusPage() {
+  if (import.meta.env.DEV) return <StatusPage />;
+  return <AppState title="Страница не найдена" description="Проверьте адрес или вернитесь на главную страницу." action={<Link className="button-primary" to="/">На главную</Link>} />;
+}
+
+function HomePage() {
+  const { app } = indexRoute.useRouteContext();
+  return <HomeDashboard snapshot={app} />;
 }
 
 function ConfigureRoutePage() {
@@ -88,27 +120,28 @@ function CommandRoutePage() {
   return <AccessCommandPage commandId={commandId} />;
 }
 
-const rootRoute = createRootRoute({
-  component: AppShell,
-  notFoundComponent: () => <div className="page-content"><Card className="placeholder-card"><h1>Страница не найдена</h1><p>Проверьте адрес или вернитесь в раздел доступа.</p><Link className="button-primary" to="/access">К сотрудникам</Link></Card></div>,
+const rootRoute = createRootRouteWithContext<RouterContext>()({
+  notFoundComponent: () => <AppState title="Страница не найдена" description="Проверьте адрес или вернитесь на главную страницу." action={<Link className="button-primary" to="/">На главную</Link>} />,
 });
-const indexRoute = createRoute({ getParentRoute: () => rootRoute, path: '/', component: FoundationPage });
-const statusRoute = createRoute({ getParentRoute: () => rootRoute, path: '/status', validateSearch: parseStatusSearch, component: StatusPage });
-const accessRoute = createRoute({ getParentRoute: () => rootRoute, path: '/access', component: AccessPage });
-const configureRoute = createRoute({ getParentRoute: () => rootRoute, path: '/access/configure', validateSearch: parseSubjectsSearch, component: ConfigureRoutePage });
-const reviewRoute = createRoute({ getParentRoute: () => rootRoute, path: '/access/review', validateSearch: parsePreflightSearch, component: ReviewRoutePage });
-const commandRoute = createRoute({ getParentRoute: () => rootRoute, path: '/access/commands/$commandId', component: CommandRoutePage });
-const repairRoute = createRoute({ getParentRoute: () => rootRoute, path: '/access/admin-repair', component: AccessAdminRepairPage });
-const tasksRoute = createRoute({ getParentRoute: () => rootRoute, path: '/tasks', component: () => <PlaceholderPage title="Массовое изменение" /> });
-const operationsRoute = createRoute({ getParentRoute: () => rootRoute, path: '/operations', component: () => <PlaceholderPage title="Операции" /> });
-const reportsRoute = createRoute({ getParentRoute: () => rootRoute, path: '/reports', component: () => <PlaceholderPage title="Отчёты" /> });
-const dataRoute = createRoute({ getParentRoute: () => rootRoute, path: '/data', component: () => <PlaceholderPage title="Данные" /> });
-const auditRoute = createRoute({ getParentRoute: () => rootRoute, path: '/audit', component: () => <PlaceholderPage title="Аудит" /> });
-const settingsRoute = createRoute({ getParentRoute: () => rootRoute, path: '/settings', component: () => <PlaceholderPage title="Настройки" /> });
+const statusRoute = createRoute({ getParentRoute: () => rootRoute, path: '/status', validateSearch: parseStatusSearch, component: LocalOnlyStatusPage });
+const protectedRoute = createRoute({ getParentRoute: () => rootRoute, id: 'protected', beforeLoad: ({ context }) => ({ app: context.app }), component: ProtectedLayout, errorComponent: RouteErrorState });
+const indexRoute = createRoute({ getParentRoute: () => protectedRoute, path: '/', beforeLoad: routeGuard('home'), component: HomePage });
+const accessRoute = createRoute({ getParentRoute: () => protectedRoute, path: '/access', beforeLoad: routeGuard('access'), component: AccessPage, errorComponent: RouteErrorState });
+const configureRoute = createRoute({ getParentRoute: () => protectedRoute, path: '/access/configure', beforeLoad: routeGuard('access'), validateSearch: parseSubjectsSearch, component: ConfigureRoutePage, errorComponent: RouteErrorState });
+const reviewRoute = createRoute({ getParentRoute: () => protectedRoute, path: '/access/review', beforeLoad: routeGuard('access'), validateSearch: parsePreflightSearch, component: ReviewRoutePage, errorComponent: RouteErrorState });
+const commandRoute = createRoute({ getParentRoute: () => protectedRoute, path: '/access/commands/$commandId', beforeLoad: routeGuard('access'), component: CommandRoutePage, errorComponent: RouteErrorState });
+const repairRoute = createRoute({ getParentRoute: () => protectedRoute, path: '/access/admin-repair', beforeLoad: routeGuard('access'), component: AccessAdminRepairPage, errorComponent: RouteErrorState });
+const tasksRoute = createRoute({ getParentRoute: () => protectedRoute, path: '/tasks', beforeLoad: routeGuard('tasks'), component: () => <PlaceholderPage title="Массовое изменение" />, errorComponent: RouteErrorState });
+const operationsRoute = createRoute({ getParentRoute: () => protectedRoute, path: '/operations', beforeLoad: routeGuard('operations'), component: () => <PlaceholderPage title="Операции" />, errorComponent: RouteErrorState });
+const reportsRoute = createRoute({ getParentRoute: () => protectedRoute, path: '/reports', beforeLoad: routeGuard('reports'), component: () => <PlaceholderPage title="Отчёты" />, errorComponent: RouteErrorState });
+const auditRoute = createRoute({ getParentRoute: () => protectedRoute, path: '/audit', beforeLoad: routeGuard('audit'), component: () => <PlaceholderPage title="Аудит" />, errorComponent: RouteErrorState });
 
-const routeTree = rootRoute.addChildren([indexRoute, statusRoute, accessRoute, configureRoute, reviewRoute, commandRoute, repairRoute, tasksRoute, operationsRoute, reportsRoute, dataRoute, auditRoute, settingsRoute]);
+const routeTree = rootRoute.addChildren([statusRoute, protectedRoute.addChildren([indexRoute, accessRoute, configureRoute, reviewRoute, commandRoute, repairRoute, tasksRoute, operationsRoute, reportsRoute, auditRoute])]);
 
-export const router = createRouter({ routeTree });
+export const router = createRouter({
+  routeTree,
+  context: { queryClient: undefined!, app: undefined! },
+});
 
 declare module '@tanstack/react-router' {
   interface Register { router: typeof router; }

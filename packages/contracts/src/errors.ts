@@ -6,6 +6,8 @@ export const apiErrorCodeSchema = z.enum([
   'INVALID_REQUEST',
   'UNAUTHENTICATED',
   'FORBIDDEN',
+  'ACCESS_REVOKED',
+  'ACCESS_VERIFICATION_UNAVAILABLE',
   'NOT_FOUND',
   'CONFLICT',
   'RATE_LIMITED',
