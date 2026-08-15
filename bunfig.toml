@@ -1,0 +1,6 @@
+[install]
+# 2.5 недели = 1 512 000 секунд
+minimumReleaseAge = 1512000
+
+# Не добавляйте исключения без крайней необходимости:
+# minimumReleaseAgeExcludes = ["@types/node"]
