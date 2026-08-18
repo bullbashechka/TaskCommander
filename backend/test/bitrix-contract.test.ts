@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   bitrixFailureSchema,
+  notificationRequestSchema,
   taskApplyRequestSchema,
   taskChangeSnapshotSchema,
   taskSearchRequestSchema,
@@ -30,6 +31,26 @@ describe('Bitrix adapter schemas', () => {
     expect(
       bitrixFailureSchema.safeParse({ kind: 'raw_bitrix_error', diagnosticCode: 'ERROR_CORE' })
         .success,
+    ).toBe(false);
+  });
+
+  it('allows only HTTPS or exact loopback HTTP application links', () => {
+    const request = {
+      recipientId: '42',
+      deduplicationKey: 'operation-42',
+      message: 'Operation completed.',
+    };
+    expect(
+      notificationRequestSchema.safeParse({
+        ...request,
+        operationUrl: 'http://localhost:5173/operations/42',
+      }).success,
+    ).toBe(true);
+    expect(
+      notificationRequestSchema.safeParse({
+        ...request,
+        operationUrl: 'http://attacker.example/operations/42',
+      }).success,
     ).toBe(false);
   });
 

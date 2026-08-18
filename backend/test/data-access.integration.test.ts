@@ -1,10 +1,12 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { env } from 'cloudflare:test';
 
 import {
   createDataAccessContext,
+  createSystemConsumerContext,
   resolveEffectiveAccess,
   type DataAccessContext,
+  type SystemConsumerContext,
 } from '../src/data/access';
 import { createServerSupabaseClient } from '../src/data/client';
 import { TaskCommanderRepositories } from '../src/data/repositories';
@@ -18,13 +20,17 @@ const integrationEnabled =
 
 if (integrationEnabled) {
   describe('Supabase data access integration', () => {
+    // The database is disposable and reset by db:docker:reset. Keeping cleanup outside the
+    // deployable API preserves append-only audit guarantees and avoids a production backdoor.
     const portalId = `integration-${crypto.randomUUID()}`;
     const firstUserId = '900000000001';
     const secondUserId = '900000000002';
     const client = createServerSupabaseClient(env);
-    const repositories = new TaskCommanderRepositories(client);
+    const repositories = new TaskCommanderRepositories(client, ['https://portal.bitrix24.ru']);
     let firstContext: DataAccessContext | undefined;
+    let firstSystemContext: SystemConsumerContext | undefined;
     let secondContext: DataAccessContext | undefined;
+    let secondSystemContext: SystemConsumerContext | undefined;
     let secondViewAllContext: DataAccessContext | undefined;
 
     beforeAll(async () => {
@@ -39,14 +45,26 @@ if (integrationEnabled) {
           user_id: firstUserId,
           display_name: 'First integration operator',
           access_active: true,
-          permissions: ['app_access', 'view_own_reports'],
+          permissions: [
+            'app_access',
+            'view_own_reports',
+            'change_allowed_fields',
+            'run_bulk_operations',
+          ],
+          allowed_field_ids: ['TITLE'],
         },
         {
           portal_id: portalId,
           user_id: secondUserId,
           display_name: 'Second integration operator',
           access_active: true,
-          permissions: ['app_access', 'view_own_reports'],
+          permissions: [
+            'app_access',
+            'view_own_reports',
+            'change_allowed_fields',
+            'run_bulk_operations',
+          ],
+          allowed_field_ids: ['TITLE'],
         },
       ]);
       expect(usersError).toBeNull();
@@ -62,6 +80,7 @@ if (integrationEnabled) {
           repositories,
         ),
       );
+      firstSystemContext = createSystemConsumerContext(portalId, firstUserId);
       secondContext = createDataAccessContext(
         await resolveEffectiveAccess(
           await createVerifiedTestPrincipal({
@@ -73,6 +92,7 @@ if (integrationEnabled) {
           repositories,
         ),
       );
+      secondSystemContext = createSystemConsumerContext(portalId, secondUserId);
       await expect(
         resolveEffectiveAccess(
           await createVerifiedTestPrincipal({
@@ -103,15 +123,14 @@ if (integrationEnabled) {
       );
     });
 
-    afterAll(async () => {
-      const { error } = await client.rpc('purge_integration_test_fixture', {
-        p_portal_id: portalId,
-      });
-      expect(error).toBeNull();
-    });
-
     it('isolates operation history and atomically records concurrent task results', async () => {
-      if (!firstContext || !secondContext || !secondViewAllContext) {
+      if (
+        !firstContext ||
+        !firstSystemContext ||
+        !secondContext ||
+        !secondSystemContext ||
+        !secondViewAllContext
+      ) {
         throw new Error('Integration access contexts were not initialized.');
       }
       const created = await repositories.createOperation(firstContext, {
@@ -129,7 +148,7 @@ if (integrationEnabled) {
       expect(created.disposition).toBe('created');
       const operation = created.operation;
       await expect(
-        repositories.startOperation(firstContext, {
+        repositories.startOperation(firstSystemContext, {
           operationId: operation.id,
           launchAttempt: operation.launchAttempt,
           correlationId: 'TC-123e4567-e89b-42d3-a456-426614174012',
@@ -138,12 +157,12 @@ if (integrationEnabled) {
 
       await expect(
         Promise.all([
-          repositories.recordTaskResult(firstContext, {
+          repositories.recordTaskResult(firstSystemContext, {
             operationId: operation.id,
             launchAttempt: operation.launchAttempt,
             taskId: '9001',
             title: 'First task',
-            taskUrl: 'https://example.test/task/9001',
+            taskUrl: 'https://portal.bitrix24.ru/task/9001',
             outcome: 'success',
             requestedFieldIds: [],
             appliedFieldIds: [],
@@ -153,12 +172,12 @@ if (integrationEnabled) {
             correlationId: null,
             canRetry: false,
           }),
-          repositories.recordTaskResult(firstContext, {
+          repositories.recordTaskResult(firstSystemContext, {
             operationId: operation.id,
             launchAttempt: operation.launchAttempt,
             taskId: '9002',
             title: 'Second task',
-            taskUrl: 'https://example.test/task/9002',
+            taskUrl: 'https://portal.bitrix24.ru/task/9002',
             outcome: 'error',
             requestedFieldIds: [],
             appliedFieldIds: [],
@@ -178,19 +197,19 @@ if (integrationEnabled) {
         repositories.getOperation(secondViewAllContext, operation.id),
       ).resolves.toMatchObject({ id: operation.id });
       await expect(
-        repositories.startOperation(secondViewAllContext, {
+        repositories.startOperation(secondSystemContext, {
           operationId: operation.id,
           launchAttempt: operation.launchAttempt,
           correlationId: 'TC-123e4567-e89b-42d3-a456-426614174011',
         }),
       ).rejects.toMatchObject({ code: 'UNAVAILABLE_RECORD' });
       await expect(
-        repositories.recordTaskResult(secondViewAllContext, {
+        repositories.recordTaskResult(secondSystemContext, {
           operationId: operation.id,
           launchAttempt: operation.launchAttempt,
           taskId: '9003',
           title: 'Unauthorized result',
-          taskUrl: 'https://example.test/task/9003',
+          taskUrl: 'https://portal.bitrix24.ru/task/9003',
           outcome: 'success',
           requestedFieldIds: [],
           appliedFieldIds: [],
@@ -241,5 +260,11 @@ if (integrationEnabled) {
         }),
       ).resolves.toBeNull();
     });
+  });
+}
+
+if (!integrationEnabled) {
+  describe.skip('Supabase data access integration', () => {
+    it('requires an isolated configured database', () => undefined);
   });
 }

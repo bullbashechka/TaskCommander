@@ -1,7 +1,7 @@
 import { createExecutionContext, createMessageBatch, env, getQueueResult } from 'cloudflare:test';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import consumer, { consumeRuntimeProbeBatch } from '../src/consumer';
+import consumer, { consumeQueueBatch, consumeRuntimeProbeBatch } from '../src/consumer';
 
 const queueName = 'task-commander-test-operations-v1';
 
@@ -44,7 +44,7 @@ describe('runtime probe consumer', () => {
     );
   });
 
-  it('retries an unknown probe schema without writing an artifact', async () => {
+  it('acknowledges an unknown probe schema without writing an artifact', async () => {
     const batch = createMessageBatch(queueName, [
       {
         id: 'probe-invalid',
@@ -67,8 +67,8 @@ describe('runtime probe consumer', () => {
       outcome: 'ok',
       retryBatch: { retry: false },
       ackAll: false,
-      retryMessages: [{ msgId: 'probe-invalid' }],
-      explicitAcks: [],
+      retryMessages: [],
+      explicitAcks: ['probe-invalid'],
     });
     await expect(
       env.REPORTS_BUCKET.get('v1/runtime-probe/json/probe-invalid.json'),
@@ -105,5 +105,107 @@ describe('runtime probe consumer', () => {
     expect(error).toHaveBeenCalledWith(
       JSON.stringify({ event: 'runtime_probe_configuration_error', messageId: 'probe-without-r2' }),
     );
+  });
+
+  it('acknowledges messages from an unknown queue without dispatching a handler', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const batch = createMessageBatch('task-commander-test-unknown-v1', [
+      {
+        id: 'unknown-queue-message',
+        timestamp: new Date(),
+        attempts: 1,
+        body: { schemaVersion: 1 },
+      },
+    ]);
+    const context = createExecutionContext();
+
+    await consumer.queue!(batch, env, context);
+
+    await expect(getQueueResult(batch, context)).resolves.toMatchObject({
+      retryMessages: [],
+      explicitAcks: ['unknown-queue-message'],
+    });
+    expect(error).toHaveBeenCalledWith(
+      JSON.stringify({ event: 'queue_rejected', queue: 'task-commander-test-unknown-v1' }),
+    );
+  });
+
+  it('acknowledges a malformed access command without constructing data dependencies', async () => {
+    const batch = createMessageBatch('task-commander-test-access-v1', [
+      {
+        id: 'malformed-access-command',
+        timestamp: new Date(),
+        attempts: 1,
+        body: { schemaVersion: 999 },
+      },
+    ]);
+    const context = createExecutionContext();
+
+    await consumeQueueBatch(batch, {});
+
+    await expect(getQueueResult(batch, context)).resolves.toMatchObject({
+      retryMessages: [],
+      explicitAcks: ['malformed-access-command'],
+    });
+  });
+
+  it('retries a final-attempt valid access command when the repository is unavailable', async () => {
+    const batch = createMessageBatch('task-commander-test-access-v1', [
+      {
+        id: 'valid-access-command-without-repository',
+        timestamp: new Date(),
+        attempts: 5,
+        body: {
+          schemaVersion: 1,
+          messageId: '123e4567-e89b-42d3-a456-426614174000',
+          kind: 'access.command.execute',
+          portalId: 'portal-1',
+          commandId: '223e4567-e89b-42d3-a456-426614174000',
+          createdAt: '2026-08-18T00:00:00.000Z',
+        },
+      },
+    ]);
+    const context = createExecutionContext();
+
+    await consumeQueueBatch(batch, {});
+
+    await expect(getQueueResult(batch, context)).resolves.toMatchObject({
+      retryMessages: [{ msgId: 'valid-access-command-without-repository' }],
+      explicitAcks: [],
+    });
+  });
+
+  it('does not acknowledge an accepted command when its final claim attempt fails', async () => {
+    const batch = createMessageBatch('task-commander-test-access-v1', [
+      {
+        id: 'accepted-command-claim-failed',
+        timestamp: new Date(),
+        attempts: 5,
+        body: {
+          schemaVersion: 1,
+          messageId: '323e4567-e89b-42d3-a456-426614174000',
+          kind: 'access.command.execute',
+          portalId: 'portal-1',
+          commandId: '423e4567-e89b-42d3-a456-426614174000',
+          createdAt: '2026-08-18T00:00:00.000Z',
+        },
+      },
+    ]);
+    const context = createExecutionContext();
+    const repository = {
+      readCommand: vi.fn().mockResolvedValue({
+        command: { state: 'accepted', state_version: 1 },
+        targets: [],
+      }),
+      claimCommand: vi.fn().mockRejectedValue(new Error('temporary database failure')),
+    };
+
+    await consumeQueueBatch(batch, {}, () => repository as never);
+
+    await expect(getQueueResult(batch, context)).resolves.toMatchObject({
+      retryMessages: [{ msgId: 'accepted-command-claim-failed' }],
+      explicitAcks: [],
+    });
+    expect(repository.readCommand).toHaveBeenCalledTimes(2);
   });
 });

@@ -407,6 +407,16 @@ export interface Database {
         };
         Returns: AccessManagementDraftRow;
       };
+      save_access_draft_with_field_set: {
+        Args: {
+          p_portal_id: string;
+          p_manager_user_id: string;
+          p_expected_revision: number;
+          p_field_ids: string[];
+          p_draft_payload: Json;
+        };
+        Returns: AccessManagementDraftRow;
+      };
       consume_access_management_read_limit: {
         Args: { p_portal_id: string; p_actor_user_id: string };
         Returns: undefined;
@@ -639,10 +649,6 @@ export interface Database {
           p_after_version: string | null;
         };
         Returns: Json;
-      };
-      purge_integration_test_fixture: {
-        Args: { p_portal_id: string };
-        Returns: undefined;
       };
       append_audit_event: {
         Args: {

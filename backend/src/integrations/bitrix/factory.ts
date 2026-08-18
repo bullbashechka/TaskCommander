@@ -1,6 +1,7 @@
 import type { RuntimeEnvironment } from '../../runtime/configuration';
 import type { BitrixAdapter } from './contract';
 import { createMockBitrixAdapter } from './mock';
+import { enforceBitrixOriginPolicy } from './trusted-origin-adapter';
 
 export class BitrixAdapterConfigurationError extends Error {}
 
@@ -13,7 +14,7 @@ export function createBitrixAdapter(
   options: { currentUserId?: string } = {},
 ): BitrixAdapter {
   if (isSupportedBitrixAdapterConfiguration(env)) {
-    return createMockBitrixAdapter(options);
+    return enforceBitrixOriginPolicy(createMockBitrixAdapter(options), env);
   }
 
   throw new BitrixAdapterConfigurationError(

@@ -1,11 +1,7 @@
 import { appPermissions, type Permission } from '@task-commander/contracts';
 
 export type AccessChangeMode =
-  | 'grant'
-  | 'replace_managed'
-  | 'revoke_managed'
-  | 'full_revoke'
-  | 'repair';
+  'grant' | 'replace_managed' | 'revoke_managed' | 'full_revoke' | 'repair';
 
 export const permissionDependencies: Readonly<Record<Permission, readonly Permission[]>> =
   Object.freeze({
@@ -68,7 +64,9 @@ export function closePermissionDependencies(requested: readonly Permission[]): {
   }
   return {
     permissions: ordered(closure),
-    automaticPermissions: ordered([...closure].filter((permission) => !requestedSet.has(permission))),
+    automaticPermissions: ordered(
+      [...closure].filter((permission) => !requestedSet.has(permission)),
+    ),
   };
 }
 
@@ -150,6 +148,11 @@ export function evaluateAccessChange(input: AccessPolicyInput): AccessPolicyResu
       ? [...input.requestedPermissions, 'change_allowed_fields' as const]
       : input.requestedPermissions;
   const requestedClosure = closePermissionDependencies(requestedWithFieldPermission);
+  const automaticPermissions = ordered(
+    requestedClosure.permissions.filter(
+      (permission) => !input.requestedPermissions.includes(permission),
+    ),
+  );
 
   if (!input.actorIsAdministrator && input.mode === 'full_revoke') {
     if ([...currentPermissions].some((permission) => !manageablePermissions.has(permission))) {
@@ -207,9 +210,7 @@ export function evaluateAccessChange(input: AccessPolicyInput): AccessPolicyResu
       break;
     case 'replace_managed':
       desiredPermissions = new Set([
-        ...[...currentPermissions].filter(
-          (permission) => !manageablePermissions.has(permission),
-        ),
+        ...[...currentPermissions].filter((permission) => !manageablePermissions.has(permission)),
         ...requestedClosure.permissions,
       ]);
       desiredFields = new Set([
@@ -254,9 +255,7 @@ export function evaluateAccessChange(input: AccessPolicyInput): AccessPolicyResu
     removedInvalidDependency = false;
     for (const permission of [...desiredPermissions]) {
       if (
-        permissionDependencies[permission].some(
-          (dependency) => !desiredPermissions.has(dependency),
-        )
+        permissionDependencies[permission].some((dependency) => !desiredPermissions.has(dependency))
       ) {
         desiredPermissions.delete(permission);
         removedInvalidDependency = true;
@@ -300,7 +299,10 @@ export function evaluateAccessChange(input: AccessPolicyInput): AccessPolicyResu
       break;
     case 'replace_managed':
       for (const permission of currentPermissions) {
-        if (manageablePermissions.has(permission) && !requestedClosure.permissions.includes(permission)) {
+        if (
+          manageablePermissions.has(permission) &&
+          !requestedClosure.permissions.includes(permission)
+        ) {
           explicitlyRemovedPermissions.add(permission);
         }
       }
@@ -331,8 +333,8 @@ export function evaluateAccessChange(input: AccessPolicyInput): AccessPolicyResu
     desiredPermissions: ordered(desiredPermissions),
     desiredFieldIds: orderedFields(desiredFields),
     requestedPermissions: ordered(input.requestedPermissions),
-    automaticPermissions: requestedClosure.automaticPermissions,
-    automaticAddedPermissions: requestedClosure.automaticPermissions.filter((permission) =>
+    automaticPermissions,
+    automaticAddedPermissions: automaticPermissions.filter((permission) =>
       addedPermissions.includes(permission),
     ),
     automaticRemovedPermissions,

@@ -4,8 +4,9 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { router } from '@/app/router';
+import type { AppAccessSnapshot } from '@/app/app-context';
 
-const app = {
+const app: AppAccessSnapshot = {
   principal: {
     portalId: 'portal.test',
     userId: '1',
@@ -54,6 +55,8 @@ const users = {
       accessVersion: 1,
       permissionCount: 2,
       fieldScope: { kind: 'all' },
+      canManage: true,
+      isSelf: false,
     },
     {
       userId: '11',
@@ -68,16 +71,20 @@ const users = {
       accessVersion: null,
       permissionCount: 10,
       fieldScope: { kind: 'all' },
+      canManage: false,
+      isSelf: false,
     },
   ],
   nextCursor: null,
 };
 
 function response(value: unknown) {
-  return Promise.resolve(new Response(JSON.stringify(value), {
-    status: 200,
-    headers: { 'content-type': 'application/json' },
-  }));
+  return Promise.resolve(
+    new Response(JSON.stringify(value), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }),
+  );
 }
 
 async function renderAccessPage() {
@@ -93,12 +100,15 @@ async function renderAccessPage() {
 
 describe('access selection screen', () => {
   beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.includes('/capabilities')) return response(capabilities);
-      if (url.includes('/departments')) return response({ items: [] });
-      return response(users);
-    }));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/capabilities')) return response(capabilities);
+        if (url.includes('/departments')) return response({ items: [] });
+        return response(users);
+      }),
+    );
   });
 
   afterEach(() => {
@@ -124,7 +134,9 @@ describe('access selection screen', () => {
     expect(screen.getByRole('link', { name: 'Доступ' })).toHaveAttribute('aria-current', 'page');
     expect(screen.getByRole('button', { name: 'Все' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('checkbox', { name: 'Выбрать: Иван Петров' })).toBeDisabled();
-    expect(screen.getByRole('checkbox', { name: 'Выбрать всех сотрудников на странице' })).toBeEnabled();
+    expect(
+      screen.getByRole('checkbox', { name: 'Выбрать всех сотрудников на странице' }),
+    ).toBeEnabled();
   });
 
   it('opens the keyboard-managed department dialog', async () => {

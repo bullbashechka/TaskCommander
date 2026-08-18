@@ -9,11 +9,13 @@ import {
   taskOutcomeSchema,
   taskOutcomeStatusSchema,
   userAccessSchema,
+  safeHttpsUrlSchema,
   type BulkOperation,
   type BulkOperationDraft,
   type TaskOutcome,
   type TaskOutcomeRefinement,
   type UserAccess,
+  type OperationAuditReasonCode,
 } from '@task-commander/contracts';
 import { type SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
@@ -22,11 +24,14 @@ import {
   hasPermission,
   requireDataAccessContext,
   requireRepositoryPermission,
+  requireSystemConsumerContext,
   type DataAccessContext,
+  type SystemConsumerContext,
 } from './access';
 import { createNextCursor, resolvePageRequest, type CursorPage, type PageRequest } from './cursor';
 import type { Database, DatabaseTable, Json } from './database.types';
 import { DataAccessError, toDataAccessError } from './errors';
+import { isUrlFromOrigins } from '../runtime/origin-policy';
 
 type Client = SupabaseClient<Database>;
 type OperationRow = DatabaseTable<'bulk_operation'>;
@@ -99,7 +104,7 @@ const taskResultRowSchema = z
     operation_id: z.string().uuid(),
     task_id: z.string().trim().min(1).max(32),
     task_title: z.string().trim().min(1).max(1024).nullable(),
-    task_url: z.string().url().nullable(),
+    task_url: safeHttpsUrlSchema.nullable(),
     outcome: taskOutcomeStatusSchema,
     requested_field_ids: z.array(z.string().trim().min(1).max(128)).max(256),
     applied_field_ids: z.array(z.string().trim().min(1).max(128)).max(256),
@@ -238,8 +243,8 @@ export function getReportVisibility(context: DataAccessContext): 'own' | 'all' {
 }
 
 async function requireData<T>(
-  response: PromiseLike<{ data: T | null; error: unknown | null }>,
-): Promise<T> {
+  response: PromiseLike<{ data: T; error: unknown | null }>,
+): Promise<NonNullable<T>> {
   const { data, error } = await response;
   if (error) {
     throw toDataAccessError(error);
@@ -247,7 +252,7 @@ async function requireData<T>(
   if (data === null) {
     throw new DataAccessError('UNAVAILABLE_RECORD', false);
   }
-  return data;
+  return data as NonNullable<T>;
 }
 
 function mapOperation(row: OperationRow): BulkOperation {
@@ -311,8 +316,12 @@ function parseOperationCommand(payload: unknown): {
 
 function mapTaskOutcome(
   row: TaskResultRow,
+  trustedPortalOrigins: readonly string[],
   refinement: TaskOutcomeRefinement | null = null,
 ): TaskOutcome {
+  if (row.task_url && !isUrlFromOrigins(row.task_url, trustedPortalOrigins)) {
+    throw new DataAccessError('INTEGRITY', false);
+  }
   return taskOutcomeSchema.parse({
     taskId: row.task_id,
     title: row.task_title,
@@ -326,6 +335,18 @@ function mapTaskOutcome(
     canRetry: row.can_retry,
     refinement,
   });
+}
+
+function requireTrustedTaskUrl(
+  value: string | null,
+  trustedPortalOrigins: readonly string[],
+): string | null {
+  if (value === null) return null;
+  const parsed = safeHttpsUrlSchema.safeParse(value);
+  if (!parsed.success || !isUrlFromOrigins(parsed.data, trustedPortalOrigins)) {
+    throw new DataAccessError('INTEGRITY', false);
+  }
+  return parsed.data;
 }
 
 function mapTaskOutcomeRefinement(
@@ -391,13 +412,20 @@ function mapDraft(row: DatabaseTable<'operation_draft'>): BulkOperationDraft {
 }
 
 export class TaskCommanderRepositories {
-  public constructor(private readonly client: Client) {}
+  public constructor(
+    private readonly client: Client,
+    private readonly trustedPortalOrigins: readonly string[],
+  ) {}
 
   private async getOwnedOperation(
-    context: DataAccessContext,
+    context: DataAccessContext | SystemConsumerContext,
     operationId: string,
   ): Promise<BulkOperation> {
-    requireDataAccessContext(context);
+    if ('permissions' in context) {
+      requireDataAccessContext(context);
+    } else {
+      requireSystemConsumerContext(context);
+    }
     const row = await requireData(
       this.client
         .from('bulk_operation')
@@ -531,7 +559,7 @@ export class TaskCommanderRepositories {
       throw new DataAccessError('CONFLICT', false);
     }
 
-    const row = data[0];
+    const row = data[0]!;
     return mapSavedFilter(row);
   }
 
@@ -605,7 +633,16 @@ export class TaskCommanderRepositories {
     context: DataAccessContext,
     input: CreateOperationInput,
   ): Promise<CreatedOperation> {
-    requireDataAccessContext(context);
+    requireRepositoryPermission(context, 'run_bulk_operations');
+    const initialResults = (input.initialResults ?? []).map((result) => ({
+      taskId: result.taskId,
+      title: result.title,
+      taskUrl: requireTrustedTaskUrl(result.taskUrl, this.trustedPortalOrigins),
+      outcome: result.outcome,
+      requestedFieldIds: result.requestedFieldIds,
+      reasonCode: result.reasonCode,
+      reasonMessage: result.reasonMessage,
+    }));
     const payload = await requireData(
       this.client.rpc('create_bulk_operation_idempotent', {
         p_portal_id: context.portalId,
@@ -623,15 +660,7 @@ export class TaskCommanderRepositories {
         p_excluded_count: input.summary.excluded,
         p_unchanged_count: input.summary.unchanged,
         p_correlation_id: input.correlationId,
-        p_initial_results: (input.initialResults ?? []).map((result) => ({
-          taskId: result.taskId,
-          title: result.title,
-          taskUrl: result.taskUrl,
-          outcome: result.outcome,
-          requestedFieldIds: result.requestedFieldIds,
-          reasonCode: result.reasonCode,
-          reasonMessage: result.reasonMessage,
-        })) as Json,
+        p_initial_results: initialResults as Json,
       }),
     );
     const result = parseOperationCommand(payload);
@@ -665,10 +694,10 @@ export class TaskCommanderRepositories {
   }
 
   public async startOperation(
-    context: DataAccessContext,
+    context: SystemConsumerContext,
     input: { operationId: string; launchAttempt: number; correlationId: string },
   ): Promise<OperationCommandResult> {
-    requireDataAccessContext(context);
+    requireSystemConsumerContext(context);
     const currentOperation = await this.getOwnedOperation(context, input.operationId);
     const payload = await requireData(
       this.client.rpc('start_bulk_operation_with_attempt', {
@@ -685,21 +714,21 @@ export class TaskCommanderRepositories {
     context: DataAccessContext,
     input: { operationId: string; correlationId: string },
   ): Promise<OperationCommandResult> {
-    requireDataAccessContext(context);
+    requireRepositoryPermission(context, 'run_bulk_operations');
     return this.requestOperationStop(context, { ...input, kind: 'cancel' });
   }
 
   public async requestOperationInterruption(
-    context: DataAccessContext,
+    context: SystemConsumerContext,
     input: {
       operationId: string;
       launchAttempt: number;
       correlationId: string;
-      reasonCode: string;
+      reasonCode: OperationAuditReasonCode;
       reasonMessage: string;
     },
   ): Promise<OperationCommandResult> {
-    requireDataAccessContext(context);
+    requireSystemConsumerContext(context);
     const operation = await this.getOwnedOperation(context, input.operationId);
     const payload = await requireData(
       this.client.rpc('request_bulk_operation_interruption_with_attempt', {
@@ -715,10 +744,10 @@ export class TaskCommanderRepositories {
   }
 
   public async finalizeOperation(
-    context: DataAccessContext,
+    context: SystemConsumerContext,
     input: { operationId: string; launchAttempt: number; correlationId: string },
   ): Promise<OperationCommandResult> {
-    requireDataAccessContext(context);
+    requireSystemConsumerContext(context);
     const operation = await this.getOwnedOperation(context, input.operationId);
     const payload = await requireData(
       this.client.rpc('finalize_bulk_operation_with_attempt', {
@@ -732,10 +761,10 @@ export class TaskCommanderRepositories {
   }
 
   public async failOperationLaunch(
-    context: DataAccessContext,
+    context: SystemConsumerContext,
     input: { operationId: string; launchAttempt: number; correlationId: string },
   ): Promise<OperationCommandResult> {
-    requireDataAccessContext(context);
+    requireSystemConsumerContext(context);
     const operation = await this.getOwnedOperation(context, input.operationId);
     const payload = await requireData(
       this.client.rpc('fail_bulk_operation_launch_with_attempt', {
@@ -752,7 +781,7 @@ export class TaskCommanderRepositories {
     context: DataAccessContext,
     input: { operationId: string; correlationId: string },
   ): Promise<OperationCommandResult> {
-    requireDataAccessContext(context);
+    requireRepositoryPermission(context, 'retry_operations');
     const operation = await this.getOwnedOperation(context, input.operationId);
     const payload = await requireData(
       this.client.rpc('retry_bulk_operation_launch', {
@@ -829,10 +858,11 @@ export class TaskCommanderRepositories {
   }
 
   public async recordTaskResult(
-    context: DataAccessContext,
+    context: SystemConsumerContext,
     input: RecordTaskResultInput,
   ): Promise<RecordedTaskResult> {
-    requireDataAccessContext(context);
+    requireSystemConsumerContext(context);
+    const taskUrl = requireTrustedTaskUrl(input.taskUrl, this.trustedPortalOrigins);
     const operation = await this.getOwnedOperation(context, input.operationId);
     const protectedResult = input.protectedResult;
     const payload = await requireData(
@@ -842,7 +872,7 @@ export class TaskCommanderRepositories {
         p_expected_launch_attempt: input.launchAttempt,
         p_task_id: input.taskId,
         p_task_title: input.title,
-        p_task_url: input.taskUrl,
+        p_task_url: taskUrl,
         p_outcome: input.outcome,
         p_requested_field_ids: input.requestedFieldIds,
         p_applied_field_ids: input.appliedFieldIds,
@@ -867,16 +897,16 @@ export class TaskCommanderRepositories {
 
     return {
       inserted: parsed.inserted,
-      result: mapTaskOutcome(resultRow),
+      result: mapTaskOutcome(resultRow, this.trustedPortalOrigins),
       summary: parsed.summary,
     };
   }
 
   public async recordTaskResultRefinement(
-    context: DataAccessContext,
+    context: SystemConsumerContext,
     input: RecordTaskResultRefinementInput,
   ): Promise<{ inserted: boolean; refinement: TaskOutcomeRefinement }> {
-    requireDataAccessContext(context);
+    requireSystemConsumerContext(context);
     const operation = await this.getOwnedOperation(context, input.operationId);
     const payload = await requireData(
       this.client.rpc('record_task_result_refinement_with_versions', {
@@ -948,7 +978,9 @@ export class TaskCommanderRepositories {
         mapTaskOutcomeRefinement(taskResultRefinementRowSchema.parse(refinement)),
       ]),
     );
-    return rows.map((row) => mapTaskOutcome(row, refinementsBySource.get(row.id) ?? null));
+    return rows.map((row) =>
+      mapTaskOutcome(row, this.trustedPortalOrigins, refinementsBySource.get(row.id) ?? null),
+    );
   }
 
   public async getReportByOperation(

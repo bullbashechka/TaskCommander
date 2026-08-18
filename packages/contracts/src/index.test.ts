@@ -11,6 +11,7 @@ import {
   operationStatusSchema,
   reportArtifactStatusSchema,
   reportTaskEntrySchema,
+  safeHttpsUrlSchema,
   taskOutcomeSchema,
   taskOutcomeStatusSchema,
 } from './index';
@@ -26,6 +27,19 @@ describe('health contract', () => {
 });
 
 describe('domain contracts', () => {
+  it('accepts only credential-free HTTPS URLs on the shared boundary', () => {
+    expect(safeHttpsUrlSchema.safeParse('https://portal.example/task/42').success).toBe(true);
+    for (const value of [
+      'http://portal.example/task/42',
+      'javascript:alert(1)',
+      'data:text/plain,secret',
+      'https://user:password@portal.example/task/42',
+      'https://portal.example:8443/task/42',
+    ]) {
+      expect(safeHttpsUrlSchema.safeParse(value).success).toBe(false);
+    }
+  });
+
   it('accepts only a bounded strict session creation request', () => {
     expect(createSessionRequestSchema.safeParse({ launchContext: 'signed-context' }).success).toBe(
       true,

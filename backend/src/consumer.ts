@@ -1,10 +1,7 @@
 import { accessPermissionCatalog } from '@task-commander/contracts';
 
 import { accessCommandQueueMessageSchema } from './contracts/access-command-queue';
-import {
-  createAccessManagementRepository,
-  type AccessManagementRepository,
-} from './data';
+import { createAccessManagementRepository, type AccessManagementRepository } from './data';
 import {
   getRequiredR2Binding,
   RuntimeConfigurationError,
@@ -36,7 +33,7 @@ export async function consumeRuntimeProbeBatch(
           schemaVersion: getSafeSchemaVersion(message.body),
         }),
       );
-      message.retry();
+      message.ack();
       continue;
     }
 
@@ -175,8 +172,11 @@ async function executeAccessCommand(
 export async function consumeQueueBatch(
   batch: MessageBatch<unknown>,
   env: RuntimeEnvironment,
+  createRepository: (
+    env: RuntimeEnvironment,
+  ) => AccessManagementRepository = createAccessManagementRepository,
 ): Promise<void> {
-  const repository = createAccessManagementRepository(env);
+  let repository: AccessManagementRepository | undefined;
   for (const message of batch.messages) {
     const accessMessage = accessCommandQueueMessageSchema.safeParse(message.body);
     if (!accessMessage.success) {
@@ -191,6 +191,7 @@ export async function consumeQueueBatch(
       continue;
     }
     try {
+      repository ??= createRepository(env);
       await executeAccessCommand(
         repository,
         env,
@@ -206,20 +207,27 @@ export async function consumeQueueBatch(
           commandId: accessMessage.data.commandId,
         }),
       );
-      if (message.attempts >= 5) {
+      if (message.attempts >= 5 && repository) {
         const stored = await repository.readCommand({
           portalId: accessMessage.data.portalId,
           commandId: accessMessage.data.commandId,
         });
-        if (stored.command && ['validating', 'in_progress'].includes(stored.command.state)) {
+        if (
+          !stored.command ||
+          ['succeeded', 'partially_succeeded', 'failed', 'no_change'].includes(stored.command.state)
+        ) {
+          message.ack();
+        } else if (['validating', 'in_progress'].includes(stored.command.state)) {
           await repository.failCommand(
             accessMessage.data.portalId,
             accessMessage.data.commandId,
             stored.command.state_version,
             'INTERNAL_ERROR',
           );
+          message.ack();
+        } else {
+          message.retry();
         }
-        message.ack();
       } else {
         message.retry();
       }
@@ -229,11 +237,15 @@ export async function consumeQueueBatch(
 
 export default {
   queue(batch, env, context) {
-    // Queue identity, not an untrusted body, selects the handler. A malformed access message is
-    // therefore rejected by consumeQueueBatch instead of being retried as an unrelated probe.
-    const containsAccessCommand = batch.queue.includes('access-commands');
-    context.waitUntil(
-      containsAccessCommand ? consumeQueueBatch(batch, env) : consumeRuntimeProbeBatch(batch, env),
-    );
+    if (batch.queue === env.ACCESS_COMMANDS_QUEUE_NAME) {
+      context.waitUntil(consumeQueueBatch(batch, env));
+      return;
+    }
+    if (batch.queue === env.OPERATIONS_QUEUE_NAME) {
+      context.waitUntil(consumeRuntimeProbeBatch(batch, env));
+      return;
+    }
+    for (const message of batch.messages) message.ack();
+    console.error(JSON.stringify({ event: 'queue_rejected', queue: batch.queue }));
   },
-} satisfies ExportedHandler<Env>;
+} satisfies ExportedHandler<ConsumerEnvironment>;

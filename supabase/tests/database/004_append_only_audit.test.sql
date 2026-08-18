@@ -82,7 +82,7 @@ select lives_ok(
     'audit-test', now() - interval '2 years 1 day', 'system_error', 'system', null, 'Система', 'internal',
     'system', 'legacy-component', 'Компонент', '[]'::jsonb, 'failure',
     'TC-123e4567-e89b-42d3-a456-426614174001', repeat('b', 64),
-    '{"kind":"system","component":"legacy","errorCode":"TEST","retryable":false}'::jsonb
+    '{"kind":"system","component":"operation-state-machine","errorCode":"UPSTREAM_FAILURE","retryable":false}'::jsonb
   );$$,
   'stores an expired event for retention'
 );

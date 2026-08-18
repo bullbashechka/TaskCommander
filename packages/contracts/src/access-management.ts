@@ -7,12 +7,15 @@ import {
   isoDateTimeSchema,
   nonNegativeIntegerSchema,
   positiveIntegerSchema,
+  safeHttpsUrlSchema,
 } from './primitives';
 
 export const accessManagementLimits = Object.freeze({
   maxRecipients: 100,
   maxFieldPageSize: 100,
   maxSearchResults: 100,
+  maxManagedFields: 256,
+  maxDraftPayloadBytes: 131_072,
   maxIssuesPerTarget: 16,
   draftTtlSeconds: 24 * 60 * 60,
   preflightTtlSeconds: 10 * 60,
@@ -251,7 +254,7 @@ export const accessEmployeeSummarySchema = z
     displayName: z.string().trim().min(1).max(256),
     jobTitle: nullableDisplayTextSchema,
     departmentName: nullableDisplayTextSchema,
-    avatarUrl: z.string().url().nullable(),
+    avatarUrl: safeHttpsUrlSchema.nullable(),
     employmentState: employmentStateSchema,
     accessState: managedAccessStateSchema,
     accessVersion: accessVersionSchema.nullable(),
@@ -342,9 +345,12 @@ export const accessManagementDraftIntentSchema = z
     draftRevision: nonNegativeIntegerSchema,
     mode: accessChangeModeSchema,
     permissions: uniquePermissionsSchema,
-    fieldIds: z.array(fieldIdSchema).refine((ids) => new Set(ids).size === ids.length, {
-      message: 'Draft fields must be unique.',
-    }),
+    fieldIds: z
+      .array(fieldIdSchema)
+      .max(accessManagementLimits.maxManagedFields)
+      .refine((ids) => new Set(ids).size === ids.length, {
+        message: 'Draft fields must be unique.',
+      }),
     reason: accessChangeReasonSchema.nullable(),
     permissionCatalogVersion: accessVersionSchema,
     actorAccessVersion: accessVersionSchema,
@@ -355,6 +361,12 @@ export const accessManagementDraftIntentSchema = z
       Object.keys(draft.subjectVersions).length === draft.subjectIds.length &&
       draft.subjectIds.every((id) => Object.hasOwn(draft.subjectVersions, id)),
     { message: 'Every draft subject must have exactly one base version.' },
+  )
+  .refine(
+    (draft) =>
+      new TextEncoder().encode(JSON.stringify(draft)).byteLength <=
+      accessManagementLimits.maxDraftPayloadBytes,
+    { message: 'Draft payload is too large.' },
   );
 
 export const accessManagementDraftSaveResponseSchema = z
@@ -430,9 +442,7 @@ export const accessManagementPreflightTargetSchema = z
     checkedAccessVersion: accessVersionSchema.nullable(),
     requestedDelta: redactedAccessDeltaSchema,
     automaticDelta: redactedAccessDeltaSchema,
-    issues: z
-      .array(accessManagementIssueSchema)
-      .max(accessManagementLimits.maxIssuesPerTarget),
+    issues: z.array(accessManagementIssueSchema).max(accessManagementLimits.maxIssuesPerTarget),
   })
   .strict();
 
@@ -526,12 +536,7 @@ export const accessManagementCommandSchema = z
     { message: 'Confirmation ID and token must be supplied together.' },
   );
 
-export const accessNotificationStateSchema = z.enum([
-  'not_required',
-  'queued',
-  'sent',
-  'failed',
-]);
+export const accessNotificationStateSchema = z.enum(['not_required', 'queued', 'sent', 'failed']);
 
 export const accessManagementTargetReceiptSchema = z
   .object({
@@ -571,12 +576,8 @@ export type AccessEmployeeProfile = z.infer<typeof accessEmployeeProfileSchema>;
 export type AccessEmployeeSummary = z.infer<typeof accessEmployeeSummarySchema>;
 export type AccessFieldScopeReference = z.infer<typeof accessFieldScopeReferenceSchema>;
 export type AccessManagementCommand = z.infer<typeof accessManagementCommandSchema>;
-export type AccessManagementCommandRequest = z.infer<
-  typeof accessManagementCommandRequestSchema
->;
-export type AccessManagementCommandReceipt = z.infer<
-  typeof accessManagementCommandReceiptSchema
->;
+export type AccessManagementCommandRequest = z.infer<typeof accessManagementCommandRequestSchema>;
+export type AccessManagementCommandReceipt = z.infer<typeof accessManagementCommandReceiptSchema>;
 export type AccessManagementConfirmation = z.infer<typeof accessManagementConfirmationSchema>;
 export type AccessManagementConfirmationRequest = z.infer<
   typeof accessManagementConfirmationRequestSchema

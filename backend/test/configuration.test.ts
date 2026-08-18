@@ -68,7 +68,19 @@ describe('local identity configuration', () => {
   });
 
   it('keeps baseline runtime and cron readiness independent from identity secrets', () => {
-    const baseline = { APP_ENV: 'local', BITRIX_ADAPTER: 'mock' };
+    const rateLimiter = { limit: async () => ({ success: true }) };
+    const baseline = {
+      APP_ENV: 'local',
+      BITRIX_ADAPTER: 'mock',
+      APP_ORIGIN: 'http://localhost:5173',
+      BITRIX_PORTAL_ORIGIN: 'https://portal.bitrix24.ru',
+      BITRIX_FRAME_ANCESTORS: 'https://portal.bitrix24.ru',
+      BITRIX_MEDIA_ALLOWED_ORIGINS: 'https://portal.bitrix24.ru',
+      INTERNAL_READINESS_TOKEN: 'test-readiness-token-000000000000000001',
+      SESSION_RATE_LIMITER: rateLimiter,
+      PROBE_RATE_LIMITER: rateLimiter,
+      ACCESS_FANOUT_RATE_LIMITER: rateLimiter,
+    };
 
     expect(hasLocalRuntimeConfiguration(baseline)).toBe(true);
     expect(hasLocalRuntimeConfiguration({ APP_ENV: 'production', BITRIX_ADAPTER: 'mock' })).toBe(
@@ -80,6 +92,30 @@ describe('local identity configuration', () => {
       cron: 'ready',
       bitrix: 'invalid_configuration',
     });
+    expect(
+      getRuntimeReadiness({
+        ...baseline,
+        BITRIX_FRAME_ANCESTORS: 'https://portal.bitrix24.ru,javascript:alert(1)',
+      }).subsystems.runtime,
+    ).toBe('invalid_configuration');
+    expect(
+      getRuntimeReadiness({
+        ...baseline,
+        BITRIX_PORTAL_ORIGIN: 'https://portal.bitrix24.ru:8443',
+      }).subsystems.runtime,
+    ).toBe('invalid_configuration');
+    expect(
+      getRuntimeReadiness({
+        ...baseline,
+        APP_ORIGIN: 'http://attacker.example',
+      }).subsystems.runtime,
+    ).toBe('invalid_configuration');
+    expect(
+      getRuntimeReadiness({
+        ...baseline,
+        INTERNAL_READINESS_TOKEN: 'weak',
+      }).subsystems.runtime,
+    ).toBe('invalid_configuration');
     expect(getRuntimeReadiness({ APP_ENV: 'local', BITRIX_ADAPTER: 'oauth' }).subsystems.cron).toBe(
       'invalid_configuration',
     );

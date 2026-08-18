@@ -19,8 +19,10 @@ import { DataAccessError } from './errors';
 
 const effectiveAccessBrand = Symbol('effectiveAccess');
 const dataAccessContextBrand = Symbol('dataAccessContext');
+const systemConsumerContextBrand = Symbol('systemConsumerContext');
 const effectiveAccessCapabilities = new WeakSet<object>();
 const dataAccessContextCapabilities = new WeakSet<object>();
+const systemConsumerContextCapabilities = new WeakSet<object>();
 
 const canonicalPersistedFieldIdSchema = z
   .string()
@@ -64,6 +66,12 @@ export interface DataAccessContext {
   readonly actorId: string;
   readonly permissions: readonly Permission[];
   readonly [dataAccessContextBrand]: true;
+}
+
+export interface SystemConsumerContext {
+  readonly portalId: string;
+  readonly actorId: string;
+  readonly [systemConsumerContextBrand]: true;
 }
 
 type AuthorizationContext = EffectiveAccess | DataAccessContext;
@@ -192,6 +200,21 @@ export function createDataAccessContext(access: EffectiveAccess): DataAccessCont
   return context;
 }
 
+/** Creates a worker-only capability without inheriting any user permissions. */
+export function createSystemConsumerContext(
+  portalId: string,
+  actorId: string,
+): SystemConsumerContext {
+  const context: SystemConsumerContext = {
+    portalId: portalIdSchema.parse(portalId),
+    actorId: bitrixIdSchema.parse(actorId),
+    [systemConsumerContextBrand]: true,
+  };
+  Object.freeze(context);
+  systemConsumerContextCapabilities.add(context);
+  return context;
+}
+
 export function hasPermission(context: AuthorizationContext, permission: Permission): boolean {
   assertAuthorizationContext(context);
   return context.permissions.includes(permission);
@@ -237,6 +260,17 @@ export function requireDataAccessContext(context: DataAccessContext): void {
       throw new DataAccessError('UNAVAILABLE_RECORD', false);
     }
     throw error;
+  }
+}
+
+/** Rejects user and forged contexts at worker-only repository transitions. */
+export function requireSystemConsumerContext(context: SystemConsumerContext): void {
+  if (
+    typeof context !== 'object' ||
+    context === null ||
+    !systemConsumerContextCapabilities.has(context)
+  ) {
+    throw new DataAccessError('UNAVAILABLE_RECORD', false);
   }
 }
 
@@ -312,11 +346,11 @@ export async function requireAuthorizedTaskFields(
   }
   const fieldIds = parseRequestedFieldIds(input.fieldIds);
 
-  if (
-    access.fieldScope.kind === 'subset' &&
-    !fieldIds.every((fieldId) => access.fieldScope.fieldIds.includes(fieldId))
-  ) {
-    throw new EffectiveAccessError('forbidden');
+  if (access.fieldScope.kind === 'subset') {
+    const allowedFieldIds = access.fieldScope.fieldIds;
+    if (!fieldIds.every((fieldId) => allowedFieldIds.includes(fieldId))) {
+      throw new EffectiveAccessError('forbidden');
+    }
   }
 
   let currentUser: Awaited<ReturnType<BitrixAdapter['users']['getCurrent']>>;

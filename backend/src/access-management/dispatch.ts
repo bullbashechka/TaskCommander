@@ -1,16 +1,16 @@
 import { createAccessCommandQueueMessage } from '../contracts/access-command-queue';
-import {
-  createAccessManagementRepository,
-  type AccessManagementRepository,
-} from '../data';
+import { createAccessManagementRepository, type AccessManagementRepository } from '../data';
 import type { RuntimeEnvironment } from '../runtime/configuration';
 
+function isQueue(value: unknown): value is Queue {
+  return typeof value === 'object' && value !== null && typeof (value as Queue).send === 'function';
+}
+
 function commandQueue(env: RuntimeEnvironment): Queue {
-  const queue = env.ACCESS_COMMANDS_QUEUE as Queue | undefined;
-  if (!queue || typeof queue.send !== 'function') {
+  if (!isQueue(env.ACCESS_COMMANDS_QUEUE)) {
     throw new Error('Access command queue is unavailable.');
   }
-  return queue;
+  return env.ACCESS_COMMANDS_QUEUE;
 }
 
 export async function dispatchAccessCommand(input: {
@@ -31,8 +31,10 @@ export async function dispatchAccessCommand(input: {
 }
 
 /** Cron recovery for a DB-accepted command whose first Queue send was interrupted. */
-export async function dispatchPendingAccessCommands(env: RuntimeEnvironment): Promise<void> {
-  const repository = createAccessManagementRepository(env);
+export async function dispatchPendingAccessCommands(
+  env: RuntimeEnvironment,
+  repository: AccessManagementRepository = createAccessManagementRepository(env),
+): Promise<void> {
   const pending = await repository.listPendingCommandDispatches(100);
   for (const item of pending) {
     try {
@@ -52,24 +54,29 @@ export async function dispatchPendingAccessCommands(env: RuntimeEnvironment): Pr
       );
     }
   }
-  // Queue retries are finite. Re-enqueue commands whose worker lease made no progress so a
-  // transient DB failure on the last delivery cannot strand access changes indefinitely.
+  // Queue retries are finite. Re-enqueue accepted commands that could not be claimed and active
+  // commands whose worker lease made no progress, so a last-delivery DB failure cannot strand an
+  // access change indefinitely.
   const stale = await repository.listStaleCommands(
     new Date(Date.now() - 15 * 60_000).toISOString(),
     100,
   );
   for (const command of stale) {
     try {
-      await commandQueue(env).send(createAccessCommandQueueMessage({
-        portalId: command.portal_id,
-        commandId: command.id,
-      }));
+      await commandQueue(env).send(
+        createAccessCommandQueueMessage({
+          portalId: command.portal_id,
+          commandId: command.id,
+        }),
+      );
     } catch (error) {
-      console.error(JSON.stringify({
-        event: 'access_command_stale_recovery_failed',
-        commandId: command.id,
-        errorName: error instanceof Error ? error.name : 'unknown',
-      }));
+      console.error(
+        JSON.stringify({
+          event: 'access_command_stale_recovery_failed',
+          commandId: command.id,
+          errorName: error instanceof Error ? error.name : 'unknown',
+        }),
+      );
     }
   }
 }

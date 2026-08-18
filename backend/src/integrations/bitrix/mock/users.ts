@@ -32,7 +32,7 @@ function toEmployeeProfile(user: MockUserRecord): BitrixEmployeeProfile {
     email: user.email ?? null,
     position: user.position ?? null,
     photoUrl: user.photoUrl ?? null,
-    profileUrl: user.profileUrl ?? `https://example.bitrix24.test/company/personal/user/${user.id}/`,
+    profileUrl: user.profileUrl ?? `https://portal.bitrix24.ru/company/personal/user/${user.id}/`,
   };
 }
 
@@ -80,7 +80,10 @@ export function createMockUsers(
         value: uniqueIds.map((userId) => {
           const user = state.users.get(userId);
           return user
-            ? { state: user.isActive ? ('active' as const) : ('inactive' as const), user: toBitrixUser(user) }
+            ? {
+                state: user.isActive ? ('active' as const) : ('inactive' as const),
+                user: toBitrixUser(user),
+              }
             : { state: 'missing' as const, userId };
         }),
       };

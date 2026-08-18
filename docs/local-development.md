@@ -16,13 +16,26 @@ Worker направляет `/api/*` в Hono. Непосредственное �
 ## Локальные bindings
 
 - API публикует технические probe-сообщения в `task-commander-local-operations-v1`.
-- Consumer повторяет некорректные или временно не обработанные сообщения; после трёх попыток Queue помещает их в `task-commander-local-operations-dlq-v1`.
+- Consumer подтверждает malformed-сообщения без side effects и повторяет только временные ошибки
+  корректных сообщений; после трёх попыток Queue помещает их в
+  `task-commander-local-operations-dlq-v1`.
 - R2 bucket `task-commander-local-reports-v1` является приватным и хранит только локальные технические объекты в ключах эпохи `v1`.
 - Локальное состояние находится в `.wrangler/state/task-commander-local` и переживает перезапуск `bun run dev`. Worker-тесты используют отдельное ephemeral storage и не изменяют этот каталог.
 
-Для smoke-проверки запустите `bun run dev`, затем отправьте `POST /api/_runtime/probe`. Маршрут доступен только при `APP_ENV=local`, создаёт только техническое сообщение и не выполняет бизнес-операцию. В терминале Vite должно появиться `runtime_probe_consumed` с тем же `messageId`, который вернул API: это подтверждает путь API Worker → local Queue → auxiliary consumer Worker → R2. Local Explorer по адресу `/cdn-cgi/local/explorer/api/local/workers` должен показывать оба Worker. Cron `*/5 * * * *` выполняет no-op scheduled probe: записывает техническое событие в лог без бизнес-эффекта.
+Для smoke-проверки включите `ENABLE_LOCAL_RUNTIME_PROBE=true`, запустите `bun run dev`, затем
+отправьте на loopback-origin `POST /api/_runtime/probe` с JSON `{}`, точным `Origin`,
+`Sec-Fetch-Site: same-origin` и секретом `LOCAL_RUNTIME_PROBE_TOKEN` в заголовке
+`X-Task-Commander-Probe-Token`. Маршрут создаёт только техническое сообщение и не выполняет
+бизнес-операцию. В терминале Vite должно появиться `runtime_probe_consumed` с тем же `messageId`,
+который вернул API: это подтверждает путь API Worker → local Queue → auxiliary consumer Worker →
+R2. Local Explorer по адресу `/cdn-cgi/local/explorer/api/local/workers` должен показывать оба
+Worker. Cron `*/5 * * * *` выполняет no-op scheduled probe: записывает техническое событие в лог
+без бизнес-эффекта.
 
-Некорректное schemaVersion или kind не выполняет R2 side effect: consumer вызывает Queue retry, а конфигурация consumer ограничивает цепочку тремя попытками и направляет её в `task-commander-local-operations-dlq-v1`. Это поведение покрыто детерминированным Worker-тестом; полную redelivery-цепочку проверяйте в локальном dev runtime при изменении параметров Queue.
+Некорректное `schemaVersion` или `kind` подтверждается без retry и не выполняет R2 side effect:
+malformed-сообщение является постоянной ошибкой и не засоряет DLQ. Временные ошибки корректного
+сообщения повторяются, а конфигурация consumer ограничивает цепочку тремя попытками и направляет её
+в `task-commander-local-operations-dlq-v1`.
 
 Остановите `bun run dev` перед `bun run dev:reset`: Miniflare удерживает state-каталог, пока запущен. Reset не принимает путь от пользователя и удаляет ровно указанный каталог state. Повторный вызов при отсутствии каталога — успешный no-op. Команда не удаляет `backend/.dev.vars`, весь `.wrangler`, соседние state-каталоги или файлы проекта.
 
@@ -30,17 +43,18 @@ Worker направляет `/api/*` в Hono. Непосредственное �
 
 Текущая разработка использует удаленный Supabase и не требует Docker. Миграции применяются только через авторизованный Supabase MCP по инструкции в [supabase-remote-development.md](supabase-remote-development.md). На удаленном проекте запрещено запускать seed, `db reset`, down-миграции и pgTAP-тесты.
 
-Для будущей server-задачи скопируйте `backend/.dev.vars.example` в неотслеживаемый `backend/.dev.vars`, затем вручную внесите HTTPS Project URL, service-role key и точный hostname проекта. Эти значения не коммитятся и не передаются в браузер.
+Для будущей server-задачи скопируйте `backend/.dev.vars.example` в неотслеживаемый `backend/.dev.vars`, затем вручную внесите HTTPS Project URL, service-role key и точный HTTPS origin проекта. Эти значения не коммитятся и не передаются в браузер.
 
 После реализации server-only слоя данных Worker требует `SUPABASE_URL` и
-`SUPABASE_SERVICE_ROLE_KEY`. `LOCAL_SUPABASE_ALLOWED_HOSTS` содержит точный hostname
+`SUPABASE_SERVICE_ROLE_KEY`. `SUPABASE_ALLOWED_ORIGINS` содержит точный HTTPS origin
 разрешённого development-проекта. Значения отсутствуют в `wrangler.jsonc`: там объявлены
 только имена обязательных secret bindings.
 
 Интеграционный тест `backend/test/data-access.integration.test.ts` запускается только если
 в Worker runtime присутствуют оба Supabase secrets отдельного development-проекта. Он создаёт
-изолированный синтетический portal и удаляет свои данные после проверки. Supabase URL всегда
-использует HTTPS.
+изолированный синтетический portal с UUID-именем в одноразовой локальной базе; данные удаляются
+последующим `bun run db:docker:reset`, а не deployable cleanup API. Supabase URL всегда использует
+HTTPS.
 
 ## Опциональная Docker-база Supabase
 
@@ -61,10 +75,11 @@ Rollback-файлы в `supabase/tests/rollback` не являются productio
 
 Локальные значения хранятся только в `backend/.dev.vars`; файл не коммитится. Скопируйте `backend/.dev.vars.example` и заполните его только для нужной подсистемы.
 
-Базовый runtime требует `APP_ENV=local` и `BITRIX_ADAPTER=mock`. Supabase считается не настроенным, пока не заданы одновременно `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` и `LOCAL_SUPABASE_ALLOWED_HOSTS`. Allowlist содержит точные host names development-проектов через запятую; URL, отсутствующий в allowlist, безопасно отмечается как некорректная конфигурация. Readiness API сообщает только состояние подсистем и никогда не возвращает имена либо значения секретов.
+Базовый runtime требует `APP_ENV=local` и `BITRIX_ADAPTER=mock`. Supabase считается не настроенным, пока не заданы одновременно `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` и `SUPABASE_ALLOWED_ORIGINS`. Allowlist содержит точные HTTPS origins development-проектов через запятую; URL с credentials, path, query, fragment или неожиданным портом безопасно отклоняется до сетевого вызова. Публичный liveness API не раскрывает состояния подсистем; readiness доступен только с internal token и никогда не возвращает имена либо значения секретов.
 
-Базовые runtime и cron требуют только local mock adapter. Identity readiness и session endpoints
-дополнительно требуют оба независимых signing secrets.
+Runtime readiness требует точный `APP_ORIGIN`, все три rate-limit bindings, Queue/R2 и остальные
+обязательные deployment bindings. Cron может работать независимо при наличии local mock adapter;
+identity readiness и session endpoints дополнительно требуют оба независимых signing secrets.
 
 Для задачи 009 локальный вход использует два разных secret bindings длиной не менее 32 UTF-8
 байт: `MOCK_LAUNCH_SIGNING_SECRET` проверяет короткоживущий подписанный mock launch context,

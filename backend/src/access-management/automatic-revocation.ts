@@ -176,9 +176,7 @@ export async function runAutomaticAccessReconciliation(
           failure: { kind: 'temporary_failure', reasonCode: 'REQUEST_FAILED' },
         };
       }
-      const statusSnapshotIsComplete =
-        statuses.ok && hasCompleteStatusSnapshot(chunk, statuses.value);
-      if (!departments.ok || !statusSnapshotIsComplete) {
+      if (!departments.ok || !statuses.ok || !hasCompleteStatusSnapshot(chunk, statuses.value)) {
         for (const userId of chunk) {
           await repository.recordAutomaticAccessReconciliationUnknown({
             portalId,

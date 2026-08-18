@@ -1,7 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 import type { Database, DatabaseTable, Json } from './database.types';
-import { toDataAccessError } from './errors';
+import { DataAccessError, toDataAccessError } from './errors';
 
 type Client = SupabaseClient<Database>;
 
@@ -9,6 +9,16 @@ async function unwrap<T>(operation: PromiseLike<{ data: T; error: unknown }>): P
   const { data, error } = await operation;
   if (error) {
     throw toDataAccessError(error);
+  }
+  return data;
+}
+
+async function unwrapRequired<T>(
+  operation: PromiseLike<{ data: T | null; error: unknown }>,
+): Promise<T> {
+  const data = await unwrap(operation);
+  if (data === null) {
+    throw new DataAccessError('INTEGRITY', false);
   }
   return data;
 }
@@ -24,7 +34,7 @@ export class AccessManagementRepository {
     if (input.userIds.length === 0) {
       return [];
     }
-    return unwrap(
+    return unwrapRequired(
       this.client
         .from('user_settings')
         .select('*')
@@ -40,7 +50,7 @@ export class AccessManagementRepository {
     limit: number;
   }): Promise<DatabaseTable<'access_field_set_member'>[]> {
     const cappedLimit = Math.min(Math.max(input.limit, 1), 101);
-    return unwrap(
+    return unwrapRequired(
       this.client
         .from('access_field_set_member')
         .select('*')
@@ -57,7 +67,7 @@ export class AccessManagementRepository {
     fieldSetIds: readonly string[];
   }): Promise<DatabaseTable<'access_field_set'>[]> {
     if (input.fieldSetIds.length === 0) return [];
-    return unwrap(
+    return unwrapRequired(
       this.client
         .from('access_field_set')
         .select('*')
@@ -67,7 +77,7 @@ export class AccessManagementRepository {
   }
 
   public async resolveFieldSet(portalId: string, fieldIds: readonly string[]): Promise<string> {
-    return unwrap(
+    return unwrapRequired(
       this.client.rpc('resolve_access_field_set', {
         p_portal_id: portalId,
         p_field_ids: [...fieldIds],
@@ -75,17 +85,19 @@ export class AccessManagementRepository {
     );
   }
 
-  public async saveDraft(input: {
+  public async saveDraftWithFieldSet(input: {
     portalId: string;
     managerUserId: string;
     expectedRevision: number;
+    fieldIds: readonly string[];
     payload: Json;
   }): Promise<DatabaseTable<'access_management_draft'>> {
-    return unwrap(
-      this.client.rpc('save_access_draft', {
+    return unwrapRequired(
+      this.client.rpc('save_access_draft_with_field_set', {
         p_portal_id: input.portalId,
         p_manager_user_id: input.managerUserId,
         p_expected_revision: input.expectedRevision,
+        p_field_ids: [...input.fieldIds],
         p_draft_payload: input.payload,
       }),
     );
@@ -155,7 +167,7 @@ export class AccessManagementRepository {
           .eq('id', input.preflightId)
           .maybeSingle(),
       ),
-      unwrap(
+      unwrapRequired(
         this.client
           .from('access_preflight_target')
           .select('*')
@@ -178,7 +190,7 @@ export class AccessManagementRepository {
     confirmationId: string | null;
     correlationId: string;
   }): Promise<Json> {
-    return unwrap(
+    return unwrapRequired(
       this.client.rpc('accept_access_command', {
         p_portal_id: input.portalId,
         p_command_id: input.commandId,
@@ -194,7 +206,7 @@ export class AccessManagementRepository {
   }
 
   public async claimCommand(portalId: string, commandId: string, expectedStateVersion: number) {
-    return unwrap(
+    return unwrapRequired(
       this.client.rpc('claim_access_command', {
         p_portal_id: portalId,
         p_command_id: commandId,
@@ -215,7 +227,7 @@ export class AccessManagementRepository {
     targetIsManager: boolean;
     targetIsPortalAdmin: boolean;
   }): Promise<Json> {
-    return unwrap(
+    return unwrapRequired(
       this.client.rpc('apply_access_command_target', {
         p_portal_id: input.portalId,
         p_command_id: input.commandId,
@@ -232,7 +244,7 @@ export class AccessManagementRepository {
   }
 
   public async finalizeCommand(portalId: string, commandId: string, expectedStateVersion: number) {
-    return unwrap(
+    return unwrapRequired(
       this.client.rpc('finalize_access_command', {
         p_portal_id: portalId,
         p_command_id: commandId,
@@ -274,7 +286,7 @@ export class AccessManagementRepository {
     return {
       command: (record.command ?? null) as DatabaseTable<'access_command'> | null,
       targets: Array.isArray(record.targets)
-        ? record.targets as DatabaseTable<'access_command_target'>[]
+        ? (record.targets as DatabaseTable<'access_command_target'>[])
         : [],
     };
   }
@@ -282,7 +294,7 @@ export class AccessManagementRepository {
   public async listPendingCommandDispatches(
     limit = 100,
   ): Promise<DatabaseTable<'access_command_dispatch_outbox'>[]> {
-    return unwrap(
+    return unwrapRequired(
       this.client
         .from('access_command_dispatch_outbox')
         .select('*')
@@ -297,15 +309,32 @@ export class AccessManagementRepository {
     before: string,
     limit = 100,
   ): Promise<DatabaseTable<'access_command'>[]> {
-    return unwrap(
-      this.client
-        .from('access_command')
-        .select('*')
-        .in('state', ['validating', 'in_progress'])
-        .lt('started_at', before)
-        .order('started_at', { ascending: true })
-        .limit(Math.min(Math.max(limit, 1), 100)),
-    );
+    const boundedLimit = Math.min(Math.max(limit, 1), 100);
+    const [accepted, active] = await Promise.all([
+      unwrapRequired(
+        this.client
+          .from('access_command')
+          .select('*')
+          .eq('state', 'accepted')
+          .lt('accepted_at', before)
+          .order('accepted_at', { ascending: true })
+          .limit(boundedLimit),
+      ),
+      unwrapRequired(
+        this.client
+          .from('access_command')
+          .select('*')
+          .in('state', ['validating', 'in_progress'])
+          .lt('started_at', before)
+          .order('started_at', { ascending: true })
+          .limit(boundedLimit),
+      ),
+    ]);
+    return [...accepted, ...active]
+      .sort((left, right) =>
+        (left.started_at ?? left.accepted_at).localeCompare(right.started_at ?? right.accepted_at),
+      )
+      .slice(0, boundedLimit);
   }
 
   public async readCommandDispatch(
@@ -332,7 +361,7 @@ export class AccessManagementRepository {
         })
         .eq('portal_id', portalId)
         .eq('command_id', commandId)
-      .eq('status', 'pending'),
+        .eq('status', 'pending'),
     );
   }
 
@@ -340,7 +369,7 @@ export class AccessManagementRepository {
     leaseToken: string,
     limit = 100,
   ): Promise<{ portalId: string; userId: string }[]> {
-    const rows = await unwrap(
+    const rows = await unwrapRequired(
       this.client.rpc('claim_access_reconciliation_jobs', {
         p_lease_token: leaseToken,
         p_limit: Math.min(Math.max(limit, 1), 100),

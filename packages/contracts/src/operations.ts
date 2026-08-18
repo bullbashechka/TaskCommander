@@ -8,6 +8,7 @@ import {
   nonNegativeIntegerSchema,
   operationIdSchema,
   positiveIntegerSchema,
+  safeHttpsUrlSchema,
 } from './primitives';
 import { bulkChangeCommandSchema } from './task-change';
 
@@ -82,7 +83,7 @@ export const preflightTaskEntrySchema = z
   .object({
     taskId: bitrixIdSchema,
     title: z.string().trim().min(1).max(1024).nullable(),
-    taskUrl: z.string().url().nullable(),
+    taskUrl: safeHttpsUrlSchema.nullable(),
     disposition: preflightDispositionSchema,
     changedFieldIds: z.array(fieldIdSchema).max(256),
     reasonCode: z.string().trim().min(1).max(128).nullable(),
@@ -119,7 +120,7 @@ export const taskOutcomeSchema = z
   .object({
     taskId: bitrixIdSchema,
     title: z.string().trim().min(1).max(1024).nullable(),
-    taskUrl: z.string().url().nullable(),
+    taskUrl: safeHttpsUrlSchema.nullable(),
     outcome: taskOutcomeStatusSchema,
     changedFieldIds: z.array(fieldIdSchema).max(256),
     appliedFieldIds: z.array(fieldIdSchema).max(256),
@@ -163,7 +164,7 @@ export const reportArtifactSchema = z
   .object({
     format: z.enum(['xlsx', 'csv']),
     status: reportArtifactStatusSchema,
-    diskUrl: z.string().url().nullable(),
+    diskUrl: safeHttpsUrlSchema.nullable(),
     createdAt: isoDateTimeSchema.nullable(),
   })
   .strict();
@@ -172,7 +173,7 @@ export const reportTaskEntrySchema = z
   .object({
     taskId: bitrixIdSchema,
     title: z.string().trim().min(1).max(1024).nullable(),
-    taskUrl: z.string().url().nullable(),
+    taskUrl: safeHttpsUrlSchema.nullable(),
     outcome: taskOutcomeStatusSchema,
     changedFieldIds: z.array(fieldIdSchema).max(256),
     reasonCode: z.string().trim().min(1).max(128).nullable().optional(),

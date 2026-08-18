@@ -3,6 +3,7 @@ import { AccessManagementRepository } from './access-management-repository';
 import { AuditWriter } from './audit';
 import { createServerSupabaseClient, type SupabaseFetch } from './client';
 import { TaskCommanderRepositories } from './repositories';
+import { configuredOrigins } from '../runtime/origin-policy';
 
 export * from './access';
 export * from './access-management-repository';
@@ -15,7 +16,10 @@ export function createTaskCommanderRepositories(
   env: RuntimeEnvironment,
   requestFetch?: SupabaseFetch,
 ): TaskCommanderRepositories {
-  return new TaskCommanderRepositories(createServerSupabaseClient(env, requestFetch));
+  return new TaskCommanderRepositories(
+    createServerSupabaseClient(env, requestFetch),
+    configuredOrigins(env.BITRIX_PORTAL_ORIGIN, env.APP_ENV === 'local'),
+  );
 }
 
 export function createAuditWriter(

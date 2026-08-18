@@ -14,16 +14,6 @@ describe('fetchHealth', () => {
         new Response(
           JSON.stringify({
             status: 'ok',
-            service: 'task-commander-api',
-            readiness: 'degraded',
-            subsystems: {
-              runtime: 'ready',
-              queue: 'ready',
-              r2: 'ready',
-              cron: 'ready',
-              supabase: 'not_configured',
-              bitrix: 'ready',
-            },
           }),
           {
             status: 200,
@@ -35,16 +25,6 @@ describe('fetchHealth', () => {
 
     await expect(fetchHealth()).resolves.toEqual({
       status: 'ok',
-      service: 'task-commander-api',
-      readiness: 'degraded',
-      subsystems: {
-        runtime: 'ready',
-        queue: 'ready',
-        r2: 'ready',
-        cron: 'ready',
-        supabase: 'not_configured',
-        bitrix: 'ready',
-      },
     });
   });
 
@@ -52,7 +32,7 @@ describe('fetchHealth', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ status: 'ok' }), {
+        new Response(JSON.stringify({ status: 'ok', service: 'unexpected-topology' }), {
           status: 200,
           headers: { 'content-type': 'application/json' },
         }),

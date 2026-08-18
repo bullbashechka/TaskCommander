@@ -1,6 +1,6 @@
 begin;
 
-select plan(18);
+select plan(24);
 
 insert into public.portal (id, display_name)
 values ('automatic-revocation-test', 'Automatic revocation test portal');
@@ -27,6 +27,14 @@ select ok(
     'EXECUTE'
   ),
   'service role can apply automatic revocations'
+);
+select ok(
+  not has_function_privilege(
+    'service_role',
+    'public.apply_automatic_access_reconciliation_unchecked(text,text,text,text,boolean,text,text,uuid)',
+    'EXECUTE'
+  ),
+  'service role cannot bypass lease enforcement through the delegated implementation'
 );
 
 insert into public.user_settings (
@@ -61,10 +69,53 @@ select is(
   2,
   'active recipients and managers are queued for reconciliation'
 );
+
+update public.access_reconciliation_job
+set lease_token = case user_id
+      when '7001' then '70010000-0000-4000-8000-000000000001'::uuid
+      else '70020000-0000-4000-8000-000000000001'::uuid
+    end,
+    lease_expires_at = now() + interval '5 minutes'
+where portal_id = 'automatic-revocation-test';
+
 select is(
   public.apply_automatic_access_reconciliation(
     'automatic-revocation-test', '7001', 'Inactive employee', 'inactive', false, 'cron',
-    'TC-123e4567-e89b-42d3-a456-426614174701', null
+    'TC-123e4567-e89b-42d3-a456-426614174700',
+    '70010000-0000-4000-8000-000000000099'::uuid
+  ) ->> 'disposition',
+  'stale_lease',
+  'a stale lease is rejected before reconciliation'
+);
+select is(
+  (select access_state from public.user_settings
+    where portal_id = 'automatic-revocation-test' and user_id = '7001'),
+  'active',
+  'a stale lease cannot change access'
+);
+select is(
+  (select count(*)::integer from public.audit_event
+    where portal_id = 'automatic-revocation-test' and action = 'access_auto_revoke'),
+  0,
+  'a stale lease creates no audit side effect'
+);
+select is(
+  (select count(*)::integer from public.access_change
+    where portal_id = 'automatic-revocation-test'),
+  0,
+  'a stale lease creates no access-change side effect'
+);
+select is(
+  (select count(*)::integer from public.notification_outbox
+    where portal_id = 'automatic-revocation-test'),
+  0,
+  'a stale lease creates no notification side effect'
+);
+select is(
+  public.apply_automatic_access_reconciliation(
+    'automatic-revocation-test', '7001', 'Inactive employee', 'inactive', false, 'cron',
+    'TC-123e4567-e89b-42d3-a456-426614174701',
+    '70010000-0000-4000-8000-000000000001'::uuid
   ) ->> 'disposition',
   'applied',
   'a confirmed inactive employee is revoked'
@@ -106,10 +157,11 @@ select ok(
 select is(
   public.apply_automatic_access_reconciliation(
     'automatic-revocation-test', '7001', 'Inactive employee', 'inactive', false, 'cron',
-    'TC-123e4567-e89b-42d3-a456-426614174702', null
+    'TC-123e4567-e89b-42d3-a456-426614174702',
+    '70010000-0000-4000-8000-000000000001'::uuid
   ) ->> 'disposition',
-  'no_change',
-  'a repeated confirmed inactive status is a no-op'
+  'stale_lease',
+  'a consumed lease cannot be replayed'
 );
 select is(
   (select count(*)::integer from public.notification_outbox
@@ -120,7 +172,8 @@ select is(
 select is(
   public.apply_automatic_access_reconciliation(
     'automatic-revocation-test', '7002', 'Former manager', 'active', false, 'cron',
-    'TC-123e4567-e89b-42d3-a456-426614174703', null
+    'TC-123e4567-e89b-42d3-a456-426614174703',
+    '70020000-0000-4000-8000-000000000001'::uuid
   ) ->> 'disposition',
   'applied',
   'loss of the final manager role is applied independently'

@@ -184,7 +184,7 @@ async function verifySignedToken(
   const verified = await crypto.subtle.verify(
     'HMAC',
     await getSecretKey(secret),
-    signature,
+    Uint8Array.from(signature),
     encoder.encode(`${encodedHeader}.${encodedClaims}`),
   );
   if (!verified) {
@@ -267,7 +267,7 @@ export async function createSessionToken(
   principal: z.infer<typeof sessionPrincipalSchema>,
   secret: string | undefined,
   now = new Date(),
-  sessionId = crypto.randomUUID(),
+  sessionId: string = crypto.randomUUID(),
 ): Promise<string> {
   const issuedAt = getCurrentTimestamp(now);
   const claims: SessionClaims = sessionClaimsSchema.parse({

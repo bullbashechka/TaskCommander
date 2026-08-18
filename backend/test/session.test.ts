@@ -22,9 +22,19 @@ const fixedNow = new Date('2026-08-12T10:00:00.000Z');
 const fixedTimestamp = Math.floor(fixedNow.getTime() / 1_000);
 const sessionId = '123e4567-e89b-42d3-a456-426614174000';
 const localDevSessionUrl = 'http://localhost/api/_dev/session';
+const sameOriginHeaders = {
+  origin: 'https://example.test',
+  'sec-fetch-site': 'same-origin',
+};
+const sameOriginJsonHeaders = {
+  ...sameOriginHeaders,
+  'content-type': 'application/json',
+};
 const environment = {
   APP_ENV: 'local',
   BITRIX_ADAPTER: 'mock',
+  APP_ORIGIN: 'https://example.test',
+  SESSION_RATE_LIMITER: { limit: async () => ({ success: true }) },
   MOCK_LAUNCH_SIGNING_SECRET: mockLaunchSecret,
   SESSION_SIGNING_SECRET: sessionSecret,
 };
@@ -89,7 +99,7 @@ describe('local Bitrix identity session', () => {
         localDevSessionUrl,
         {
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
+          headers: sameOriginJsonHeaders,
           body: JSON.stringify({ userId }),
         },
         environment,
@@ -119,7 +129,7 @@ describe('local Bitrix identity session', () => {
       localDevSessionUrl,
       {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: sameOriginJsonHeaders,
         body: JSON.stringify({ userId: '1' }),
       },
       environment,
@@ -140,12 +150,13 @@ describe('local Bitrix identity session', () => {
       'https://example.test/api/_dev/session',
       {
         method: 'POST',
-        headers: { 'content-type': 'text/plain' },
+        headers: { ...sameOriginHeaders, 'content-type': 'text/plain' },
         body: '{',
       },
       {
         APP_ENV: 'production',
         BITRIX_ADAPTER: 'mock',
+        APP_ORIGIN: 'https://example.test',
         MOCK_LAUNCH_SIGNING_SECRET: mockLaunchSecret,
         SESSION_SIGNING_SECRET: sessionSecret,
       },
@@ -165,7 +176,7 @@ describe('local Bitrix identity session', () => {
         url,
         {
           method: 'POST',
-          headers: { 'content-type': 'text/plain' },
+          headers: { ...sameOriginHeaders, 'content-type': 'text/plain' },
           body: '{',
         },
         environment,
@@ -179,15 +190,18 @@ describe('local Bitrix identity session', () => {
 
   it('rejects invalid local developer session requests without issuing a cookie', async () => {
     const invalidRequests = [
-      { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ userId: '99' }) },
-      { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ userId: '999' }) },
-      { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ userId: 1 }) },
+      { headers: sameOriginJsonHeaders, body: JSON.stringify({ userId: '99' }) },
+      { headers: sameOriginJsonHeaders, body: JSON.stringify({ userId: '999' }) },
+      { headers: sameOriginJsonHeaders, body: JSON.stringify({ userId: 1 }) },
       {
-        headers: { 'content-type': 'application/json' },
+        headers: sameOriginJsonHeaders,
         body: JSON.stringify({ userId: '1', extra: true }),
       },
-      { headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) },
-      { headers: { 'content-type': 'text/plain' }, body: JSON.stringify({ userId: '1' }) },
+      { headers: sameOriginJsonHeaders, body: JSON.stringify({}) },
+      {
+        headers: { ...sameOriginHeaders, 'content-type': 'text/plain' },
+        body: JSON.stringify({ userId: '1' }),
+      },
     ];
 
     for (const request of invalidRequests) {
@@ -212,10 +226,15 @@ describe('local Bitrix identity session', () => {
         localDevSessionUrl,
         {
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
+          headers: sameOriginJsonHeaders,
           body: JSON.stringify({ userId: '1' }),
         },
-        { APP_ENV: 'local', BITRIX_ADAPTER: 'mock', SESSION_SIGNING_SECRET: sessionSecret },
+        {
+          APP_ENV: 'local',
+          BITRIX_ADAPTER: 'mock',
+          APP_ORIGIN: 'https://example.test',
+          SESSION_SIGNING_SECRET: sessionSecret,
+        },
       );
 
       const responseText = await response.clone().text();
@@ -235,7 +254,7 @@ describe('local Bitrix identity session', () => {
       'https://example.test/api/session',
       {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: sameOriginJsonHeaders,
         body: JSON.stringify({ launchContext: context }),
       },
       environment,
@@ -265,7 +284,7 @@ describe('local Bitrix identity session', () => {
       'https://example.test/api/session',
       {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: sameOriginJsonHeaders,
         body: JSON.stringify({ launchContext: await liveLaunchContext('1') }),
       },
       environment,
@@ -324,7 +343,7 @@ describe('local Bitrix identity session', () => {
         'https://example.test/api/session',
         {
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
+          headers: sameOriginJsonHeaders,
           body: JSON.stringify({ launchContext: context }),
         },
         environment,
@@ -344,7 +363,7 @@ describe('local Bitrix identity session', () => {
         'https://example.test/api/session',
         {
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
+          headers: sameOriginJsonHeaders,
           body: JSON.stringify({ launchContext: await liveLaunchContext(userId) }),
         },
         environment,
@@ -474,10 +493,10 @@ describe('local Bitrix identity session', () => {
       'https://example.test/api/session',
       {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: sameOriginJsonHeaders,
         body: JSON.stringify({ launchContext: await liveLaunchContext('10') }),
       },
-      { APP_ENV: 'local', BITRIX_ADAPTER: 'mock' },
+      { APP_ENV: 'local', BITRIX_ADAPTER: 'mock', APP_ORIGIN: 'https://example.test' },
     );
     expect(response.status).toBe(503);
     expect(response.headers.get('cache-control')).toBe('no-store');
@@ -489,7 +508,7 @@ describe('local Bitrix identity session', () => {
       'https://example.test/api/session',
       {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: sameOriginJsonHeaders,
         body: JSON.stringify({ launchContext: await liveLaunchContext('10') }),
       },
       environment,
@@ -543,7 +562,7 @@ describe('local Bitrix identity session', () => {
   it('clears the session cookie without returning session data', async () => {
     const response = await api.request(
       'https://example.test/api/session',
-      { method: 'DELETE' },
+      { method: 'DELETE', headers: sameOriginJsonHeaders },
       environment,
     );
 
@@ -563,26 +582,27 @@ describe('local Bitrix identity session', () => {
     ]) {
       const response = await api.request(
         'https://example.test/api/session',
-        { method: 'POST', headers: { 'content-type': 'application/json' }, body },
+        { method: 'POST', headers: sameOriginJsonHeaders, body },
         environment,
       );
       expect(response.status).toBe(400);
     }
 
-    for (const request of [
+    const invalidRequests: RequestInit[] = [
       {
         body: new Uint8Array(4_353),
-        headers: { 'content-type': 'application/json' },
+        headers: sameOriginJsonHeaders,
       },
       {
         body: new Uint8Array([0xff]),
-        headers: { 'content-type': 'application/json' },
+        headers: sameOriginJsonHeaders,
       },
       {
         body: JSON.stringify({ launchContext: await liveLaunchContext('10') }),
-        headers: { 'content-length': 'not-a-number', 'content-type': 'application/json' },
+        headers: { ...sameOriginJsonHeaders, 'content-length': 'not-a-number' },
       },
-    ]) {
+    ];
+    for (const request of invalidRequests) {
       const response = await api.request(
         'https://example.test/api/session',
         { method: 'POST', ...request },
@@ -611,7 +631,7 @@ describe('local Bitrix identity session', () => {
       'https://example.test/api/session',
       {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: sameOriginJsonHeaders,
         body: JSON.stringify({ launchContext: await liveLaunchContext('10') }),
       },
       environment,
@@ -682,7 +702,7 @@ describe('local Bitrix identity session', () => {
       'https://example.test/api/session',
       {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: sameOriginJsonHeaders,
         body: JSON.stringify({ launchContext: await liveLaunchContext('1') }),
       },
       environment,
@@ -706,7 +726,7 @@ describe('local Bitrix identity session', () => {
       'https://example.test/api/session',
       {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: sameOriginJsonHeaders,
         body: JSON.stringify({ launchContext: await liveLaunchContext('10') }),
       },
       environment,

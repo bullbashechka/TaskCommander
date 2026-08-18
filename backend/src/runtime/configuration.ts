@@ -5,19 +5,14 @@ import {
 } from '@task-commander/contracts';
 
 import { isSupportedBitrixAdapterConfiguration } from '../integrations/bitrix/factory';
+import {
+  canonicalOrigin,
+  hasValidConfiguredOrigins,
+  parseAllowedServiceUrl,
+} from './origin-policy';
 
-export interface RuntimeEnvironment {
-  APP_ENV?: string;
-  BITRIX_ADAPTER?: string;
-  MOCK_LAUNCH_SIGNING_SECRET?: string;
-  LOCAL_SUPABASE_ALLOWED_HOSTS?: string;
-  OPERATIONS_QUEUE?: unknown;
-  ACCESS_COMMANDS_QUEUE?: unknown;
-  REPORTS_BUCKET?: unknown;
-  SUPABASE_SERVICE_ROLE_KEY?: string;
-  SUPABASE_URL?: string;
-  SESSION_SIGNING_SECRET?: string;
-}
+/** Partial only for readiness checks and isolated tests; Worker entry points use generated exact types. */
+export type RuntimeEnvironment = Partial<ApiEnvironment & ConsumerEnvironment>;
 
 export class RuntimeConfigurationError extends Error {}
 
@@ -26,6 +21,10 @@ function encodeSigningSecret(secret: string | undefined): Uint8Array | null {
 
   const encoded = new TextEncoder().encode(secret);
   return encoded.byteLength >= 32 ? encoded : null;
+}
+
+export function hasStrongRuntimeSecret(secret: string | undefined): boolean {
+  return encodeSigningSecret(secret) !== null;
 }
 
 function haveEqualBytes(left: Uint8Array, right: Uint8Array): boolean {
@@ -64,41 +63,56 @@ export function getRequiredR2Binding(value: unknown): R2Bucket {
   return value as R2Bucket;
 }
 
+export function getRequiredQueueBinding(value: unknown): Queue {
+  if (!hasBindingMethods(value, ['send'])) {
+    throw new RuntimeConfigurationError('Queue binding is unavailable.');
+  }
+
+  return value as Queue;
+}
+
 function getSupabaseStatus(env: RuntimeEnvironment): RuntimeSubsystemStatus {
   const url = env.SUPABASE_URL?.trim();
   const serviceRoleKey = env.SUPABASE_SERVICE_ROLE_KEY?.trim();
-  const allowedHosts = env.LOCAL_SUPABASE_ALLOWED_HOSTS?.trim();
+  const allowedOrigins = env.SUPABASE_ALLOWED_ORIGINS?.trim();
 
-  if (!url && !serviceRoleKey && !allowedHosts) {
+  if (!url && !serviceRoleKey && !allowedOrigins) {
     return 'not_configured';
   }
 
-  if (!url || !serviceRoleKey || !allowedHosts) {
+  if (!url || !serviceRoleKey || !allowedOrigins) {
     return 'invalid_configuration';
   }
 
-  try {
-    const host = new URL(url).hostname.toLowerCase();
-    const normalizedAllowedHosts = allowedHosts
-      .split(',')
-      .map((entry) => entry.trim().toLowerCase())
-      .filter(Boolean);
-
-    return normalizedAllowedHosts.includes(host) ? 'ready' : 'invalid_configuration';
-  } catch {
-    return 'invalid_configuration';
-  }
+  return parseAllowedServiceUrl(url, allowedOrigins) ? 'ready' : 'invalid_configuration';
 }
 
 export function getRuntimeReadiness(env: RuntimeEnvironment): HealthResponse {
-  const runtime = env.APP_ENV === 'local' ? 'ready' : 'invalid_configuration';
+  const allowHttp = env.APP_ENV === 'local';
+  const runtime =
+    env.APP_ENV &&
+    canonicalOrigin(env.APP_ORIGIN ?? '', allowHttp) &&
+    canonicalOrigin(env.BITRIX_PORTAL_ORIGIN ?? '', allowHttp) &&
+    hasValidConfiguredOrigins(env.BITRIX_FRAME_ANCESTORS, allowHttp) &&
+    hasValidConfiguredOrigins(env.BITRIX_MEDIA_ALLOWED_ORIGINS, allowHttp) &&
+    hasStrongRuntimeSecret(env.INTERNAL_READINESS_TOKEN) &&
+    (env.ENABLE_LOCAL_RUNTIME_PROBE !== 'true' ||
+      hasStrongRuntimeSecret(env.LOCAL_RUNTIME_PROBE_TOKEN)) &&
+    hasBindingMethods(env.SESSION_RATE_LIMITER, ['limit']) &&
+    hasBindingMethods(env.PROBE_RATE_LIMITER, ['limit']) &&
+    hasBindingMethods(env.ACCESS_FANOUT_RATE_LIMITER, ['limit'])
+      ? 'ready'
+      : 'invalid_configuration';
   const cron = hasLocalRuntimeConfiguration(env) ? 'ready' : 'invalid_configuration';
   const bitrix = hasLocalIdentityConfiguration(env) ? 'ready' : 'invalid_configuration';
   const subsystems = {
     runtime,
     queue:
       hasBindingMethods(env.OPERATIONS_QUEUE, ['send']) &&
-      hasBindingMethods(env.ACCESS_COMMANDS_QUEUE, ['send'])
+      hasBindingMethods(env.ACCESS_COMMANDS_QUEUE, ['send']) &&
+      Boolean(env.OPERATIONS_QUEUE_NAME?.trim()) &&
+      Boolean(env.ACCESS_COMMANDS_QUEUE_NAME?.trim()) &&
+      env.OPERATIONS_QUEUE_NAME !== env.ACCESS_COMMANDS_QUEUE_NAME
         ? 'ready'
         : 'invalid_configuration',
     r2: hasBindingMethods(env.REPORTS_BUCKET, ['put', 'get', 'delete'])

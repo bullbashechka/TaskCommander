@@ -1,7 +1,7 @@
 # Углублённый аудит безопасности backend и frontend
 
 Дата аудита: **2026-08-15**  
-Статус: **рабочий реестр исправлений**  
+Статус: **16 находок реализованы, ожидают DB/пользовательской верификации; 2 перенесены в задачу 035**
 Основной срез: задачи **001–012**, отмеченные выполненными в `TASKS.md`  
 Дополнительный срез: существующий frontend задачи 013, которая ещё не отмечена выполненной
 
@@ -11,7 +11,7 @@
 - Готовность к первому non-local/production развёртыванию: **3/10**. Низкая оценка здесь
   учитывает открытые security gates и то, что production OAuth/deployment относятся к ещё не
   выполненной задаче 035; отсутствие самой задачи 035 не считается дефектом задач 001–012.
-- Найдено **18** открытых проблем и слабых мест: 1 с оценкой 9/10, 2 — 8/10, 4 — 7/10,
+- Первоначально найдено **18** проблем и слабых мест: 1 с оценкой 9/10, 2 — 8/10, 4 — 7/10,
   5 — 6/10, 3 — 5/10 и 3 — 4/10.
 - Подтверждённой удалённой уязвимости 9–10/10, доступной анонимному атакующему в текущем
   local-only контуре, не найдено. Проблема 9/10 становится критичной при ошибочной non-local
@@ -37,33 +37,42 @@
 5. Supabase client → migrations/RPC/RLS/grants → repository parsing;
 6. Cloudflare bindings, Queue/R2 probes, dependency tree и предыдущий security-аудит.
 
-Выполнены статический анализ и `bun audit`. Тесты, build, typecheck, lint, форматирование,
-миграционные проверки и runtime smoke tests **не запускались** согласно правилам репозитория.
-Реальные `.env` и `.dev.vars` не читались. Незавершённые задачи 014–035 не объявляются
-дефектами; опасные предпосылки для них отмечены как release blockers.
+После реализации выполнены `bun audit`, typecheck, lint, unit/Worker tests и build. SQL migration
+tests, DB lint и пользовательский runtime smoke остаются ожидающими верификации. Значения секретов
+не инспектировались и не выводились. Незавершённые задачи 014–035 не объявляются дефектами;
+опасные предпосылки для них отмечены как release blockers.
 
 ## Общий реестр
 
-| ID | Оценка | Статус | Слой | Проблема | Связанные задачи |
-| --- | ---: | --- | --- | --- | --- |
-| SEC-2026-001 | 9/10 | open | Backend/config | `service_role` может уйти на произвольный HTTPS Supabase host | 005–006 |
-| SEC-2026-002 | 8/10 | open | DB/Cron | Просроченный lease не останавливает применение автоматического отзыва | 012 |
-| SEC-2026-003 | 8/10 | open | Frontend/HTTP | Нет CSP, точного `frame-ancestors` и полного набора security headers | 002, 009, 013, 035 |
-| SEC-2026-004 | 7/10 | open | HTTP/Auth | Нет общей CSRF/Fetch-Metadata политики и обязательного JSON content type | 009, 011, 035 |
-| SEC-2026-005 | 7/10 | open | PostgreSQL | Многие `SECURITY DEFINER` используют непустой `search_path` | 005–008, 012 |
-| SEC-2026-006 | 7/10 | open | Contracts/UI | Внешние URL проверяются только через `z.string().url()` | 003–004, 006, 013 |
-| SEC-2026-007 | 7/10 | open | Audit | Redaction допускает секрет в разрешённой строке | 007, 011–012 |
-| SEC-2026-008 | 6/10 | open | Supply chain | `bun audit`: 21 advisory, включая 9 high | 001–002 |
-| SEC-2026-009 | 6/10 | open | API/DoS | Rate limit покрывает только часть дорогих маршрутов | 011–012 |
-| SEC-2026-010 | 6/10 | open | API/DB/DoS | Число `fieldIds` не ограничено, HTTP лимит несогласован с DB | 011 |
-| SEC-2026-011 | 6/10 | open | PostgreSQL/test | Production migration публикует destructive test-fixture RPC | 008 |
-| SEC-2026-012 | 6/10 | open | Data boundary | Mutation repository требует лишь `app_access` | 006, 008, 010 |
-| SEC-2026-013 | 5/10 | open | Auth | Stateless bearer нельзя отозвать; launch nonce не single-use | 009, 035 |
-| SEC-2026-014 | 5/10 | open | Local/Queue/R2 | Runtime probe допускает flood и не гарантирует cleanup | 002 |
-| SEC-2026-015 | 5/10 | open | Secrets/Auth | Session и confirmation подписываются одним ключом без `kid`/rotation | 009, 011 |
-| SEC-2026-016 | 4/10 | open | Observability | Public health раскрывает readiness и всегда отвечает 200 | 002 |
-| SEC-2026-017 | 4/10 | open | Queue | Handler выбирается по подстроке в имени Queue | 002, 011 |
-| SEC-2026-018 | 4/10 | open | Config/types | Generated bindings и ручной `RuntimeEnvironment` расходятся | 002 |
+| ID           | Оценка | Статус                            | Слой            | Проблема                                                                 | Связанные задачи   |
+| ------------ | -----: | --------------------------------- | --------------- | ------------------------------------------------------------------------ | ------------------ |
+| SEC-2026-001 |   9/10 | implemented, verification pending | Backend/config  | `service_role` может уйти на произвольный HTTPS Supabase host            | 005–006            |
+| SEC-2026-002 |   8/10 | implemented, verification pending | DB/Cron         | Просроченный lease не останавливает применение автоматического отзыва    | 012                |
+| SEC-2026-003 |   8/10 | implemented, verification pending | Frontend/HTTP   | Нет CSP, точного `frame-ancestors` и полного набора security headers     | 002, 009, 013, 035 |
+| SEC-2026-004 |   7/10 | implemented, verification pending | HTTP/Auth       | Нет общей CSRF/Fetch-Metadata политики и обязательного JSON content type | 009, 011, 035      |
+| SEC-2026-005 |   7/10 | implemented, verification pending | PostgreSQL      | Многие `SECURITY DEFINER` используют непустой `search_path`              | 005–008, 012       |
+| SEC-2026-006 |   7/10 | implemented, verification pending | Contracts/UI    | Внешние URL проверяются только через `z.string().url()`                  | 003–004, 006, 013  |
+| SEC-2026-007 |   7/10 | implemented, verification pending | Audit           | Redaction допускает секрет в разрешённой строке                          | 007, 011–012       |
+| SEC-2026-008 |   6/10 | implemented, verification pending | Supply chain    | `bun audit`: 21 advisory, включая 9 high                                 | 001–002            |
+| SEC-2026-009 |   6/10 | implemented, verification pending | API/DoS         | Rate limit покрывает только часть дорогих маршрутов                      | 011–012            |
+| SEC-2026-010 |   6/10 | implemented, verification pending | API/DB/DoS      | Число `fieldIds` не ограничено, HTTP лимит несогласован с DB             | 011                |
+| SEC-2026-011 |   6/10 | implemented, verification pending | PostgreSQL/test | Production migration публикует destructive test-fixture RPC              | 008                |
+| SEC-2026-012 |   6/10 | implemented, verification pending | Data boundary   | Mutation repository требует лишь `app_access`                            | 006, 008, 010      |
+| SEC-2026-013 |   5/10 | deferred to task 035              | Auth            | Stateless bearer нельзя отозвать; launch nonce не single-use             | 009, 035           |
+| SEC-2026-014 |   5/10 | implemented, verification pending | Local/Queue/R2  | Runtime probe допускает flood и не гарантирует cleanup                   | 002                |
+| SEC-2026-015 |   5/10 | deferred to task 035              | Secrets/Auth    | Session и confirmation подписываются одним ключом без `kid`/rotation     | 009, 011           |
+| SEC-2026-016 |   4/10 | implemented, verification pending | Observability   | Public health раскрывает readiness и всегда отвечает 200                 | 002                |
+| SEC-2026-017 |   4/10 | implemented, verification pending | Queue           | Handler выбирается по подстроке в имени Queue                            | 002, 011           |
+| SEC-2026-018 |   4/10 | implemented, verification pending | Config/types    | Generated bindings и ручной `RuntimeEnvironment` расходятся              | 002                |
+
+### Реализация 2026-08-18
+
+- **Implemented, verification pending:** SEC-2026-001–012, SEC-2026-014 и SEC-2026-016–018.
+  Реализация включает edge rate limits, раздельные брендированные user/system capabilities и
+  отдельно сгенерированные обязательные API/consumer bindings. `bun audit` после согласованного
+  обновления Cloudflare toolchain не обнаруживает advisory.
+- **Deferred to task 035:** SEC-2026-013 и SEC-2026-015. Эта задача должна реализовать single-use
+  OAuth state, server-side revocation, отдельные signing keys, `kid` и bounded rotation.
 
 ## Детальные находки и план закрытия
 
@@ -394,25 +403,25 @@ compatibility baseline; проверять config-to-types drift в CI посл�
 **Gate закрытия.** Каждый entrypoint компилируется со своим generated type, bindings не optional без
 реальной optional-семантики, runtime cast для Queue/R2 отсутствует.
 
-## Перепроверка отчёта 2026-08-11
+## Историческая перепроверка отчёта 2026-08-11 (состояние до hardening)
 
-| Старый ID | Текущее состояние | Результат перепроверки |
-| --- | --- | --- |
-| SEC-001 | closed by implementation | EffectiveAccess/DataAccessContext брендированы, permissions читаются server-side |
-| SEC-002 | open | Перенесён в SEC-2026-001; non-local allowlist всё ещё отсутствует |
-| SEC-003 | partially fixed | Streaming byte limit исправлен; content type/413 policy остаётся в SEC-2026-004 |
-| SEC-004 | partially fixed | Большинство DB byte/count constraints добавлено; остаётся SEC-2026-010 |
-| SEC-005 | open | Перенесён в SEC-2026-006; frontend уже использует внешний avatar URL |
-| SEC-006 | open | Перенесён в SEC-2026-007 |
-| SEC-007 | closed by implementation | Operation/result state invariants усилены в task 008 migration/RPC |
-| SEC-008 | open, изменился состав | Перенесён в SEC-2026-008; актуально 21 advisory |
-| SEC-009 | open | Объединён в SEC-2026-014 |
-| SEC-010 | open | Объединён в SEC-2026-014 |
-| SEC-011 | open | Разделён на SEC-2026-003 и SEC-2026-016 |
-| SEC-012 | open | Перенесён в SEC-2026-018 |
+| Старый ID | Текущее состояние                 | Результат перепроверки                                                           |
+| --------- | --------------------------------- | -------------------------------------------------------------------------------- |
+| SEC-001   | implemented, verification pending | EffectiveAccess/DataAccessContext брендированы, permissions читаются server-side |
+| SEC-002   | implemented, verification pending | Перенесён в SEC-2026-001; exact non-local allowlist реализован                   |
+| SEC-003   | implemented, verification pending | Streaming byte limit и JSON media policy реализованы                             |
+| SEC-004   | implemented, verification pending | DB byte/count constraints синхронизированы                                       |
+| SEC-005   | implemented, verification pending | URL origin policy и avatar fallback реализованы                                  |
+| SEC-006   | implemented, verification pending | Audit confidentiality boundary усилена                                           |
+| SEC-007   | implemented, verification pending | Operation/result state invariants усилены в task 008 migration/RPC               |
+| SEC-008   | implemented, verification pending | Cloudflare toolchain обновлён согласованным набором                              |
+| SEC-009   | implemented, verification pending | Runtime probe изолирован                                                         |
+| SEC-010   | implemented, verification pending | Probe cleanup и error precedence реализованы                                     |
+| SEC-011   | implemented, verification pending | CSP/headers и liveness/readiness разделены                                       |
+| SEC-012   | implemented, verification pending | Generated binding types разделены                                                |
 
-Статус `closed by implementation` здесь означает, что статический код устраняет исходную причину;
-окончательное закрытие требует выполнения тестов пользователем.
+Статус `implemented, verification pending` означает, что статический код устраняет исходную
+причину; окончательное закрытие требует выполнения тестов пользователем.
 
 ## Подтверждённые защитные свойства
 
@@ -440,12 +449,11 @@ compatibility baseline; проверять config-to-types drift в CI посл�
   декодируется в fatal mode.
 - Нет чтения/экспорта Supabase service-role во frontend bundle.
 
-## Порядок исправлений и ответственность
+## Исторический порядок исправлений (реализован, проверка ожидается)
 
-Я беру техническую ответственность за предложенную последовательность, минимальность change
-surface и критерии закрытия. Это не означает автоматического изменения исходников: по правилам
-репозитория реализация начнётся только после явной команды пользователя. Проблема не будет объявлена
-закрытой без доказательств и результатов проверок, которые запускает пользователь.
+Последовательность ниже сохранена как rollout history. P0/P1/P2 реализованы, кроме
+SEC-2026-013 и SEC-2026-015, перенесённых в task 035. Окончательное закрытие по-прежнему требует
+пользовательских проверок.
 
 ### P0 — немедленно, до любого non-local deployment
 

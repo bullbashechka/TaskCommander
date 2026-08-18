@@ -7,6 +7,9 @@ import {
   accessManagementDraftIntentSchema,
   accessManagementDraftSaveResponseSchema,
   accessManagementPreflightSchema,
+  accessManagementTargetReasonCodeSchema,
+  accessManagementLimits,
+  accessChangeModeSchema,
   accessEmployeeProfileSchema,
   accessEmployeeSummarySchema,
   accessEmployeeSearchResponseSchema,
@@ -36,6 +39,7 @@ import type { EffectiveAccess } from '../data/access';
 import { EffectiveAccessError } from '../data/access';
 import { DataAccessError } from '../data/errors';
 import { ApiHttpError } from '../http/errors';
+import { clientRateLimitKey, requireRateLimit } from '../http/security';
 import { parseJsonBody } from '../http/validation';
 import type {
   BitrixAdapter,
@@ -43,6 +47,7 @@ import type {
   BitrixFailure,
 } from '../integrations/bitrix/contract';
 import type { RuntimeEnvironment } from '../runtime/configuration';
+import { configuredOrigins, isUrlFromOrigins } from '../runtime/origin-policy';
 import { authorizeAccessManager, type AccessManagerAuthorization } from './authorization';
 import { dispatchAccessCommand } from './dispatch';
 import { AccessPolicyError, evaluateAccessChange } from './policy';
@@ -67,7 +72,10 @@ const userSearchQuerySchema = z
     cursor: z.string().trim().min(1).max(128).nullable().default(null),
     pageSize: z.coerce.number().int().min(1).max(50).default(50),
     departmentId: z.string().regex(/^\d+$/).min(1).max(32).nullable().default(null),
-    includeInactive: z.enum(['true', 'false']).default('true').transform((value) => value === 'true'),
+    includeInactive: z
+      .enum(['true', 'false'])
+      .default('true')
+      .transform((value) => value === 'true'),
     status: z.enum(['all', 'active', 'none']).default('all'),
   })
   .strict();
@@ -79,6 +87,15 @@ const fieldsQuerySchema = z
     pageSize: z.coerce.number().int().min(1).max(100).default(50),
   })
   .strict();
+
+function trustedMediaUrl(env: RuntimeEnvironment, value: string | null): string | null {
+  if (!value) return null;
+  const origins = configuredOrigins(
+    [env.BITRIX_PORTAL_ORIGIN, env.BITRIX_MEDIA_ALLOWED_ORIGINS].filter(Boolean).join(','),
+    env.APP_ENV === 'local',
+  );
+  return isUrlFromOrigins(value, origins) ? value : null;
+}
 
 const fieldMembersQuerySchema = z
   .object({
@@ -168,16 +185,20 @@ function asJson(value: unknown): Json {
 
 function sameStringSet(value: unknown, expected: readonly string[]): boolean {
   const parsed = z.array(z.string()).safeParse(value);
-  return parsed.success &&
-    JSON.stringify([...parsed.data].sort()) === JSON.stringify([...expected].sort());
+  return (
+    parsed.success &&
+    JSON.stringify([...parsed.data].sort()) === JSON.stringify([...expected].sort())
+  );
 }
 
 function stableRecord(value: unknown): string {
   const parsed = z.record(z.unknown()).safeParse(value);
   return parsed.success
-    ? JSON.stringify(Object.fromEntries(Object.entries(parsed.data).sort(([left], [right]) =>
-        left.localeCompare(right),
-      )))
+    ? JSON.stringify(
+        Object.fromEntries(
+          Object.entries(parsed.data).sort(([left], [right]) => left.localeCompare(right)),
+        ),
+      )
     : '';
 }
 
@@ -236,7 +257,10 @@ function makeDelta(
   };
 }
 
-function issueFor(error: AccessPolicyError) {
+function issueFor(error: AccessPolicyError): {
+  code: z.infer<typeof accessManagementTargetReasonCodeSchema>;
+  message: string;
+} {
   const codes: Partial<Record<AccessPolicyError['code'], string>> = {
     manager_cannot_manage_self: 'ACTOR_ACCESS_CHANGED',
     administrator_target_is_read_only: 'ADMIN_ACCESS_IMMUTABLE',
@@ -250,16 +274,9 @@ function issueFor(error: AccessPolicyError) {
     reason_required: 'REDUCTION_REASON_REQUIRED',
   };
   return {
-    code: (codes[error.code] ?? 'PERMISSION_NOT_DELEGABLE') as
-      | 'ACTOR_ACCESS_CHANGED'
-      | 'ADMIN_ACCESS_IMMUTABLE'
-      | 'EMPLOYEE_INACTIVE'
-      | 'BITRIX_ADMIN_REQUIRED'
-      | 'PERMISSION_NOT_DELEGABLE'
-      | 'FIELD_SCOPE_NOT_DELEGABLE'
-      | 'PERMISSION_DEPENDENCY_MISSING'
-      | 'ACCESS_REVIEW_REQUIRED'
-      | 'REDUCTION_REASON_REQUIRED',
+    code: accessManagementTargetReasonCodeSchema.parse(
+      codes[error.code] ?? 'PERMISSION_NOT_DELEGABLE',
+    ),
     message:
       error.code === 'reason_required'
         ? 'Для сокращения доступа необходимо указать причину.'
@@ -291,17 +308,18 @@ function mapCommandReceipt(
     },
     targets: targets.map((target) => {
       const plannedDelta = accessManagementDiffSchema.parse(target.redacted_delta);
-      const appliedDelta = target.state === 'applied'
-        ? plannedDelta
-        : {
-            permissions: { added: [], removed: [] },
-            fields: {
-              before: plannedDelta.fields.before,
-              after: plannedDelta.fields.before,
-              addedCount: 0,
-              removedCount: 0,
-            },
-          };
+      const appliedDelta =
+        target.state === 'applied'
+          ? plannedDelta
+          : {
+              permissions: { added: [], removed: [] },
+              fields: {
+                before: plannedDelta.fields.before,
+                after: plannedDelta.fields.before,
+                addedCount: 0,
+                removedCount: 0,
+              },
+            };
       return {
         userId: target.target_user_id,
         displayName: target.target_display_name,
@@ -330,9 +348,12 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
 
   async function authorize(context: {
     env: RuntimeEnvironment;
-    req: { header(name: string): string | undefined };
+    req: { header(name: string): string | undefined; raw: Request };
   }): Promise<AccessManagerAuthorization> {
-    const principal = await dependencies.readPrincipal(context.env, context.req.header('cookie') ?? null);
+    const principal = await dependencies.readPrincipal(
+      context.env,
+      context.req.header('cookie') ?? null,
+    );
     const access = await dependencies.readEffectiveAccess(context.env, principal);
     const adapter = dependencies.createAdapter(context.env, { currentUserId: principal.userId });
     try {
@@ -341,6 +362,25 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
       if (error instanceof EffectiveAccessError) throw toAuthorizationApiError(error);
       throw error;
     }
+  }
+
+  async function authorizeRateLimited(
+    context: {
+      env: RuntimeEnvironment;
+      req: { header(name: string): string | undefined; raw: Request };
+    },
+    action: string,
+  ): Promise<AccessManagerAuthorization> {
+    await requireRateLimit(
+      context.env.ACCESS_FANOUT_RATE_LIMITER,
+      `client:${clientRateLimitKey(context.req.raw)}:access-management:${action}`,
+    );
+    const authorization = await authorize(context);
+    await requireRateLimit(
+      context.env.ACCESS_FANOUT_RATE_LIMITER,
+      `${authorization.principal.portalId}:${authorization.principal.userId}:${action}`,
+    );
+    return authorization;
   }
 
   async function actorVersion(
@@ -357,7 +397,7 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
   }
 
   routes.get('/capabilities', async (context) => {
-    const authorization = await authorize(context);
+    const authorization = await authorizeRateLimited(context, 'capabilities');
     const repository = dependencies.createRepository(context.env);
     return context.json({
       actor: {
@@ -376,7 +416,7 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
   });
 
   routes.get('/users', async (context) => {
-    const authorization = await authorize(context);
+    const authorization = await authorizeRateLimited(context, 'users-search');
     const parsed = userSearchQuerySchema.safeParse({
       q: context.req.query('q') ?? '',
       cursor: context.req.query('cursor') ?? null,
@@ -389,15 +429,13 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
     const repository = dependencies.createRepository(context.env);
     let sourceEmployees: BitrixEmployeeProfile[] = [];
     let upstreamNextCursor: string | null = null;
-    if (parsed.data.status !== 'all') {
-      try {
-        await repository.consumeFilteredSearchLimit(
-          authorization.principal.portalId,
-          authorization.principal.userId,
-        );
-      } catch (error) {
-        mapDataError(error);
-      }
+    try {
+      await repository.consumeFilteredSearchLimit(
+        authorization.principal.portalId,
+        authorization.principal.userId,
+      );
+    } catch (error) {
+      mapDataError(error);
     }
     // Access state is local, so a filtered cursor advances one bounded Bitrix page at a time.
     // Empty filtered pages intentionally retain nextCursor: this avoids an unbounded upstream
@@ -417,9 +455,7 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
       settings.push(
         ...(await repository.findSettings({
           portalId: authorization.principal.portalId,
-          userIds: sourceEmployees
-            .slice(offset, offset + 100)
-            .map((employee) => employee.id),
+          userIds: sourceEmployees.slice(offset, offset + 100).map((employee) => employee.id),
         })),
       );
     }
@@ -458,9 +494,9 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
           displayName: employee.displayName,
           jobTitle: employee.position,
           departmentName: employee.departmentIds[0]
-            ? byId.get(employee.departmentIds[0])?.name ?? null
+            ? (byId.get(employee.departmentIds[0])?.name ?? null)
             : null,
-          avatarUrl: employee.photoUrl,
+          avatarUrl: trustedMediaUrl(context.env, employee.photoUrl),
           employmentState: employee.isActive ? 'active' : 'inactive',
           accessState: effectiveAccessState,
           accessVersion: row?.access_version ?? null,
@@ -473,7 +509,8 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
             employee.id !== authorization.principal.userId &&
             !employee.isAdmin &&
             employee.isActive &&
-            (effectiveAccessState !== 'quarantined' && effectiveAccessState !== 'review_required' ||
+            ((effectiveAccessState !== 'quarantined' &&
+              effectiveAccessState !== 'review_required') ||
               authorization.isAdministrator),
         });
       })
@@ -494,8 +531,10 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
   });
 
   routes.get('/users/:userId', async (context) => {
-    const authorization = await authorize(context);
-    const result = await authorization.adapter.users.getEmployeeProfile(context.req.param('userId'));
+    const authorization = await authorizeRateLimited(context, 'user-profile');
+    const result = await authorization.adapter.users.getEmployeeProfile(
+      context.req.param('userId'),
+    );
     if (!result.ok) throw toApiError(result.failure);
     const employee = result.value;
     const repository = dependencies.createRepository(context.env);
@@ -539,27 +578,30 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
           authorization.manageablePermissions.includes(permission),
         );
     const targetFields = row?.allowed_field_ids ?? [];
-    const actorFields = authorization.access.fieldScope.kind === 'all'
-      ? null
-      : new Set(authorization.access.fieldScope.fieldIds);
-    const canFullRevoke = authorization.isAdministrator ||
+    const actorFields =
+      authorization.access.fieldScope.kind === 'all'
+        ? null
+        : new Set(authorization.access.fieldScope.fieldIds);
+    const canFullRevoke =
+      authorization.isAdministrator ||
       (targetPermissions.every((permission) =>
         authorization.manageablePermissions.includes(permission),
       ) &&
         (actorFields === null || targetFields.every((fieldId) => actorFields.has(fieldId))));
-    const availableModes: AccessChangeMode[] = blockingReasonCode === null
-      ? [
-          'grant',
-          'replace_managed',
-          'revoke_managed',
-          ...(canFullRevoke ? ['full_revoke' as const] : []),
-        ]
-      : authorization.isAdministrator &&
-          !isSelf &&
-          employee.isActive &&
-          (effectiveAccessState === 'quarantined' || effectiveAccessState === 'review_required')
-        ? ['repair']
-        : [];
+    const availableModes: AccessChangeMode[] =
+      blockingReasonCode === null
+        ? [
+            'grant',
+            'replace_managed',
+            'revoke_managed',
+            ...(canFullRevoke ? ['full_revoke' as const] : []),
+          ]
+        : authorization.isAdministrator &&
+            !isSelf &&
+            employee.isActive &&
+            (effectiveAccessState === 'quarantined' || effectiveAccessState === 'review_required')
+          ? ['repair']
+          : [];
     let delegableFieldScope: AccessFieldScopeReference;
     if (authorization.access.fieldScope.kind === 'all') {
       delegableFieldScope = { kind: 'all' };
@@ -575,57 +617,63 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
       if (!actorSet) throw new ApiHttpError(503, 'UPSTREAM_UNAVAILABLE');
       delegableFieldScope = fieldReference(actorSet);
     }
-    return context.json(accessEmployeeProfileSchema.parse({
-      employee: {
-        userId: employee.id,
-        displayName: employee.displayName,
-        jobTitle: employee.position,
-        departmentName: employee.departmentIds[0]
-          ? byId.get(employee.departmentIds[0])?.name ?? null
-          : null,
-        avatarUrl: employee.photoUrl,
-        employmentState: employee.isActive ? 'active' : 'inactive',
-        accessState: effectiveAccessState,
-        accessVersion: row?.access_version ?? null,
-        permissionCount: employee.isAdmin ? appPermissions.length : permissionList(row).length,
-        fieldScope: employee.isAdmin ? { kind: 'all' } : fieldReference(fieldSet!),
-        isManager: targetIsManager,
-        isBitrixAdmin: employee.isAdmin,
-        isSelf,
-        canManage: availableModes.length > 0,
-      },
-      access: {
-        settingsVersion: row?.access_version ?? null,
-        permissionCatalogVersion: row?.permission_matrix_version ?? accessPermissionCatalog.version,
-        permissions: visibleTargetPermissions,
-        fieldScope: employee.isAdmin ? { kind: 'all' } : fieldReference(fieldSet!),
-        grantedAt: row?.granted_at ?? null,
-        updatedAt: row?.updated_at ?? null,
-        grantedByUserId: row?.granted_by_user_id ?? null,
-      },
-      capabilities: {
-        canManage: availableModes.length > 0,
-        availableModes,
-        delegablePermissions: authorization.manageablePermissions,
-        delegableFieldScope,
-        blockingReasonCode,
-      },
-      checkedAt: new Date().toISOString(),
-    }));
+    return context.json(
+      accessEmployeeProfileSchema.parse({
+        employee: {
+          userId: employee.id,
+          displayName: employee.displayName,
+          jobTitle: employee.position,
+          departmentName: employee.departmentIds[0]
+            ? (byId.get(employee.departmentIds[0])?.name ?? null)
+            : null,
+          avatarUrl: trustedMediaUrl(context.env, employee.photoUrl),
+          employmentState: employee.isActive ? 'active' : 'inactive',
+          accessState: effectiveAccessState,
+          accessVersion: row?.access_version ?? null,
+          permissionCount: employee.isAdmin ? appPermissions.length : permissionList(row).length,
+          fieldScope: employee.isAdmin ? { kind: 'all' } : fieldReference(fieldSet!),
+          isManager: targetIsManager,
+          isBitrixAdmin: employee.isAdmin,
+          isSelf,
+          canManage: availableModes.length > 0,
+        },
+        access: {
+          settingsVersion: row?.access_version ?? null,
+          permissionCatalogVersion:
+            row?.permission_matrix_version ?? accessPermissionCatalog.version,
+          permissions: visibleTargetPermissions,
+          fieldScope: employee.isAdmin ? { kind: 'all' } : fieldReference(fieldSet!),
+          grantedAt: row?.granted_at ?? null,
+          updatedAt: row?.updated_at ?? null,
+          grantedByUserId: row?.granted_by_user_id ?? null,
+        },
+        capabilities: {
+          canManage: availableModes.length > 0,
+          availableModes,
+          delegablePermissions: authorization.manageablePermissions,
+          delegableFieldScope,
+          blockingReasonCode,
+        },
+        checkedAt: new Date().toISOString(),
+      }),
+    );
   });
 
   routes.get('/departments', async (context) => {
-    const authorization = await authorize(context);
+    const authorization = await authorizeRateLimited(context, 'departments');
     const result = await authorization.adapter.organization.getDepartments();
     if (!result.ok) throw toApiError(result.failure);
     const byId = new Map(result.value.map((department) => [department.id, department]));
     return context.json({
-      items: result.value.map((department) => ({ ...department, path: departmentPath(department.id, byId) })),
+      items: result.value.map((department) => ({
+        ...department,
+        path: departmentPath(department.id, byId),
+      })),
     });
   });
 
   routes.post('/department-snapshots/:departmentId', async (context) => {
-    const authorization = await authorize(context);
+    const authorization = await authorizeRateLimited(context, 'department-snapshot');
     const result = await authorization.adapter.organization.snapshotDepartmentMembers(
       context.req.param('departmentId'),
     );
@@ -633,21 +681,23 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
     const profiles = await authorization.adapter.users.getByIds(result.value.memberIds);
     if (!profiles.ok) throw toApiError(profiles.failure);
     const editableMemberIds = profiles.value
-      .filter((employee) =>
-        employee.isActive &&
-        !employee.isAdmin &&
-        employee.id !== authorization.principal.userId,
+      .filter(
+        (employee) =>
+          employee.isActive && !employee.isAdmin && employee.id !== authorization.principal.userId,
       )
       .map((employee) => employee.id);
-    return context.json({
-      ...result.value,
-      memberIds: editableMemberIds,
-      excludedCount: result.value.memberIds.length - editableMemberIds.length,
-    }, 201);
+    return context.json(
+      {
+        ...result.value,
+        memberIds: editableMemberIds,
+        excludedCount: result.value.memberIds.length - editableMemberIds.length,
+      },
+      201,
+    );
   });
 
   routes.get('/fields', async (context) => {
-    const authorization = await authorize(context);
+    const authorization = await authorizeRateLimited(context, 'fields');
     const parsed = fieldsQuerySchema.safeParse({
       q: context.req.query('q') ?? '',
       cursor: context.req.query('cursor') ?? '0',
@@ -664,7 +714,8 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
     );
     const filtered = result.value.filter(
       (field) =>
-        field.isSupported && field.isEditable &&
+        field.isSupported &&
+        field.isEditable &&
         (query === '' ||
           field.id.toLocaleLowerCase('ru').includes(query) ||
           taskFieldLabel(field.id).toLocaleLowerCase('ru').includes(query)),
@@ -685,7 +736,7 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
   });
 
   routes.get('/field-sets/:fieldSetId/members', async (context) => {
-    const authorization = await authorize(context);
+    const authorization = await authorizeRateLimited(context, 'field-set-members');
     const fieldSetId = idSchema.safeParse(context.req.param('fieldSetId'));
     const query = fieldMembersQuerySchema.safeParse(context.req.query());
     if (!fieldSetId.success || !query.success) throw new ApiHttpError(400, 'INVALID_REQUEST');
@@ -712,22 +763,26 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
       limit: query.data.limit + 1,
     });
     const page = members.slice(0, query.data.limit);
-    const manageableFields = authorization.access.fieldScope.kind === 'all'
-      ? null
-      : new Set(authorization.access.fieldScope.fieldIds);
-    return context.json(accessFieldSetMembersResponseSchema.parse({
-      reference: fieldReference(set),
-      fieldIds: page
-        .map((member) => member.field_id)
-        .filter((fieldId) => manageableFields === null || manageableFields.has(fieldId)),
-      nextCursor: members.length > query.data.limit
-        ? String(page.at(-1)?.ordinal ?? query.data.cursor)
-        : null,
-    }));
+    const manageableFields =
+      authorization.access.fieldScope.kind === 'all'
+        ? null
+        : new Set(authorization.access.fieldScope.fieldIds);
+    return context.json(
+      accessFieldSetMembersResponseSchema.parse({
+        reference: fieldReference(set),
+        fieldIds: page
+          .map((member) => member.field_id)
+          .filter((fieldId) => manageableFields === null || manageableFields.has(fieldId)),
+        nextCursor:
+          members.length > query.data.limit
+            ? String(page.at(-1)?.ordinal ?? query.data.cursor)
+            : null,
+      }),
+    );
   });
 
   routes.get('/draft', async (context) => {
-    const authorization = await authorize(context);
+    const authorization = await authorizeRateLimited(context, 'draft-read');
     const draft = await dependencies.createRepository(context.env).readDraft({
       portalId: authorization.principal.portalId,
       managerUserId: authorization.principal.userId,
@@ -743,15 +798,20 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
   });
 
   routes.put('/draft', async (context) => {
-    const authorization = await authorize(context);
-    const intent = await parseJsonBody(context.req.raw, accessManagementDraftIntentSchema, 1_500_000);
+    const authorization = await authorizeRateLimited(context, 'draft-save');
+    const intent = await parseJsonBody(
+      context.req.raw,
+      accessManagementDraftIntentSchema,
+      accessManagementLimits.maxDraftPayloadBytes,
+    );
     const repository = dependencies.createRepository(context.env);
     if ((await actorVersion(authorization, repository)) !== intent.actorAccessVersion) {
       throw new ApiHttpError(409, 'CONFLICT');
     }
-    const actorFieldIds = authorization.access.fieldScope.kind === 'all'
-      ? null
-      : new Set(authorization.access.fieldScope.fieldIds);
+    const actorFieldIds =
+      authorization.access.fieldScope.kind === 'all'
+        ? null
+        : new Set(authorization.access.fieldScope.fieldIds);
     if (intent.fieldIds.some((fieldId) => actorFieldIds !== null && !actorFieldIds.has(fieldId))) {
       throw new ApiHttpError(403, 'FORBIDDEN');
     }
@@ -783,40 +843,37 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
         throw new ApiHttpError(400, 'INVALID_REQUEST');
       }
     }
-    const fieldSetId = await repository.resolveFieldSet(
-      authorization.principal.portalId,
-      intent.fieldIds,
-    );
-    const [fieldSet] = await repository.findFieldSets({
-      portalId: authorization.principal.portalId,
-      fieldSetIds: [fieldSetId],
-    });
-    if (!fieldSet) throw new ApiHttpError(503, 'UPSTREAM_UNAVAILABLE');
     const payload = {
       ...intent,
       fieldIds: undefined,
-      fieldScope: fieldReference(fieldSet),
     };
     try {
-      const saved = await repository.saveDraft({
+      const saved = await repository.saveDraftWithFieldSet({
         portalId: authorization.principal.portalId,
         managerUserId: authorization.principal.userId,
         expectedRevision: intent.draftRevision,
+        fieldIds: intent.fieldIds,
         payload: asJson(payload),
       });
-      return context.json(accessManagementDraftSaveResponseSchema.parse({
-        draftId: saved.id,
-        revision: saved.revision,
-        expiresAt: saved.expires_at,
-      }));
+      return context.json(
+        accessManagementDraftSaveResponseSchema.parse({
+          draftId: saved.id,
+          revision: saved.revision,
+          expiresAt: saved.expires_at,
+        }),
+      );
     } catch (error) {
       mapDataError(error);
     }
   });
 
   routes.post('/preflights', async (context) => {
-    const authorization = await authorize(context);
-    const intent = await parseJsonBody(context.req.raw, accessManagementDraftIntentSchema, 1_500_000);
+    const authorization = await authorizeRateLimited(context, 'preflight');
+    const intent = await parseJsonBody(
+      context.req.raw,
+      accessManagementDraftIntentSchema,
+      accessManagementLimits.maxDraftPayloadBytes,
+    );
     const repository = dependencies.createRepository(context.env);
     const currentActorVersion = await actorVersion(authorization, repository);
     if (
@@ -829,11 +886,7 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
       portalId: authorization.principal.portalId,
       managerUserId: authorization.principal.userId,
     });
-    if (
-      !draft ||
-      draft.status !== 'editing' ||
-      draft.revision !== intent.draftRevision
-    ) {
+    if (!draft || draft.status !== 'editing' || draft.revision !== intent.draftRevision) {
       throw new ApiHttpError(409, 'CONFLICT');
     }
     const stored = z.record(z.unknown()).parse(draft.draft_payload);
@@ -857,16 +910,20 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
       throw new ApiHttpError(409, 'CONFLICT');
     }
 
-    const [employeesResult, departmentsResult, fieldsResult, settings, requestedSets] = await Promise.all([
-      authorization.adapter.users.getByIds(intent.subjectIds),
-      authorization.adapter.organization.getDepartments(),
-      authorization.adapter.tasks.getFieldCapabilities(),
-      repository.findSettings({ portalId: authorization.principal.portalId, userIds: intent.subjectIds }),
-      repository.findFieldSets({
-        portalId: authorization.principal.portalId,
-        fieldSetIds: [requestedFieldSetId],
-      }),
-    ]);
+    const [employeesResult, departmentsResult, fieldsResult, settings, requestedSets] =
+      await Promise.all([
+        authorization.adapter.users.getByIds(intent.subjectIds),
+        authorization.adapter.organization.getDepartments(),
+        authorization.adapter.tasks.getFieldCapabilities(),
+        repository.findSettings({
+          portalId: authorization.principal.portalId,
+          userIds: intent.subjectIds,
+        }),
+        repository.findFieldSets({
+          portalId: authorization.principal.portalId,
+          fieldSetIds: [requestedFieldSetId],
+        }),
+      ]);
     if (!employeesResult.ok) throw toApiError(employeesResult.failure);
     if (!departmentsResult.ok) throw toApiError(departmentsResult.failure);
     if (!fieldsResult.ok) throw toApiError(fieldsResult.failure);
@@ -884,7 +941,10 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
     const requestedSet = requestedSets[0];
     if (!requestedSet) throw new ApiHttpError(503, 'UPSTREAM_UNAVAILABLE');
     const emptySetId = await repository.resolveFieldSet(authorization.principal.portalId, []);
-    const allSetIds = [emptySetId, ...settings.flatMap((row) => (row.field_set_id ? [row.field_set_id] : []))];
+    const allSetIds = [
+      emptySetId,
+      ...settings.flatMap((row) => (row.field_set_id ? [row.field_set_id] : [])),
+    ];
     const fieldSets = await repository.findFieldSets({
       portalId: authorization.principal.portalId,
       fieldSetIds: allSetIds,
@@ -894,7 +954,9 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
     if (!emptySet) throw new ApiHttpError(503, 'UPSTREAM_UNAVAILABLE');
     const settingsById = new Map(settings.map((row) => [row.user_id, row]));
     const employeesById = new Map(employeesResult.value.map((employee) => [employee.id, employee]));
-    const departmentsById = new Map(departmentsResult.value.map((department) => [department.id, department]));
+    const departmentsById = new Map(
+      departmentsResult.value.map((department) => [department.id, department]),
+    );
     const targets: AccessManagementPreflight['targets'] = [];
     const storageTargets: Record<string, unknown>[] = [];
     let sensitive = false;
@@ -922,7 +984,7 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
         displayName: employee?.displayName ?? `Сотрудник ${userId}`,
         jobTitle: null,
         departmentName: employee?.departmentIds[0]
-          ? departmentsById.get(employee.departmentIds[0])?.name ?? null
+          ? (departmentsById.get(employee.departmentIds[0])?.name ?? null)
           : null,
         avatarUrl: null,
         employmentState: employee ? (employee.isActive ? 'active' : 'inactive') : 'unknown',
@@ -933,8 +995,10 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
         isManager: targetIsManager,
         isBitrixAdmin: employee?.isAdmin ?? false,
         isSelf: userId === authorization.principal.userId,
-        canManage: userId !== authorization.principal.userId &&
-          !(employee?.isAdmin ?? false) && (employee?.isActive ?? false),
+        canManage:
+          userId !== authorization.principal.userId &&
+          !(employee?.isAdmin ?? false) &&
+          (employee?.isActive ?? false),
       };
       let state: 'ready' | 'excluded' | 'conflict' | 'no_change' = 'ready';
       let issue: ReturnType<typeof issueFor> | null = null;
@@ -1029,8 +1093,8 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
         ...delta,
         permissions: {
           added: delta.permissions.added.filter((permission) => !automaticAdded.has(permission)),
-          removed: delta.permissions.removed.filter((permission) =>
-            !automaticRemoved.has(permission),
+          removed: delta.permissions.removed.filter(
+            (permission) => !automaticRemoved.has(permission),
           ),
         },
       };
@@ -1074,7 +1138,10 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
       noChange: targets.filter((target) => target.state === 'no_change').length,
     };
     const confirmationRequired =
-      sensitive || intent.mode === 'full_revoke' || intent.mode === 'revoke_managed' || summary.ready > 1;
+      sensitive ||
+      intent.mode === 'full_revoke' ||
+      intent.mode === 'revoke_managed' ||
+      summary.ready > 1;
     const confirmation = {
       required: confirmationRequired,
       tokenRequired: confirmationRequired,
@@ -1100,7 +1167,11 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
       mapDataError(error);
     }
     const createdRecord = z
-      .object({ preflight: z.object({ id: idSchema, created_at: z.string(), expires_at: z.string() }).passthrough() })
+      .object({
+        preflight: z
+          .object({ id: idSchema, created_at: z.string(), expires_at: z.string() })
+          .passthrough(),
+      })
       .passthrough()
       .parse(created);
     return context.json(
@@ -1136,8 +1207,13 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
     }
     const storedSummary = z
       .object({
-        total: z.number(), ready: z.number(), excluded: z.number(), conflicts: z.number(),
-        applied: z.number(), failed: z.number(), noChange: z.number(),
+        total: z.number(),
+        ready: z.number(),
+        excluded: z.number(),
+        conflicts: z.number(),
+        applied: z.number(),
+        failed: z.number(),
+        noChange: z.number(),
         confirmation: z.record(z.unknown()),
       })
       .parse(stored.preflight.summary);
@@ -1173,33 +1249,38 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
         const liveEmployee = employeeById.get(target.target_user_id);
         return {
           employee: {
-          userId: target.target_user_id,
-          displayName: target.target_display_name,
-          jobTitle: null,
-          departmentName: target.target_department_name,
-          avatarUrl: null,
-          employmentState: liveEmployee
-            ? liveEmployee.isActive
-              ? 'active'
-              : 'inactive'
-            : 'unknown',
-          accessState: target.expected_access_state,
-          accessVersion: target.expected_access_version,
-          permissionCount: target.expected_permission_count,
-          fieldScope: delta.fields.before,
-          isManager: target.target_is_manager,
-          isBitrixAdmin: target.target_is_portal_admin,
-          isSelf: target.target_user_id === authorization.principal.userId,
-          canManage: false,
-        },
-        state: target.state,
-        baseAccessVersion: target.expected_access_version,
-        checkedAccessVersion: target.expected_access_version,
-        requestedDelta,
-        automaticDelta,
-        issues: target.reason_code
-          ? [{ code: target.reason_code, message: target.issue_message ?? 'Получатель исключён при проверке.' }]
-          : [],
+            userId: target.target_user_id,
+            displayName: target.target_display_name,
+            jobTitle: null,
+            departmentName: target.target_department_name,
+            avatarUrl: null,
+            employmentState: liveEmployee
+              ? liveEmployee.isActive
+                ? 'active'
+                : 'inactive'
+              : 'unknown',
+            accessState: target.expected_access_state,
+            accessVersion: target.expected_access_version,
+            permissionCount: target.expected_permission_count,
+            fieldScope: delta.fields.before,
+            isManager: target.target_is_manager,
+            isBitrixAdmin: target.target_is_portal_admin,
+            isSelf: target.target_user_id === authorization.principal.userId,
+            canManage: false,
+          },
+          state: target.state,
+          baseAccessVersion: target.expected_access_version,
+          checkedAccessVersion: target.expected_access_version,
+          requestedDelta,
+          automaticDelta,
+          issues: target.reason_code
+            ? [
+                {
+                  code: target.reason_code,
+                  message: target.issue_message ?? 'Получатель исключён при проверке.',
+                },
+              ]
+            : [],
         };
       }),
       confirmation: storedSummary.confirmation,
@@ -1207,7 +1288,7 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
   }
 
   routes.get('/preflights/:preflightId', async (context) => {
-    const authorization = await authorize(context);
+    const authorization = await authorizeRateLimited(context, 'preflight-read');
     const preflightId = idSchema.safeParse(context.req.param('preflightId'));
     if (!preflightId.success) throw new ApiHttpError(400, 'INVALID_REQUEST');
     return context.json(
@@ -1220,7 +1301,7 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
   });
 
   routes.post('/preflights/:preflightId/confirm', async (context) => {
-    const authorization = await authorize(context);
+    const authorization = await authorizeRateLimited(context, 'preflight-confirm');
     const input = await parseJsonBody(
       context.req.raw,
       accessManagementConfirmationRequestSchema,
@@ -1234,7 +1315,10 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
       dependencies.createRepository(context.env),
       input.preflightId,
     );
-    if (preflight.draftRevision !== input.draftRevision || new Date(preflight.expiresAt) <= new Date()) {
+    if (
+      preflight.draftRevision !== input.draftRevision ||
+      new Date(preflight.expiresAt) <= new Date()
+    ) {
       throw new ApiHttpError(409, 'CONFLICT');
     }
     const issued = await createAccessConfirmationToken(
@@ -1261,7 +1345,7 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
   });
 
   routes.post('/commands', async (context) => {
-    const authorization = await authorize(context);
+    const authorization = await authorizeRateLimited(context, 'command');
     const input = await parseJsonBody(context.req.raw, accessManagementCommandRequestSchema, 8_192);
     const repository = dependencies.createRepository(context.env);
     const existing = await repository.readCommand({
@@ -1294,14 +1378,18 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
         }
       }
       return context.json(
-        mapCommandReceipt(existing.command, existing.targets, existingPreflight.preflight.mode),
+        mapCommandReceipt(
+          existing.command,
+          existing.targets,
+          accessChangeModeSchema.parse(existingPreflight.preflight.mode),
+        ),
         existing.command.state === 'accepted' ? 202 : 200,
       );
     }
     const preflight = await readPreflightResponse(authorization, repository, input.preflightId);
     if (
       preflight.permissionCatalogVersion !== accessPermissionCatalog.version ||
-      preflight.actorAccessVersion !== await actorVersion(authorization, repository)
+      preflight.actorAccessVersion !== (await actorVersion(authorization, repository))
     ) {
       throw new ApiHttpError(409, 'CONFLICT');
     }
@@ -1316,8 +1404,8 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
           claims.portalId !== authorization.principal.portalId ||
           claims.actorUserId !== authorization.principal.userId ||
           claims.preflightId !== input.preflightId ||
-          claims.draftRevision !== preflight.draftRevision
-          || claims.confirmationId !== input.confirmationId
+          claims.draftRevision !== preflight.draftRevision ||
+          claims.confirmationId !== input.confirmationId
         ) {
           throw new ApiHttpError(409, 'CONFLICT');
         }
@@ -1358,11 +1446,13 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
           commandId: input.commandId,
         });
       } catch {
-        console.error(JSON.stringify({
-          event: 'access_command_initial_dispatch_failed',
-          commandId: input.commandId,
-          correlationId: context.get('correlationId'),
-        }));
+        console.error(
+          JSON.stringify({
+            event: 'access_command_initial_dispatch_failed',
+            commandId: input.commandId,
+            correlationId: context.get('correlationId'),
+          }),
+        );
       }
     }
     return context.json(
@@ -1372,7 +1462,7 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
   });
 
   routes.get('/commands/:commandId', async (context) => {
-    const authorization = await authorize(context);
+    const authorization = await authorizeRateLimited(context, 'command-read');
     const commandId = idSchema.safeParse(context.req.param('commandId'));
     if (!commandId.success) throw new ApiHttpError(400, 'INVALID_REQUEST');
     const repository = dependencies.createRepository(context.env);
@@ -1397,11 +1487,13 @@ export function createAccessManagementRoutes(dependencies: AccessManagementRoute
           commandId: commandId.data,
         });
       } catch {
-        console.error(JSON.stringify({
-          event: 'access_command_status_dispatch_failed',
-          commandId: commandId.data,
-          correlationId: context.get('correlationId'),
-        }));
+        console.error(
+          JSON.stringify({
+            event: 'access_command_status_dispatch_failed',
+            commandId: commandId.data,
+            correlationId: context.get('correlationId'),
+          }),
+        );
       }
     }
     return context.json(

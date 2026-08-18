@@ -10,6 +10,26 @@ export const bitrixIdSchema = z.string().regex(/^\d+$/).min(1).max(32);
 
 export const fieldIdSchema = z.string().trim().min(1).max(128);
 
+function isSafeHttpsUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === 'https:' &&
+      url.username === '' &&
+      url.password === '' &&
+      (url.port === '' || url.port === '443')
+    );
+  } catch {
+    return false;
+  }
+}
+
+export const safeHttpsUrlSchema = z
+  .string()
+  .trim()
+  .max(2_048)
+  .refine(isSafeHttpsUrl, { message: 'Expected a safe HTTPS URL.' });
+
 export const operationIdSchema = z.string().uuid();
 
 export const draftIdSchema = z.string().uuid();

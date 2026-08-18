@@ -47,16 +47,33 @@ export async function verifyRuntimeProbeArtifact(
     kind: probe.kind,
     messageId: probe.messageId,
   });
-  await bucket.put(probe.payload.artifactKey, artifact);
-
-  const storedArtifact = await bucket.get(probe.payload.artifactKey);
-  if (storedArtifact === null) {
-    throw new Error('Runtime probe artifact is unavailable.');
+  let primaryError: unknown;
+  let cleanupError: unknown;
+  try {
+    await bucket.put(probe.payload.artifactKey, artifact);
+    const storedArtifact = await bucket.get(probe.payload.artifactKey);
+    if (storedArtifact === null) {
+      throw new Error('Runtime probe artifact is unavailable.');
+    }
+    if ((await storedArtifact.text()) !== artifact) {
+      throw new Error('Runtime probe artifact is invalid.');
+    }
+  } catch (error) {
+    primaryError = error;
+  } finally {
+    try {
+      await bucket.delete(probe.payload.artifactKey);
+    } catch (error) {
+      cleanupError = error;
+    }
   }
-
-  if ((await storedArtifact.text()) !== artifact) {
-    throw new Error('Runtime probe artifact is invalid.');
+  if (primaryError !== undefined) {
+    if (cleanupError !== undefined) {
+      console.error(JSON.stringify({ event: 'runtime_probe_cleanup_failed' }));
+    }
+    throw primaryError;
   }
-
-  await bucket.delete(probe.payload.artifactKey);
+  if (cleanupError !== undefined) {
+    throw cleanupError;
+  }
 }

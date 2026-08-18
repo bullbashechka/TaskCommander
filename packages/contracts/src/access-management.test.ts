@@ -75,17 +75,23 @@ describe('access-management contracts', () => {
   });
 
   it('keeps employee-search wire limits aligned with Bitrix and database identifiers', () => {
-    expect(accessEmployeeSearchRequestSchema.safeParse({
-      q: '',
-      status: 'all',
-      pageSize: 50,
-      departmentId: '1'.repeat(32),
-    }).success).toBe(true);
-    expect(accessEmployeeSearchRequestSchema.safeParse({ q: '', pageSize: 51 }).success).toBe(false);
-    expect(accessEmployeeSearchRequestSchema.safeParse({
-      q: '',
-      departmentId: '1'.repeat(33),
-    }).success).toBe(false);
+    expect(
+      accessEmployeeSearchRequestSchema.safeParse({
+        q: '',
+        status: 'all',
+        pageSize: 50,
+        departmentId: '1'.repeat(32),
+      }).success,
+    ).toBe(true);
+    expect(accessEmployeeSearchRequestSchema.safeParse({ q: '', pageSize: 51 }).success).toBe(
+      false,
+    );
+    expect(
+      accessEmployeeSearchRequestSchema.safeParse({
+        q: '',
+        departmentId: '1'.repeat(33),
+      }).success,
+    ).toBe(false);
   });
 
   it('publishes a valid versioned permission catalogue with the approved dependencies', () => {
@@ -99,12 +105,7 @@ describe('access-management contracts', () => {
       accessPermissionCatalog.permissions.find(
         ({ permission }) => permission === 'restore_operations',
       )?.dependencies,
-    ).toEqual([
-      'app_access',
-      'run_bulk_operations',
-      'change_allowed_fields',
-      'view_own_reports',
-    ]);
+    ).toEqual(['app_access', 'run_bulk_operations', 'change_allowed_fields', 'view_own_reports']);
   });
 
   it('uses immutable field-set references instead of exposing field IDs in summaries', () => {
@@ -112,9 +113,9 @@ describe('access-management contracts', () => {
     expect(
       accessFieldScopeReferenceSchema.safeParse({ ...fieldScope, fieldIds: ['deadline'] }).success,
     ).toBe(false);
-    expect(accessFieldScopeReferenceSchema.safeParse({ ...fieldScope, count: 10_000 }).success).toBe(
-      true,
-    );
+    expect(
+      accessFieldScopeReferenceSchema.safeParse({ ...fieldScope, count: 10_000 }).success,
+    ).toBe(true);
     expect(
       accessFieldSetMembersResponseSchema.safeParse({
         reference: {
@@ -136,9 +137,9 @@ describe('access-management contracts', () => {
     expect(
       accessChangeReasonSchema.safeParse({ code: 'role_change', comment: 'not allowed' }).success,
     ).toBe(false);
-    expect(accessChangeReasonSchema.safeParse({ code: 'other', comment: 'too short' }).success).toBe(
-      false,
-    );
+    expect(
+      accessChangeReasonSchema.safeParse({ code: 'other', comment: 'too short' }).success,
+    ).toBe(false);
     expect(
       accessChangeReasonSchema.safeParse({
         code: 'other',
@@ -175,27 +176,36 @@ describe('access-management contracts', () => {
     expect(
       accessManagementDraftInputSchema.safeParse({
         ...draft,
-        targets: Array.from(
-          { length: accessManagementLimits.maxRecipients + 1 },
-          (_, index) => ({ userId: String(index + 1), baseAccessVersion: null }),
-        ),
+        targets: Array.from({ length: accessManagementLimits.maxRecipients + 1 }, (_, index) => ({
+          userId: String(index + 1),
+          baseAccessVersion: null,
+        })),
       }).success,
     ).toBe(false);
   });
 
-  it('requires an exact version map for the UI draft intent without a field-count cap', () => {
+  it('requires an exact version map and enforces the managed-field boundary', () => {
     const intent = {
       subjectIds: ['42'],
       subjectVersions: { '42': null },
       draftRevision: 0,
       mode: 'grant',
       permissions: ['app_access'],
-      fieldIds: Array.from({ length: 300 }, (_, index) => `field_${index}`),
+      fieldIds: Array.from(
+        { length: accessManagementLimits.maxManagedFields },
+        (_, index) => `field_${index}`,
+      ),
       reason: null,
       permissionCatalogVersion: 1,
       actorAccessVersion: 1,
     };
     expect(accessManagementDraftIntentSchema.safeParse(intent).success).toBe(true);
+    expect(
+      accessManagementDraftIntentSchema.safeParse({
+        ...intent,
+        fieldIds: [...intent.fieldIds, 'field_over_limit'],
+      }).success,
+    ).toBe(false);
     expect(
       accessManagementDraftIntentSchema.safeParse({
         ...intent,
@@ -213,9 +223,9 @@ describe('access-management contracts', () => {
     };
 
     expect(accessManagementCommandSchema.safeParse(command).success).toBe(true);
-    expect(
-      accessManagementCommandSchema.safeParse({ ...command, userIds: ['42'] }).success,
-    ).toBe(false);
+    expect(accessManagementCommandSchema.safeParse({ ...command, userIds: ['42'] }).success).toBe(
+      false,
+    );
   });
 
   it('binds an execution token to an explicit confirmation identifier', () => {

@@ -37,8 +37,22 @@ import {
 import { createApiErrorResponse, ApiHttpError } from './http/errors';
 import type { BitrixAdapter } from './integrations/bitrix/contract';
 import { createBitrixAdapter } from './integrations/bitrix/factory';
-import { parseJsonBody, requireJsonContentType } from './http/validation';
-import { getRuntimeReadiness, type RuntimeEnvironment } from './runtime/configuration';
+import { parseJsonBody } from './http/validation';
+import {
+  applySecurityHeaders,
+  clientRateLimitKey,
+  getApplicationOrigin,
+  haveEqualSecretValues,
+  isLoopbackRequest,
+  requireRateLimit,
+  requireSameOriginJsonRequest,
+} from './http/security';
+import {
+  getRequiredQueueBinding,
+  getRuntimeReadiness,
+  hasStrongRuntimeSecret,
+  type RuntimeEnvironment,
+} from './runtime/configuration';
 import { createRuntimeProbe } from './runtime/probe';
 
 type ApiVariables = {
@@ -96,7 +110,7 @@ export function createApi(dependencies: ApiDependencies = {}) {
     ((env: RuntimeEnvironment, principal: VerifiedSessionPrincipal) =>
       resolveEffectiveAccess(principal, {
         findEffectiveAccessSettings: async (input) =>
-          createSettingsReader(env).findEffectiveAccessSettings(input),
+          await createSettingsReader(env).findEffectiveAccessSettings(input),
       }));
   const bitrixAdapterFactory = dependencies.createBitrixAdapter ?? createBitrixAdapter;
   const readSignedPrincipal =
@@ -127,8 +141,14 @@ export function createApi(dependencies: ApiDependencies = {}) {
   api.use('/api/*', async (context, next) => {
     const correlationId = `TC-${crypto.randomUUID()}`;
     context.set('correlationId', correlationId);
+    const path = new URL(context.req.url).pathname;
+    if (path !== '/api/_dev/session' && path !== '/api/_runtime/probe') {
+      requireSameOriginJsonRequest(context.env, context.req.raw);
+    }
     await next();
     context.header('x-correlation-id', correlationId);
+    const response = context.res;
+    context.res = applySecurityHeaders(response, context.env);
   });
 
   api.use('/api/session', async (context, next) => {
@@ -161,9 +181,26 @@ export function createApi(dependencies: ApiDependencies = {}) {
     }),
   );
 
-  api.get('/api/health', (context) => context.json(getRuntimeReadiness(context.env)));
+  api.get('/api/health', (context) => context.json({ status: 'ok' }));
+
+  api.get('/api/_internal/readiness', (context) => {
+    context.header('cache-control', 'no-store');
+    const token = context.env.INTERNAL_READINESS_TOKEN;
+    if (
+      !hasStrongRuntimeSecret(token) ||
+      !haveEqualSecretValues(token, context.req.header('x-task-commander-readiness-token') ?? null)
+    ) {
+      return context.notFound();
+    }
+    const readiness = getRuntimeReadiness(context.env);
+    return context.json(readiness, readiness.readiness === 'ready' ? 200 : 503);
+  });
 
   api.post('/api/session', async (context) => {
+    await requireRateLimit(
+      context.env.SESSION_RATE_LIMITER,
+      `${getApplicationOrigin(context.env) ?? 'invalid'}:${clientRateLimitKey(context.req.raw)}:session`,
+    );
     const request = await parseJsonBody(context.req.raw, createSessionRequestSchema, 4_352);
     const session = await createSessionService(context.env).create(request.launchContext);
     context.header('set-cookie', session.cookie);
@@ -185,18 +222,11 @@ export function createApi(dependencies: ApiDependencies = {}) {
   });
 
   api.post('/api/_dev/session', async (context) => {
-    const hostname = new URL(context.req.url).hostname.toLowerCase();
-    const isLoopback =
-      hostname === 'localhost' ||
-      hostname.endsWith('.localhost') ||
-      /^127(?:\.\d{1,3}){3}$/.test(hostname) ||
-      hostname === '[::1]' ||
-      hostname === '::1';
-    if (context.env.APP_ENV !== 'local' || !isLoopback) {
+    if (context.env.APP_ENV !== 'local' || !isLoopbackRequest(context.req.raw)) {
       return context.notFound();
     }
+    requireSameOriginJsonRequest(context.env, context.req.raw);
 
-    requireJsonContentType(context.req.raw);
     const request = await parseJsonBody(context.req.raw, createLocalDevSessionRequestSchema, 64);
     const session = await createLocalDevSession(context.env, request.userId);
     context.header('set-cookie', session.cookie);
@@ -223,15 +253,29 @@ export function createApi(dependencies: ApiDependencies = {}) {
   });
 
   api.post('/api/_runtime/probe', async (context) => {
-    if (context.env.APP_ENV !== 'local') {
+    if (
+      context.env.APP_ENV !== 'local' ||
+      context.env.ENABLE_LOCAL_RUNTIME_PROBE !== 'true' ||
+      !hasStrongRuntimeSecret(context.env.LOCAL_RUNTIME_PROBE_TOKEN) ||
+      !isLoopbackRequest(context.req.raw) ||
+      !haveEqualSecretValues(
+        context.env.LOCAL_RUNTIME_PROBE_TOKEN,
+        context.req.header('x-task-commander-probe-token') ?? null,
+      )
+    ) {
       return context.notFound();
     }
+    requireSameOriginJsonRequest(context.env, context.req.raw);
+
+    await requireRateLimit(
+      context.env.PROBE_RATE_LIMITER,
+      `${getApplicationOrigin(context.env) ?? 'invalid'}:runtime-probe`,
+    );
 
     await parseJsonBody(context.req.raw, z.object({}).strict());
 
     const probe = createRuntimeProbe();
-    const queue = (context.env as RuntimeEnvironment & Pick<Env, 'OPERATIONS_QUEUE'>)
-      .OPERATIONS_QUEUE;
+    const queue = getRequiredQueueBinding(context.env.OPERATIONS_QUEUE);
     await queue.send(probe);
 
     return context.json(
@@ -252,10 +296,12 @@ export function createApi(dependencies: ApiDependencies = {}) {
     const correlationId = context.get('correlationId');
 
     if (error instanceof ApiHttpError) {
-      return context.json(
+      const response = context.json(
         createApiErrorResponse(error.code, correlationId, error.fieldErrors),
         error.status,
       );
+      if (error.status === 429) response.headers.set('retry-after', '60');
+      return applySecurityHeaders(response, context.env);
     }
 
     console.error(
@@ -265,7 +311,10 @@ export function createApi(dependencies: ApiDependencies = {}) {
         errorName: error instanceof Error ? error.name : 'unknown',
       }),
     );
-    return context.json(createApiErrorResponse('INTERNAL_ERROR', correlationId), 500);
+    return applySecurityHeaders(
+      context.json(createApiErrorResponse('INTERNAL_ERROR', correlationId), 500),
+      context.env,
+    );
   });
 
   return api;

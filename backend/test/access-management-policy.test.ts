@@ -66,7 +66,9 @@ describe('access management policy', () => {
         requestedPermissions: ['app_access'],
         requestedFieldIds: [],
       }),
-    ).toThrowError(expect.objectContaining<Partial<AccessPolicyError>>({ code: 'reason_required' }));
+    ).toThrowError(
+      expect.objectContaining<Partial<AccessPolicyError>>({ code: 'reason_required' }),
+    );
   });
 
   it('preserves permissions and fields outside a delegated manager scope', () => {
@@ -143,9 +145,7 @@ describe('access management policy', () => {
   });
 
   it('limits repair to administrators and inconsistent states', () => {
-    expect(() =>
-      evaluateAccessChange({ ...base, mode: 'repair' }),
-    ).toThrowError(
+    expect(() => evaluateAccessChange({ ...base, mode: 'repair' })).toThrowError(
       expect.objectContaining<Partial<AccessPolicyError>>({
         code: 'repair_requires_administrator',
       }),
@@ -202,6 +202,7 @@ describe('access management policy', () => {
     expect(
       evaluateAccessChange({
         ...base,
+        actorPermissions: [...base.actorPermissions, 'export_reports'],
         mode: 'revoke_managed',
         currentPermissions: ['app_access', 'view_own_reports', 'export_reports'],
         requestedPermissions: ['export_reports'],
