@@ -9,7 +9,13 @@ import { expectBitrixAdapterContract } from './bitrix-adapter-contract-suite';
 
 describe('Bitrix adapter factory', () => {
   it('composes a mock adapter only for the explicit local mock configuration', async () => {
-    const adapter = createBitrixAdapter({ APP_ENV: 'local', BITRIX_ADAPTER: 'mock' });
+    const adapter = createBitrixAdapter({
+      APP_ENV: 'local',
+      BITRIX_ADAPTER: 'mock',
+      APP_ORIGIN: 'https://task-commander.example.test',
+      BITRIX_PORTAL_ORIGIN: 'https://portal.bitrix24.ru',
+      BITRIX_MEDIA_ALLOWED_ORIGINS: 'https://portal.bitrix24.ru',
+    });
 
     await expectBitrixAdapterContract(adapter);
   });

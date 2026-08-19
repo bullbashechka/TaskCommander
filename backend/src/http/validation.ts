@@ -22,11 +22,62 @@ function toFieldErrors(error: z.ZodError): ApiFieldError[] {
   });
 }
 
-export async function parseJsonBody<T>(request: Request, schema: z.ZodType<T>): Promise<T> {
+async function readBoundedRequestText(request: Request, maximumBytes: number): Promise<string> {
+  const declaredLength = request.headers.get('content-length');
+  if (declaredLength !== null) {
+    const parsedLength = Number(declaredLength);
+    if (!Number.isSafeInteger(parsedLength) || parsedLength < 0 || parsedLength > maximumBytes) {
+      throw new ApiHttpError(400, 'INVALID_REQUEST');
+    }
+  }
+
+  if (!request.body) {
+    return '';
+  }
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let receivedBytes = 0;
+
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+
+      receivedBytes += next.value.byteLength;
+      if (receivedBytes > maximumBytes) {
+        await reader.cancel();
+        throw new ApiHttpError(400, 'INVALID_REQUEST');
+      }
+      chunks.push(next.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const body = new Uint8Array(receivedBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(body);
+  } catch {
+    throw new ApiHttpError(400, 'INVALID_REQUEST');
+  }
+}
+
+export async function parseJsonBody<T>(
+  request: Request,
+  schema: z.ZodType<T>,
+  maximumBytes = 65_536,
+): Promise<T> {
   let value: unknown = {};
 
   try {
-    const text = await request.text();
+    const text = await readBoundedRequestText(request, maximumBytes);
     if (text.trim().length > 0) {
       value = JSON.parse(text) as unknown;
     }
@@ -46,4 +97,18 @@ export async function parseJsonBody<T>(request: Request, schema: z.ZodType<T>): 
   }
 
   return parsed.data;
+}
+
+export function requireJsonContentType(request: Request): void {
+  const contentType = request.headers.get('content-type');
+  const mediaType = contentType?.split(';', 1)[0]?.trim().toLowerCase();
+  if (mediaType === 'application/json') return;
+
+  throw new ApiHttpError(400, 'INVALID_REQUEST', [
+    {
+      path: '$',
+      code: 'invalid_content_type',
+      message: 'Ожидается JSON.',
+    },
+  ]);
 }

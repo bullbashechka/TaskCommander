@@ -7,6 +7,10 @@ export interface MockUserRecord {
   isActive: boolean;
   isAdmin: boolean;
   departmentIds: string[];
+  email?: string;
+  position?: string;
+  photoUrl?: string;
+  profileUrl?: string;
 }
 
 export interface MockDepartmentRecord {

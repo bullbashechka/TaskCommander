@@ -32,6 +32,10 @@ const forbiddenKeyNames = new Set([
   'beforevalues',
   'ciphertext',
   'nonce',
+  'apikey',
+  'servicekey',
+  'servicerolekey',
+  'jwt',
 ]);
 
 function normalizeKey(value: string): string {
@@ -41,8 +45,24 @@ function normalizeKey(value: string): string {
 function redactString(value: string): string {
   return value
     .replace(/bearer\s+[a-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
+    .replace(/basic\s+[a-z0-9+/=]+/gi, 'Basic [REDACTED]')
+    .replace(/(?:bearer|basic)%20[a-z0-9._~%+/=-]+/gi, '[REDACTED_ENCODED_AUTH]')
+    .replace(/\beyJ[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\b/g, '[REDACTED_JWT]')
+    .replace(
+      /\beyJ[a-zA-Z0-9_-]{8,}%2[eE][a-zA-Z0-9_-]{8,}%2[eE][a-zA-Z0-9_-]{8,}\b/g,
+      '[REDACTED_JWT]',
+    )
+    .replace(/\b(?:sbp|sb_secret|service_role)_[a-zA-Z0-9_-]{16,}\b/gi, '[REDACTED_KEY]')
+    .replace(/https?%3[aA]%2[fF]%2[fF][^\s%]+%3[aA][^\s%]+%40/gi, '[REDACTED_CREDENTIAL_URL]')
     .replace(/https?:\/\/[^\s]+\/rest\/[^\s]+/gi, '[REDACTED_BITRIX_URL]')
-    .replace(/([?&](?:access_token|refresh_token|token|auth)=)[^&\s]+/gi, '$1[REDACTED]');
+    .replace(
+      /([?&](?:access_token|refresh_token|token|auth|api[_-]?key|key)=)[^&\s]+/gi,
+      '$1[REDACTED]',
+    )
+    .replace(
+      /((?:access_token|refresh_token|token|auth|api[_-]?key|key)%3[dD])[^&\s]+/gi,
+      '$1[REDACTED]',
+    );
 }
 
 export function redactSensitiveAuditData(value: unknown): unknown {
@@ -87,11 +107,15 @@ const auditAppendRequestSchema = z
   })
   .strict();
 
+export function createAuditAppendRequest(value: AuditAppendRequest): AuditAppendRequest {
+  return auditAppendRequestSchema.parse(redactSensitiveAuditData(value));
+}
+
 export class AuditWriter {
   public constructor(private readonly client: Client) {}
 
-  public async append(value: AuditAppendRequest | unknown): Promise<AppendedAuditEvent> {
-    const request = auditAppendRequestSchema.parse(redactSensitiveAuditData(value));
+  public async append(value: AuditAppendRequest): Promise<AppendedAuditEvent> {
+    const request = createAuditAppendRequest(value);
     const input = request.event;
     const actor = input.actor;
     const { data, error } = await this.client.rpc('append_audit_event', {

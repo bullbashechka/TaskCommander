@@ -9,24 +9,35 @@ import {
   taskOutcomeSchema,
   taskOutcomeStatusSchema,
   userAccessSchema,
+  safeHttpsUrlSchema,
   type BulkOperation,
   type BulkOperationDraft,
-  type Permission,
   type TaskOutcome,
+  type TaskOutcomeRefinement,
   type UserAccess,
+  type OperationAuditReasonCode,
 } from '@task-commander/contracts';
 import { type SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 
-import { hasPermission, requirePermission, type DataAccessContext } from './access';
+import {
+  hasPermission,
+  requireDataAccessContext,
+  requireRepositoryPermission,
+  requireSystemConsumerContext,
+  type DataAccessContext,
+  type SystemConsumerContext,
+} from './access';
 import { createNextCursor, resolvePageRequest, type CursorPage, type PageRequest } from './cursor';
 import type { Database, DatabaseTable, Json } from './database.types';
 import { DataAccessError, toDataAccessError } from './errors';
+import { isUrlFromOrigins } from '../runtime/origin-policy';
 
 type Client = SupabaseClient<Database>;
 type OperationRow = DatabaseTable<'bulk_operation'>;
 type TaskResultRow = DatabaseTable<'task_processing_result'>;
 type AuditRow = DatabaseTable<'audit_event'>;
+const taskResultRefinementBatchSize = 100;
 
 const recordTaskResultResponseSchema = z
   .object({
@@ -38,6 +49,7 @@ const recordTaskResultResponseSchema = z
       .object({
         successful: z.number().int().nonnegative(),
         failed: z.number().int().nonnegative(),
+        unconfirmed: z.number().int().nonnegative(),
         conflicted: z.number().int().nonnegative(),
         partiallyApplied: z.number().int().nonnegative(),
         notProcessed: z.number().int().nonnegative(),
@@ -47,9 +59,40 @@ const recordTaskResultResponseSchema = z
   })
   .strict();
 
+const taskResultRefinementRowSchema = z
+  .object({
+    id: z.string().uuid(),
+    source_task_processing_result_id: z.string().uuid(),
+    outcome: z.enum([
+      'success',
+      'error',
+      'conflict',
+      'restored',
+      'restore_error',
+      'partially_applied',
+    ]),
+    applied_field_ids: z.array(z.string().trim().min(1).max(128)).max(256),
+    failed_field_ids: z.array(z.string().trim().min(1).max(128)).max(256),
+    reason_code: z.string().trim().min(1).max(128).nullable(),
+    reason_message: z.string().trim().min(1).max(512).nullable(),
+    can_retry: z.boolean(),
+    result_fingerprint: z.string().regex(/^[0-9a-f]{64}$/),
+    before_version: z.string().trim().min(1).max(256).nullable(),
+    after_version: z.string().trim().min(1).max(256).nullable(),
+    created_at: z.string().datetime({ offset: true }),
+  })
+  .strict();
+
 const operationCommandResponseSchema = z
   .object({
-    disposition: z.enum(['created', 'existing', 'active_operation', 'applied', 'already_applied', 'rejected']),
+    disposition: z.enum([
+      'created',
+      'existing',
+      'active_operation',
+      'applied',
+      'already_applied',
+      'rejected',
+    ]),
     operation: z.record(z.unknown()).optional(),
     reasonCode: z.string().trim().min(1).max(128).optional(),
   })
@@ -61,7 +104,7 @@ const taskResultRowSchema = z
     operation_id: z.string().uuid(),
     task_id: z.string().trim().min(1).max(32),
     task_title: z.string().trim().min(1).max(1024).nullable(),
-    task_url: z.string().url().nullable(),
+    task_url: safeHttpsUrlSchema.nullable(),
     outcome: taskOutcomeStatusSchema,
     requested_field_ids: z.array(z.string().trim().min(1).max(128)).max(256),
     applied_field_ids: z.array(z.string().trim().min(1).max(128)).max(256),
@@ -70,6 +113,7 @@ const taskResultRowSchema = z
     reason_message: z.string().trim().min(1).max(512).nullable(),
     correlation_id: z.string().trim().min(1).max(128).nullable(),
     can_retry: z.boolean(),
+    result_fingerprint: z.string().regex(/^[0-9a-f]{64}$/),
     created_at: z.string().datetime({ offset: true }),
     updated_at: z.string().datetime({ offset: true }),
   })
@@ -109,6 +153,7 @@ export interface EncryptedProtectedResult {
 
 export interface RecordTaskResultInput {
   operationId: string;
+  launchAttempt: number;
   taskId: string;
   title: string | null;
   taskUrl: string | null;
@@ -129,10 +174,25 @@ export interface RecordedTaskResult {
   summary: {
     successful: number;
     failed: number;
+    unconfirmed: number;
     conflicted: number;
     partiallyApplied: number;
     notProcessed: number;
   };
+}
+
+export interface RecordTaskResultRefinementInput {
+  operationId: string;
+  taskId: string;
+  outcome: TaskOutcomeRefinement['outcome'];
+  appliedFieldIds: string[];
+  failedFieldIds: string[];
+  reasonCode: string | null;
+  reasonMessage: string | null;
+  correlationId: string;
+  canRetry: boolean;
+  beforeVersion: string | null;
+  afterVersion: string | null;
 }
 
 export interface CreateOperationInput {
@@ -173,13 +233,18 @@ function scopeKey(context: DataAccessContext, mode: 'own' | 'all' | 'audit'): st
   return `${mode}:${context.portalId}:${context.actorId}`;
 }
 
-function hasAllReportVisibility(context: DataAccessContext): boolean {
-  return hasPermission(context, 'view_all_reports');
+export function getReportVisibility(context: DataAccessContext): 'own' | 'all' {
+  requireDataAccessContext(context);
+  if (hasPermission(context, 'view_all_reports')) {
+    return 'all';
+  }
+  requireRepositoryPermission(context, 'view_own_reports');
+  return 'own';
 }
 
 async function requireData<T>(
-  response: PromiseLike<{ data: T | null; error: unknown | null }>,
-): Promise<T> {
+  response: PromiseLike<{ data: T; error: unknown | null }>,
+): Promise<NonNullable<T>> {
   const { data, error } = await response;
   if (error) {
     throw toDataAccessError(error);
@@ -187,7 +252,7 @@ async function requireData<T>(
   if (data === null) {
     throw new DataAccessError('UNAVAILABLE_RECORD', false);
   }
-  return data;
+  return data as NonNullable<T>;
 }
 
 function mapOperation(row: OperationRow): BulkOperation {
@@ -195,6 +260,8 @@ function mapOperation(row: OperationRow): BulkOperation {
     id: row.id,
     type: operationTypeSchema.parse(row.operation_type),
     status: operationStatusSchema.parse(row.status),
+    stateVersion: row.state_version,
+    launchAttempt: row.launch_attempt,
     initiatorId: row.initiator_id,
     sourceOperationId: row.source_operation_id,
     createdAt: row.created_at,
@@ -210,6 +277,7 @@ function mapOperation(row: OperationRow): BulkOperation {
       unchanged: row.unchanged_count,
       successful: row.successful_count,
       failed: row.failed_count,
+      unconfirmed: row.unconfirmed_count,
       conflicted: row.conflicted_count,
       partiallyApplied: row.partially_applied_count,
       notProcessed: row.not_processed_count,
@@ -223,6 +291,12 @@ function toOperationCommandError(reasonCode: string | undefined): DataAccessErro
   }
   if (reasonCode === 'OPERATION_UNAVAILABLE') {
     return new DataAccessError('UNAVAILABLE_RECORD', false);
+  }
+  if (reasonCode === 'TASK_RESULT_CONFLICT' || reasonCode === 'TASK_RESULT_REFINEMENT_CONFLICT') {
+    return new DataAccessError('TASK_RESULT_MISMATCH', false);
+  }
+  if (reasonCode === 'ACTIVE_OPERATION') {
+    return new DataAccessError('ACTIVE_OPERATION', false);
   }
   return new DataAccessError('INVALID_OPERATION_STATE', false);
 }
@@ -240,7 +314,14 @@ function parseOperationCommand(payload: unknown): {
   };
 }
 
-function mapTaskOutcome(row: TaskResultRow): TaskOutcome {
+function mapTaskOutcome(
+  row: TaskResultRow,
+  trustedPortalOrigins: readonly string[],
+  refinement: TaskOutcomeRefinement | null = null,
+): TaskOutcome {
+  if (row.task_url && !isUrlFromOrigins(row.task_url, trustedPortalOrigins)) {
+    throw new DataAccessError('INTEGRITY', false);
+  }
   return taskOutcomeSchema.parse({
     taskId: row.task_id,
     title: row.task_title,
@@ -252,7 +333,34 @@ function mapTaskOutcome(row: TaskResultRow): TaskOutcome {
     reasonCode: row.reason_code,
     reasonMessage: row.reason_message,
     canRetry: row.can_retry,
+    refinement,
   });
+}
+
+function requireTrustedTaskUrl(
+  value: string | null,
+  trustedPortalOrigins: readonly string[],
+): string | null {
+  if (value === null) return null;
+  const parsed = safeHttpsUrlSchema.safeParse(value);
+  if (!parsed.success || !isUrlFromOrigins(parsed.data, trustedPortalOrigins)) {
+    throw new DataAccessError('INTEGRITY', false);
+  }
+  return parsed.data;
+}
+
+function mapTaskOutcomeRefinement(
+  row: z.infer<typeof taskResultRefinementRowSchema>,
+): TaskOutcomeRefinement {
+  return {
+    outcome: row.outcome,
+    appliedFieldIds: row.applied_field_ids,
+    failedFieldIds: row.failed_field_ids,
+    reasonCode: row.reason_code,
+    reasonMessage: row.reason_message,
+    canRetry: row.can_retry,
+    refinedAt: row.created_at,
+  };
 }
 
 function mapAuditEvent(row: AuditRow): AuditEvent {
@@ -304,12 +412,20 @@ function mapDraft(row: DatabaseTable<'operation_draft'>): BulkOperationDraft {
 }
 
 export class TaskCommanderRepositories {
-  public constructor(private readonly client: Client) {}
+  public constructor(
+    private readonly client: Client,
+    private readonly trustedPortalOrigins: readonly string[],
+  ) {}
 
   private async getOwnedOperation(
-    context: DataAccessContext,
+    context: DataAccessContext | SystemConsumerContext,
     operationId: string,
   ): Promise<BulkOperation> {
+    if ('permissions' in context) {
+      requireDataAccessContext(context);
+    } else {
+      requireSystemConsumerContext(context);
+    }
     const row = await requireData(
       this.client
         .from('bulk_operation')
@@ -323,6 +439,7 @@ export class TaskCommanderRepositories {
   }
 
   public async getCurrentUserAccess(context: DataAccessContext): Promise<UserAccess> {
+    requireDataAccessContext(context);
     const row = await requireData(
       this.client
         .from('user_settings')
@@ -342,7 +459,50 @@ export class TaskCommanderRepositories {
     });
   }
 
+  public async findEffectiveAccessSettings(input: {
+    portalId: string;
+    userId: string;
+  }): Promise<unknown | null> {
+    const { data, error } = await this.client
+      .from('user_settings')
+      .select('access_active, permissions, allowed_field_ids')
+      .eq('portal_id', input.portalId)
+      .eq('user_id', input.userId)
+      .maybeSingle();
+
+    if (error) {
+      throw toDataAccessError(error);
+    }
+    if (data === null) {
+      return null;
+    }
+
+    return {
+      accessActive: data.access_active,
+      permissions: data.permissions,
+      allowedFieldIds: data.allowed_field_ids,
+    };
+  }
+
+  public async findReportAuthorization(input: {
+    portalId: string;
+    operationId: string;
+  }): Promise<{ ownerId: string } | null> {
+    const { data, error } = await this.client
+      .from('bulk_operation')
+      .select('initiator_id')
+      .eq('portal_id', input.portalId)
+      .eq('id', input.operationId)
+      .maybeSingle();
+
+    if (error) {
+      throw toDataAccessError(error);
+    }
+    return data === null ? null : { ownerId: data.initiator_id };
+  }
+
   public async listSavedFilters(context: DataAccessContext): Promise<SavedFilter[]> {
+    requireDataAccessContext(context);
     const rows = await requireData(
       this.client
         .from('saved_filter')
@@ -358,6 +518,7 @@ export class TaskCommanderRepositories {
     context: DataAccessContext,
     input: { name: string; filterPayload: Json },
   ): Promise<SavedFilter> {
+    requireDataAccessContext(context);
     const row = await requireData(
       this.client
         .from('saved_filter')
@@ -377,6 +538,7 @@ export class TaskCommanderRepositories {
     context: DataAccessContext,
     input: { id: string; expectedRevision: number; name: string; filterPayload: Json },
   ): Promise<SavedFilter> {
+    requireDataAccessContext(context);
     const { data, error } = await this.client
       .from('saved_filter')
       .update({
@@ -397,7 +559,7 @@ export class TaskCommanderRepositories {
       throw new DataAccessError('CONFLICT', false);
     }
 
-    const row = data[0];
+    const row = data[0]!;
     return mapSavedFilter(row);
   }
 
@@ -405,6 +567,7 @@ export class TaskCommanderRepositories {
     context: DataAccessContext,
     input: { id: string; expectedRevision: number },
   ): Promise<void> {
+    requireDataAccessContext(context);
     const { error, count } = await this.client
       .from('saved_filter')
       .delete({ count: 'exact' })
@@ -422,6 +585,7 @@ export class TaskCommanderRepositories {
   }
 
   public async getCurrentDraft(context: DataAccessContext): Promise<BulkOperationDraft> {
+    requireDataAccessContext(context);
     const row = await requireData(
       this.client
         .from('operation_draft')
@@ -447,6 +611,7 @@ export class TaskCommanderRepositories {
       replaceExpired?: boolean;
     },
   ): Promise<BulkOperationDraft> {
+    requireDataAccessContext(context);
     const row = await requireData(
       this.client.rpc('save_operation_draft', {
         p_portal_id: context.portalId,
@@ -468,6 +633,16 @@ export class TaskCommanderRepositories {
     context: DataAccessContext,
     input: CreateOperationInput,
   ): Promise<CreatedOperation> {
+    requireRepositoryPermission(context, 'run_bulk_operations');
+    const initialResults = (input.initialResults ?? []).map((result) => ({
+      taskId: result.taskId,
+      title: result.title,
+      taskUrl: requireTrustedTaskUrl(result.taskUrl, this.trustedPortalOrigins),
+      outcome: result.outcome,
+      requestedFieldIds: result.requestedFieldIds,
+      reasonCode: result.reasonCode,
+      reasonMessage: result.reasonMessage,
+    }));
     const payload = await requireData(
       this.client.rpc('create_bulk_operation_idempotent', {
         p_portal_id: context.portalId,
@@ -485,15 +660,7 @@ export class TaskCommanderRepositories {
         p_excluded_count: input.summary.excluded,
         p_unchanged_count: input.summary.unchanged,
         p_correlation_id: input.correlationId,
-        p_initial_results: (input.initialResults ?? []).map((result) => ({
-          taskId: result.taskId,
-          title: result.title,
-          taskUrl: result.taskUrl,
-          outcome: result.outcome,
-          requestedFieldIds: result.requestedFieldIds,
-          reasonCode: result.reasonCode,
-          reasonMessage: result.reasonMessage,
-        })) as Json,
+        p_initial_results: initialResults as Json,
       }),
     );
     const result = parseOperationCommand(payload);
@@ -510,13 +677,15 @@ export class TaskCommanderRepositories {
     context: DataAccessContext,
     operationId: string,
   ): Promise<BulkOperation> {
+    requireDataAccessContext(context);
+    const visibility = getReportVisibility(context);
     let query = this.client
       .from('bulk_operation')
       .select('*')
       .eq('portal_id', context.portalId)
       .eq('id', operationId);
 
-    if (!hasAllReportVisibility(context)) {
+    if (visibility === 'own') {
       query = query.eq('initiator_id', context.actorId);
     }
 
@@ -525,14 +694,16 @@ export class TaskCommanderRepositories {
   }
 
   public async startOperation(
-    context: DataAccessContext,
-    input: { operationId: string; correlationId: string },
+    context: SystemConsumerContext,
+    input: { operationId: string; launchAttempt: number; correlationId: string },
   ): Promise<OperationCommandResult> {
+    requireSystemConsumerContext(context);
     const currentOperation = await this.getOwnedOperation(context, input.operationId);
     const payload = await requireData(
-      this.client.rpc('start_bulk_operation', {
+      this.client.rpc('start_bulk_operation_with_attempt', {
         p_portal_id: context.portalId,
         p_operation_id: currentOperation.id,
+        p_expected_launch_attempt: input.launchAttempt,
         p_correlation_id: input.correlationId,
       }),
     );
@@ -543,25 +714,46 @@ export class TaskCommanderRepositories {
     context: DataAccessContext,
     input: { operationId: string; correlationId: string },
   ): Promise<OperationCommandResult> {
-    return this.requestOperationStop(context, { ...input, kind: 'cancel', reasonCode: null, reasonMessage: null });
+    requireRepositoryPermission(context, 'run_bulk_operations');
+    return this.requestOperationStop(context, { ...input, kind: 'cancel' });
   }
 
   public async requestOperationInterruption(
-    context: DataAccessContext,
-    input: { operationId: string; correlationId: string; reasonCode: string; reasonMessage: string },
+    context: SystemConsumerContext,
+    input: {
+      operationId: string;
+      launchAttempt: number;
+      correlationId: string;
+      reasonCode: OperationAuditReasonCode;
+      reasonMessage: string;
+    },
   ): Promise<OperationCommandResult> {
-    return this.requestOperationStop(context, { ...input, kind: 'interrupt' });
+    requireSystemConsumerContext(context);
+    const operation = await this.getOwnedOperation(context, input.operationId);
+    const payload = await requireData(
+      this.client.rpc('request_bulk_operation_interruption_with_attempt', {
+        p_portal_id: context.portalId,
+        p_operation_id: operation.id,
+        p_expected_launch_attempt: input.launchAttempt,
+        p_reason_code: input.reasonCode,
+        p_reason_message: input.reasonMessage,
+        p_correlation_id: input.correlationId,
+      }),
+    );
+    return this.resolveOperationCommand(payload);
   }
 
   public async finalizeOperation(
-    context: DataAccessContext,
-    input: { operationId: string; correlationId: string },
+    context: SystemConsumerContext,
+    input: { operationId: string; launchAttempt: number; correlationId: string },
   ): Promise<OperationCommandResult> {
+    requireSystemConsumerContext(context);
     const operation = await this.getOwnedOperation(context, input.operationId);
     const payload = await requireData(
-      this.client.rpc('finalize_bulk_operation', {
+      this.client.rpc('finalize_bulk_operation_with_attempt', {
         p_portal_id: context.portalId,
         p_operation_id: operation.id,
+        p_expected_launch_attempt: input.launchAttempt,
         p_correlation_id: input.correlationId,
       }),
     );
@@ -569,12 +761,30 @@ export class TaskCommanderRepositories {
   }
 
   public async failOperationLaunch(
+    context: SystemConsumerContext,
+    input: { operationId: string; launchAttempt: number; correlationId: string },
+  ): Promise<OperationCommandResult> {
+    requireSystemConsumerContext(context);
+    const operation = await this.getOwnedOperation(context, input.operationId);
+    const payload = await requireData(
+      this.client.rpc('fail_bulk_operation_launch_with_attempt', {
+        p_portal_id: context.portalId,
+        p_operation_id: operation.id,
+        p_expected_launch_attempt: input.launchAttempt,
+        p_correlation_id: input.correlationId,
+      }),
+    );
+    return this.resolveOperationCommand(payload);
+  }
+
+  public async retryOperationLaunch(
     context: DataAccessContext,
     input: { operationId: string; correlationId: string },
   ): Promise<OperationCommandResult> {
+    requireRepositoryPermission(context, 'retry_operations');
     const operation = await this.getOwnedOperation(context, input.operationId);
     const payload = await requireData(
-      this.client.rpc('fail_bulk_operation_launch', {
+      this.client.rpc('retry_bulk_operation_launch', {
         p_portal_id: context.portalId,
         p_operation_id: operation.id,
         p_correlation_id: input.correlationId,
@@ -585,22 +795,13 @@ export class TaskCommanderRepositories {
 
   private async requestOperationStop(
     context: DataAccessContext,
-    input: {
-      operationId: string;
-      correlationId: string;
-      kind: 'cancel' | 'interrupt';
-      reasonCode: string | null;
-      reasonMessage: string | null;
-    },
+    input: { operationId: string; correlationId: string; kind: 'cancel' },
   ): Promise<OperationCommandResult> {
     const operation = await this.getOwnedOperation(context, input.operationId);
     const payload = await requireData(
-      this.client.rpc('request_bulk_operation_stop', {
+      this.client.rpc('request_bulk_operation_cancellation', {
         p_portal_id: context.portalId,
         p_operation_id: operation.id,
-        p_stop_kind: input.kind,
-        p_reason_code: input.reasonCode,
-        p_reason_message: input.reasonMessage,
         p_correlation_id: input.correlationId,
       }),
     );
@@ -622,7 +823,8 @@ export class TaskCommanderRepositories {
     context: DataAccessContext,
     request: PageRequest = {},
   ): Promise<CursorPage<BulkOperation>> {
-    const visibility = hasAllReportVisibility(context) ? 'all' : 'own';
+    requireDataAccessContext(context);
+    const visibility = getReportVisibility(context);
     const scope = scopeKey(context, visibility);
     const page = resolvePageRequest(request, 'operation-history', scope);
     let query = this.client
@@ -656,18 +858,21 @@ export class TaskCommanderRepositories {
   }
 
   public async recordTaskResult(
-    context: DataAccessContext,
+    context: SystemConsumerContext,
     input: RecordTaskResultInput,
   ): Promise<RecordedTaskResult> {
+    requireSystemConsumerContext(context);
+    const taskUrl = requireTrustedTaskUrl(input.taskUrl, this.trustedPortalOrigins);
     const operation = await this.getOwnedOperation(context, input.operationId);
     const protectedResult = input.protectedResult;
     const payload = await requireData(
-      this.client.rpc('record_task_processing_result', {
+      this.client.rpc('record_task_processing_result_with_attempt', {
         p_portal_id: context.portalId,
         p_operation_id: operation.id,
+        p_expected_launch_attempt: input.launchAttempt,
         p_task_id: input.taskId,
         p_task_title: input.title,
-        p_task_url: input.taskUrl,
+        p_task_url: taskUrl,
         p_outcome: input.outcome,
         p_requested_field_ids: input.requestedFieldIds,
         p_applied_field_ids: input.appliedFieldIds,
@@ -692,15 +897,53 @@ export class TaskCommanderRepositories {
 
     return {
       inserted: parsed.inserted,
-      result: mapTaskOutcome(resultRow),
+      result: mapTaskOutcome(resultRow, this.trustedPortalOrigins),
       summary: parsed.summary,
     };
+  }
+
+  public async recordTaskResultRefinement(
+    context: SystemConsumerContext,
+    input: RecordTaskResultRefinementInput,
+  ): Promise<{ inserted: boolean; refinement: TaskOutcomeRefinement }> {
+    requireSystemConsumerContext(context);
+    const operation = await this.getOwnedOperation(context, input.operationId);
+    const payload = await requireData(
+      this.client.rpc('record_task_result_refinement_with_versions', {
+        p_portal_id: context.portalId,
+        p_operation_id: operation.id,
+        p_task_id: input.taskId,
+        p_outcome: input.outcome,
+        p_applied_field_ids: input.appliedFieldIds,
+        p_failed_field_ids: input.failedFieldIds,
+        p_reason_code: input.reasonCode,
+        p_reason_message: input.reasonMessage,
+        p_correlation_id: input.correlationId,
+        p_can_retry: input.canRetry,
+        p_before_version: input.beforeVersion,
+        p_after_version: input.afterVersion,
+      }),
+    );
+    const parsed = z
+      .object({
+        inserted: z.boolean(),
+        rejected: z.boolean().optional(),
+        reasonCode: z.string().trim().min(1).max(128).optional(),
+        refinement: taskResultRefinementRowSchema.optional(),
+      })
+      .strict()
+      .parse(payload);
+    if (parsed.rejected || !parsed.refinement) {
+      throw toOperationCommandError(parsed.reasonCode);
+    }
+    return { inserted: parsed.inserted, refinement: mapTaskOutcomeRefinement(parsed.refinement) };
   }
 
   public async listTaskResults(
     context: DataAccessContext,
     operationId: string,
   ): Promise<TaskOutcome[]> {
+    requireDataAccessContext(context);
     const operation = await this.getOperation(context, operationId);
     const rows = await requireData(
       this.client
@@ -709,13 +952,42 @@ export class TaskCommanderRepositories {
         .eq('operation_id', operation.id)
         .order('created_at', { ascending: true }),
     );
-    return rows.map(mapTaskOutcome);
+    const resultIds = rows.map((row) => row.id);
+    const refinementBatches = await Promise.all(
+      Array.from(
+        { length: Math.ceil(resultIds.length / taskResultRefinementBatchSize) },
+        (_, batchIndex) =>
+          requireData(
+            this.client
+              .from('task_result_refinement')
+              .select('*')
+              .in(
+                'source_task_processing_result_id',
+                resultIds.slice(
+                  batchIndex * taskResultRefinementBatchSize,
+                  (batchIndex + 1) * taskResultRefinementBatchSize,
+                ),
+              ),
+          ),
+      ),
+    );
+    const refinements = refinementBatches.flat();
+    const refinementsBySource = new Map(
+      refinements.map((refinement) => [
+        refinement.source_task_processing_result_id,
+        mapTaskOutcomeRefinement(taskResultRefinementRowSchema.parse(refinement)),
+      ]),
+    );
+    return rows.map((row) =>
+      mapTaskOutcome(row, this.trustedPortalOrigins, refinementsBySource.get(row.id) ?? null),
+    );
   }
 
   public async getReportByOperation(
     context: DataAccessContext,
     operationId: string,
   ): Promise<ReportSummary> {
+    requireDataAccessContext(context);
     const operation = await this.getOperation(context, operationId);
     const row = await requireData(
       this.client.from('report').select('*').eq('operation_id', operation.id).maybeSingle(),
@@ -735,7 +1007,8 @@ export class TaskCommanderRepositories {
     context: DataAccessContext,
     request: PageRequest = {},
   ): Promise<CursorPage<AuditEvent>> {
-    requirePermission(context, 'view_audit');
+    requireDataAccessContext(context);
+    requireRepositoryPermission(context, 'view_audit');
     const scope = scopeKey(context, 'audit');
     const page = resolvePageRequest(request, 'audit-events', scope);
     let query = this.client

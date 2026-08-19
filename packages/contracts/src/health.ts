@@ -10,6 +10,12 @@ export const runtimeSubsystemStatuses = [
   'invalid_configuration',
 ] as const;
 
+export const livenessResponseSchema = z
+  .object({
+    status: z.literal('ok'),
+  })
+  .strict();
+
 export const healthResponseSchema = z
   .object({
     status: z.literal('ok'),
@@ -29,6 +35,7 @@ export const healthResponseSchema = z
   .strict();
 
 export type RuntimeSubsystem = (typeof runtimeSubsystems)[number];
+export type LivenessResponse = z.infer<typeof livenessResponseSchema>;
 export type RuntimeReadinessState = (typeof runtimeReadinessStates)[number];
 export type RuntimeSubsystemStatus = (typeof runtimeSubsystemStatuses)[number];
 export type HealthResponse = z.infer<typeof healthResponseSchema>;
@@ -46,6 +53,14 @@ export const healthResponse: HealthResponse = {
     bitrix: 'ready',
   },
 };
+
+export const livenessResponse: LivenessResponse = {
+  status: 'ok',
+};
+
+export function isLivenessResponse(value: unknown): value is LivenessResponse {
+  return livenessResponseSchema.safeParse(value).success;
+}
 
 export function isHealthResponse(value: unknown): value is HealthResponse {
   return healthResponseSchema.safeParse(value).success;

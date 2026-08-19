@@ -5,18 +5,37 @@
   "compatibility_date": "2026-08-06",
   "compatibility_flags": ["nodejs_compat"],
   "secrets": {
-    "required": ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"],
+    "required": [
+      "SUPABASE_URL",
+      "SUPABASE_SERVICE_ROLE_KEY",
+      "MOCK_LAUNCH_SIGNING_SECRET",
+      "SESSION_SIGNING_SECRET",
+      "INTERNAL_READINESS_TOKEN",
+      "LOCAL_RUNTIME_PROBE_TOKEN",
+    ],
   },
   "vars": {
     "APP_ENV": "local",
     "BITRIX_ADAPTER": "mock",
-    "LOCAL_SUPABASE_ALLOWED_HOSTS": "",
+    "SUPABASE_ALLOWED_ORIGINS": "",
+    "APP_ORIGIN": "http://localhost:5173",
+    "BITRIX_PORTAL_ORIGIN": "https://portal.bitrix24.ru",
+    "BITRIX_FRAME_ANCESTORS": "https://portal.bitrix24.ru",
+    "BITRIX_MEDIA_ALLOWED_ORIGINS": "https://portal.bitrix24.ru",
+    "ENABLE_LOCAL_RUNTIME_PROBE": "false",
+    "OPERATIONS_QUEUE_NAME": "task-commander-local-operations-v1",
+    "ACCESS_COMMANDS_QUEUE_NAME": "task-commander-local-access-commands-v1",
   },
   "queues": {
     "producers": [
       {
         "binding": "OPERATIONS_QUEUE",
         "queue": "task-commander-local-operations-v1",
+        "remote": false,
+      },
+      {
+        "binding": "ACCESS_COMMANDS_QUEUE",
+        "queue": "task-commander-local-access-commands-v1",
         "remote": false,
       },
     ],
@@ -28,12 +47,30 @@
       "remote": false,
     },
   ],
+  "ratelimits": [
+    {
+      "name": "SESSION_RATE_LIMITER",
+      "namespace_id": "13001",
+      "simple": { "limit": 30, "period": 60 },
+    },
+    {
+      "name": "PROBE_RATE_LIMITER",
+      "namespace_id": "13002",
+      "simple": { "limit": 10, "period": 60 },
+    },
+    {
+      "name": "ACCESS_FANOUT_RATE_LIMITER",
+      "namespace_id": "13003",
+      "simple": { "limit": 60, "period": 60 },
+    },
+  ],
   "triggers": {
     "crons": ["*/5 * * * *"],
   },
   "assets": {
+    "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*"],
+    "run_worker_first": true,
   },
   "observability": {
     "enabled": true,

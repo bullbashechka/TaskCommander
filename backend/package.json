@@ -6,7 +6,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "cf-typegen": "wrangler types ./worker-configuration.d.ts --config wrangler.jsonc"
+    "cf-typegen": "wrangler types ./worker-configuration.d.ts --env-interface ApiEnvironment --strict-vars false --config wrangler.jsonc && wrangler types ./consumer-configuration.d.ts --env-interface ConsumerEnvironment --strict-vars false --include-runtime false --config wrangler.consumer.jsonc"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.112.3",
@@ -15,9 +15,9 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.11.0",
+    "@cloudflare/vitest-pool-workers": "^0.21.3",
     "typescript": "^5.0.0",
-    "vitest": "~3.2.0",
-    "wrangler": "^4.0.0"
+    "vitest": "^4.1.0",
+    "wrangler": "^4.123.0"
   }
 }

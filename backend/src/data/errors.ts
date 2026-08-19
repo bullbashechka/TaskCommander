@@ -6,7 +6,9 @@ export type DataAccessErrorCode =
   | 'INTEGRITY'
   | 'ACTIVE_OPERATION'
   | 'IDEMPOTENCY_MISMATCH'
-  | 'INVALID_OPERATION_STATE';
+  | 'TASK_RESULT_MISMATCH'
+  | 'INVALID_OPERATION_STATE'
+  | 'RATE_LIMITED';
 
 export class DataAccessError extends Error {
   public constructor(
@@ -26,6 +28,10 @@ export function toDataAccessError(error: unknown): DataAccessError {
     const candidate = error as { code?: unknown; message?: unknown };
     const code = typeof candidate.code === 'string' ? candidate.code : '';
     const message = typeof candidate.message === 'string' ? candidate.message : '';
+
+    if (code === 'P0001' && message.startsWith('TC_ACCESS_RATE_LIMITED')) {
+      return new DataAccessError('RATE_LIMITED', true);
+    }
 
     if (code === 'P0001' && message.startsWith('TC_AUDIT_EVENT_CONFLICT')) {
       return new DataAccessError('INTEGRITY', false);

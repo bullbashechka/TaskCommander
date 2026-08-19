@@ -1,6 +1,6 @@
 begin;
 
-select plan(17);
+select plan(19);
 
 \ir ../rollback/20260811000000_task_commander_schema.down.sql
 
@@ -10,6 +10,7 @@ select hasnt_table('public', 'saved_filter', 'saved filters are removed by rollb
 select hasnt_table('public', 'operation_draft', 'operation drafts are removed by rollback');
 select hasnt_table('public', 'bulk_operation', 'bulk operations are removed by rollback');
 select hasnt_table('public', 'task_processing_result', 'task results are removed by rollback');
+select hasnt_table('public', 'task_result_refinement', 'task result refinements are removed by rollback');
 select hasnt_table('public', 'protected_task_result', 'protected results are removed by rollback');
 select hasnt_table('public', 'report', 'reports are removed by rollback');
 select hasnt_table('public', 'report_artifact', 'report artifacts are removed by rollback');
@@ -29,6 +30,11 @@ select hasnt_function(
   'public',
   'prevent_task_processing_result_identity_change',
   'task result immutability helper is removed by rollback'
+);
+select hasnt_function(
+  'public',
+  'record_task_processing_result',
+  'task result writer is removed by rollback'
 );
 select hasnt_function(
   'public',

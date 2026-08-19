@@ -324,7 +324,7 @@ function compareValues(
   return leftValue.localeCompare(rightValue, 'ru', { numeric: true, sensitivity: 'base' });
 }
 
-function toSummary(task: MockTask) {
+function toSummary(task: MockTask): TaskSearchPage['items'][number] {
   if (task.status === 'completed') {
     throw new Error('Completed tasks cannot be returned as mutable task summaries.');
   }

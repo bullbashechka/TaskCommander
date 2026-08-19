@@ -1,8 +1,8 @@
-import { isHealthResponse, type HealthResponse } from '@task-commander/contracts';
+import { isLivenessResponse, type LivenessResponse } from '@task-commander/contracts';
 
 import { ru } from '@/locales/ru';
 
-export async function fetchHealth(): Promise<HealthResponse> {
+export async function fetchHealth(): Promise<LivenessResponse> {
   const response = await fetch('/api/health', {
     headers: { accept: 'application/json' },
   });
@@ -12,7 +12,7 @@ export async function fetchHealth(): Promise<HealthResponse> {
   }
 
   const payload: unknown = await response.json();
-  if (!isHealthResponse(payload)) {
+  if (!isLivenessResponse(payload)) {
     throw new Error(ru.health.unexpectedResponse);
   }
 

@@ -200,9 +200,10 @@ select is(
 );
 
 select is(
-  public.start_bulk_operation(
+  public.start_bulk_operation_with_attempt(
     'data-access-test',
     '00000000-0000-4000-8000-000000000701',
+    1,
     'TC-123e4567-e89b-42d3-a456-426614174701'
   ) ->> 'disposition',
   'already_applied',

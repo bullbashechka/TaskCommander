@@ -4,9 +4,28 @@ import {
   bitrixIdSchema,
   fieldIdSchema,
   isoDateTimeSchema,
+  safeHttpsUrlSchema,
   taskFieldKindSchema,
   taskFilterSchema,
 } from '@task-commander/contracts';
+
+const loopbackApplicationUrlSchema = z
+  .string()
+  .url()
+  .superRefine((value, context) => {
+    const url = new URL(value);
+    const hostname = url.hostname.toLowerCase();
+    const loopback =
+      hostname === 'localhost' ||
+      hostname.endsWith('.localhost') ||
+      hostname === '[::1]' ||
+      hostname === '::1' ||
+      /^127(?:\.\d{1,3}){3}$/.test(hostname);
+    if (url.protocol !== 'http:' || !loopback || url.username || url.password) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid local application URL.' });
+    }
+  });
+const applicationUrlSchema = z.union([safeHttpsUrlSchema, loopbackApplicationUrlSchema]);
 
 export const bitrixTaskValueSchema = z.union([
   z.string().max(4096),
@@ -65,7 +84,7 @@ export const taskSummarySchema = z
   .object({
     id: bitrixIdSchema,
     title: z.string().trim().min(1).max(1024),
-    taskUrl: z.string().url(),
+    taskUrl: safeHttpsUrlSchema,
     parentId: bitrixIdSchema.nullable(),
     status: z.enum(['pending', 'in_progress', 'pending_review', 'deferred']),
     responsibleId: bitrixIdSchema,
@@ -100,7 +119,7 @@ export const taskChangeSnapshotSchema = z
   .object({
     taskId: bitrixIdSchema,
     title: z.string().trim().min(1).max(1024).nullable(),
-    taskUrl: z.string().url().nullable(),
+    taskUrl: safeHttpsUrlSchema.nullable(),
     status: z.enum(['pending', 'in_progress', 'pending_review', 'deferred', 'completed']),
     values: z.record(fieldIdSchema, bitrixTaskValueSchema),
     editableFieldIds: z.array(fieldIdSchema).max(256),
@@ -120,10 +139,9 @@ export const taskApplyRequestSchema = z
   .object({
     taskId: bitrixIdSchema,
     expectedRelevantVersion: z.string().trim().min(1).max(256),
-    targetValues: z.record(fieldIdSchema, bitrixTaskValueSchema).refine(
-      (values) => Object.keys(values).length > 0,
-      'At least one target value is required.',
-    ),
+    targetValues: z
+      .record(fieldIdSchema, bitrixTaskValueSchema)
+      .refine((values) => Object.keys(values).length > 0, 'At least one target value is required.'),
   })
   .strict();
 
@@ -160,6 +178,57 @@ export const bitrixUserSchema = z
   })
   .strict();
 
+export const bitrixAccessStatusSchema = z.discriminatedUnion('state', [
+  z
+    .object({
+      state: z.enum(['active', 'inactive']),
+      user: bitrixUserSchema,
+    })
+    .strict(),
+  z
+    .object({
+      state: z.literal('missing'),
+      userId: bitrixIdSchema,
+    })
+    .strict(),
+]);
+
+export const bitrixEmployeeProfileSchema = bitrixUserSchema.extend({
+  email: z.string().email().max(320).nullable(),
+  position: z.string().trim().min(1).max(256).nullable(),
+  photoUrl: safeHttpsUrlSchema.nullable(),
+  profileUrl: safeHttpsUrlSchema.nullable(),
+});
+
+export const employeeSearchRequestSchema = z
+  .object({
+    query: z.string().trim().max(256).default(''),
+    cursor: z.string().trim().min(1).max(128).nullable().default(null),
+    pageSize: z.number().int().min(1).max(50).default(50),
+    departmentId: bitrixIdSchema.nullable().default(null),
+    includeInactive: z.boolean().default(true),
+  })
+  .strict();
+
+export const employeeSearchPageSchema = z
+  .object({
+    items: z.array(bitrixEmployeeProfileSchema).max(50),
+    nextCursor: z.string().trim().min(1).max(128).nullable(),
+    total: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const departmentMemberSnapshotSchema = z
+  .object({
+    departmentId: bitrixIdSchema,
+    capturedAt: z.string().datetime({ offset: true }),
+    memberIds: z
+      .array(bitrixIdSchema)
+      .max(10_000)
+      .refine((ids) => new Set(ids).size === ids.length),
+  })
+  .strict();
+
 export const bitrixDepartmentSchema = z
   .object({
     id: bitrixIdSchema,
@@ -183,7 +252,7 @@ export const notificationRequestSchema = z
     recipientId: bitrixIdSchema,
     deduplicationKey: z.string().trim().min(1).max(256),
     message: z.string().trim().min(1).max(4096),
-    operationUrl: z.string().url(),
+    operationUrl: applicationUrlSchema,
   })
   .strict();
 
@@ -193,7 +262,7 @@ export const notificationSchema = z
     recipientId: bitrixIdSchema,
     deduplicationKey: z.string().trim().min(1).max(256),
     message: z.string().trim().min(1).max(4096),
-    operationUrl: z.string().url(),
+    operationUrl: applicationUrlSchema,
   })
   .strict();
 
@@ -222,7 +291,7 @@ export const diskFileSchema = z
     operationId: z.string().uuid(),
     format: z.enum(['xlsx', 'csv']),
     name: z.string().trim().min(1).max(512),
-    url: z.string().url(),
+    url: safeHttpsUrlSchema,
     folder: z.enum(['active', 'archive']),
     contentHash: z.string().trim().min(1).max(256),
     access: z.array(reportAccessGrantSchema).max(256),

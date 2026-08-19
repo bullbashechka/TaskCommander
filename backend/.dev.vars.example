@@ -2,9 +2,25 @@
 APP_ENV=local
 BITRIX_ADAPTER=mock
 
+# Separate local-only secrets. Each value must be at least 32 UTF-8 bytes.
+# Never use either value in a browser bundle, log, fixture snapshot, or production configuration.
+MOCK_LAUNCH_SIGNING_SECRET=
+SESSION_SIGNING_SECRET=
+
 # Set all three values only when developing a Supabase-dependent subsystem.
 # For a remote Supabase development project, use its HTTPS Project URL and service-role key.
-# LOCAL_SUPABASE_ALLOWED_HOSTS accepts the exact project host, without a protocol.
+# SUPABASE_ALLOWED_ORIGINS accepts exact HTTPS origins, separated by commas.
 SUPABASE_URL=
 SUPABASE_SERVICE_ROLE_KEY=
-LOCAL_SUPABASE_ALLOWED_HOSTS=
+SUPABASE_ALLOWED_ORIGINS=
+
+# Exact browser and Bitrix origins. Do not include paths, query parameters, or credentials.
+APP_ORIGIN=http://localhost:5173
+BITRIX_PORTAL_ORIGIN=https://portal.bitrix24.ru
+BITRIX_FRAME_ANCESTORS=https://portal.bitrix24.ru
+BITRIX_MEDIA_ALLOWED_ORIGINS=https://portal.bitrix24.ru
+
+# Local probe is intentionally opt-in and requires a separate secret header.
+ENABLE_LOCAL_RUNTIME_PROBE=false
+LOCAL_RUNTIME_PROBE_TOKEN=
+INTERNAL_READINESS_TOKEN=

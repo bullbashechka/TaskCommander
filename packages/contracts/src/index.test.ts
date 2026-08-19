@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   apiErrorResponseSchema,
+  createSessionRequestSchema,
   bulkOperationSchema,
   bulkOperationDraftSchema,
   bulkChangeCommandSchema,
@@ -10,6 +11,8 @@ import {
   operationStatusSchema,
   reportArtifactStatusSchema,
   reportTaskEntrySchema,
+  safeHttpsUrlSchema,
+  taskOutcomeSchema,
   taskOutcomeStatusSchema,
 } from './index';
 
@@ -24,6 +27,35 @@ describe('health contract', () => {
 });
 
 describe('domain contracts', () => {
+  it('accepts only credential-free HTTPS URLs on the shared boundary', () => {
+    expect(safeHttpsUrlSchema.safeParse('https://portal.example/task/42').success).toBe(true);
+    for (const value of [
+      'http://portal.example/task/42',
+      'javascript:alert(1)',
+      'data:text/plain,secret',
+      'https://user:password@portal.example/task/42',
+      'https://portal.example:8443/task/42',
+    ]) {
+      expect(safeHttpsUrlSchema.safeParse(value).success).toBe(false);
+    }
+  });
+
+  it('accepts only a bounded strict session creation request', () => {
+    expect(createSessionRequestSchema.safeParse({ launchContext: 'signed-context' }).success).toBe(
+      true,
+    );
+    expect(createSessionRequestSchema.safeParse({ launchContext: '' }).success).toBe(false);
+    expect(createSessionRequestSchema.safeParse({ launchContext: 'x'.repeat(4_097) }).success).toBe(
+      false,
+    );
+    expect(
+      createSessionRequestSchema.safeParse({
+        launchContext: 'signed-context',
+        extra: true,
+      }).success,
+    ).toBe(false);
+  });
+
   it('accepts every agreed operation and task outcome status', () => {
     const operationStatuses = [
       'launching',
@@ -37,6 +69,7 @@ describe('domain contracts', () => {
     const taskOutcomeStatuses = [
       'success',
       'error',
+      'unconfirmed',
       'conflict',
       'excluded_by_preflight',
       'not_processed',
@@ -77,6 +110,33 @@ describe('domain contracts', () => {
   it('accepts the agreed task outcome extensions', () => {
     expect(taskOutcomeStatusSchema.safeParse('no_change').success).toBe(true);
     expect(taskOutcomeStatusSchema.safeParse('partially_applied').success).toBe(true);
+    expect(taskOutcomeStatusSchema.safeParse('unconfirmed').success).toBe(true);
+  });
+
+  it('exposes a late refinement without rewriting the source outcome', () => {
+    expect(
+      taskOutcomeSchema.safeParse({
+        taskId: '42',
+        title: 'Visible task',
+        taskUrl: 'https://example.test/task/42',
+        outcome: 'unconfirmed',
+        changedFieldIds: ['deadline'],
+        appliedFieldIds: [],
+        failedFieldIds: [],
+        reasonCode: 'UPSTREAM_OUTCOME_UNKNOWN',
+        reasonMessage: 'The update result could not be confirmed.',
+        canRetry: false,
+        refinement: {
+          outcome: 'success',
+          appliedFieldIds: ['deadline'],
+          failedFieldIds: [],
+          reasonCode: null,
+          reasonMessage: null,
+          canRetry: false,
+          refinedAt: '2026-08-12T09:00:00+05:00',
+        },
+      }).success,
+    ).toBe(true);
   });
 
   it('rejects an invalid mixed date change command', () => {
@@ -147,6 +207,8 @@ describe('domain contracts', () => {
         id: '123e4567-e89b-42d3-a456-426614174000',
         type: 'bulk_change',
         status: 'running',
+        stateVersion: 2,
+        launchAttempt: 1,
         initiatorId: '10',
         sourceOperationId: null,
         createdAt: '2026-08-10T09:00:00+05:00',
@@ -162,6 +224,7 @@ describe('domain contracts', () => {
           unchanged: 0,
           successful: 0,
           failed: 0,
+          unconfirmed: 0,
           conflicted: 0,
           partiallyApplied: 0,
           notProcessed: 0,

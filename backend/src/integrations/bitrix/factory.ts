@@ -1,6 +1,7 @@
 import type { RuntimeEnvironment } from '../../runtime/configuration';
 import type { BitrixAdapter } from './contract';
 import { createMockBitrixAdapter } from './mock';
+import { enforceBitrixOriginPolicy } from './trusted-origin-adapter';
 
 export class BitrixAdapterConfigurationError extends Error {}
 
@@ -8,9 +9,12 @@ export function isSupportedBitrixAdapterConfiguration(env: RuntimeEnvironment): 
   return env.APP_ENV === 'local' && env.BITRIX_ADAPTER === 'mock';
 }
 
-export function createBitrixAdapter(env: RuntimeEnvironment): BitrixAdapter {
+export function createBitrixAdapter(
+  env: RuntimeEnvironment,
+  options: { currentUserId?: string } = {},
+): BitrixAdapter {
   if (isSupportedBitrixAdapterConfiguration(env)) {
-    return createMockBitrixAdapter();
+    return enforceBitrixOriginPolicy(createMockBitrixAdapter(options), env);
   }
 
   throw new BitrixAdapterConfigurationError(

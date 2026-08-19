@@ -8,6 +8,7 @@ import {
   nonNegativeIntegerSchema,
   operationIdSchema,
   positiveIntegerSchema,
+  safeHttpsUrlSchema,
 } from './primitives';
 import { bulkChangeCommandSchema } from './task-change';
 
@@ -22,6 +23,7 @@ export const preflightDispositionSchema = z.enum([
 export const taskOutcomeStatusSchema = z.enum([
   'success',
   'error',
+  'unconfirmed',
   'conflict',
   'excluded_by_preflight',
   'not_processed',
@@ -51,9 +53,29 @@ export const operationSummarySchema = z
     unchanged: nonNegativeIntegerSchema,
     successful: nonNegativeIntegerSchema,
     failed: nonNegativeIntegerSchema,
+    unconfirmed: nonNegativeIntegerSchema,
     conflicted: nonNegativeIntegerSchema,
     partiallyApplied: nonNegativeIntegerSchema,
     notProcessed: nonNegativeIntegerSchema,
+  })
+  .strict();
+
+export const taskOutcomeRefinementSchema = z
+  .object({
+    outcome: z.enum([
+      'success',
+      'error',
+      'conflict',
+      'restored',
+      'restore_error',
+      'partially_applied',
+    ]),
+    appliedFieldIds: z.array(fieldIdSchema).max(256),
+    failedFieldIds: z.array(fieldIdSchema).max(256),
+    reasonCode: z.string().trim().min(1).max(128).nullable(),
+    reasonMessage: z.string().trim().min(1).max(512).nullable(),
+    canRetry: z.boolean(),
+    refinedAt: isoDateTimeSchema,
   })
   .strict();
 
@@ -61,7 +83,7 @@ export const preflightTaskEntrySchema = z
   .object({
     taskId: bitrixIdSchema,
     title: z.string().trim().min(1).max(1024).nullable(),
-    taskUrl: z.string().url().nullable(),
+    taskUrl: safeHttpsUrlSchema.nullable(),
     disposition: preflightDispositionSchema,
     changedFieldIds: z.array(fieldIdSchema).max(256),
     reasonCode: z.string().trim().min(1).max(128).nullable(),
@@ -98,7 +120,7 @@ export const taskOutcomeSchema = z
   .object({
     taskId: bitrixIdSchema,
     title: z.string().trim().min(1).max(1024).nullable(),
-    taskUrl: z.string().url().nullable(),
+    taskUrl: safeHttpsUrlSchema.nullable(),
     outcome: taskOutcomeStatusSchema,
     changedFieldIds: z.array(fieldIdSchema).max(256),
     appliedFieldIds: z.array(fieldIdSchema).max(256),
@@ -106,6 +128,7 @@ export const taskOutcomeSchema = z
     reasonCode: z.string().trim().min(1).max(128).nullable(),
     reasonMessage: z.string().trim().min(1).max(512).nullable(),
     canRetry: z.boolean(),
+    refinement: taskOutcomeRefinementSchema.nullable(),
   })
   .strict();
 
@@ -114,6 +137,8 @@ export const bulkOperationSchema = z
     id: operationIdSchema,
     type: operationTypeSchema,
     status: operationStatusSchema,
+    stateVersion: positiveIntegerSchema,
+    launchAttempt: positiveIntegerSchema,
     initiatorId: bitrixIdSchema,
     sourceOperationId: operationIdSchema.nullable(),
     createdAt: isoDateTimeSchema,
@@ -139,7 +164,7 @@ export const reportArtifactSchema = z
   .object({
     format: z.enum(['xlsx', 'csv']),
     status: reportArtifactStatusSchema,
-    diskUrl: z.string().url().nullable(),
+    diskUrl: safeHttpsUrlSchema.nullable(),
     createdAt: isoDateTimeSchema.nullable(),
   })
   .strict();
@@ -148,7 +173,7 @@ export const reportTaskEntrySchema = z
   .object({
     taskId: bitrixIdSchema,
     title: z.string().trim().min(1).max(1024).nullable(),
-    taskUrl: z.string().url().nullable(),
+    taskUrl: safeHttpsUrlSchema.nullable(),
     outcome: taskOutcomeStatusSchema,
     changedFieldIds: z.array(fieldIdSchema).max(256),
     reasonCode: z.string().trim().min(1).max(128).nullable().optional(),
@@ -159,3 +184,4 @@ export const reportTaskEntrySchema = z
 export type BulkOperationDraft = z.infer<typeof bulkOperationDraftSchema>;
 export type BulkOperation = z.infer<typeof bulkOperationSchema>;
 export type TaskOutcome = z.infer<typeof taskOutcomeSchema>;
+export type TaskOutcomeRefinement = z.infer<typeof taskOutcomeRefinementSchema>;

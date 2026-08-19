@@ -1,21 +1,42 @@
 import { describe, expect, it } from 'vitest';
 
-import { createDataAccessContext, requirePermission } from '../src/data/access';
+import {
+  createDataAccessContext,
+  createSystemConsumerContext,
+  requirePermission,
+  resolveEffectiveAccess,
+} from '../src/data/access';
 import { createServerSupabaseClient } from '../src/data/client';
 import { createNextCursor, resolvePageRequest } from '../src/data/cursor';
 import { DataAccessError, toDataAccessError } from '../src/data/errors';
+import { getReportVisibility, TaskCommanderRepositories } from '../src/data/repositories';
+import { createVerifiedTestPrincipal } from './verified-session-test-helper';
 
-const context = createDataAccessContext({
-  portalId: 'test-portal',
-  actorId: '1001',
-  permissions: ['view_own_reports'],
-});
+async function contextWith(permissions: string[]) {
+  return createDataAccessContext(
+    await resolveEffectiveAccess(
+      await createVerifiedTestPrincipal({
+        portalId: 'test-portal',
+        userId: '1001',
+        displayName: 'Test user',
+        isBitrixAdmin: false,
+      }),
+      {
+        findEffectiveAccessSettings: async () => ({
+          accessActive: true,
+          permissions,
+          allowedFieldIds: [],
+        }),
+      },
+    ),
+  );
+}
 
 describe('data access boundaries', () => {
   it('rejects a malformed or cross-scope cursor', () => {
-    expect(() => resolvePageRequest({ cursor: 'not-a-cursor' }, 'operation-history', 'own:a')).toThrow(
-      DataAccessError,
-    );
+    expect(() =>
+      resolvePageRequest({ cursor: 'not-a-cursor' }, 'operation-history', 'own:a'),
+    ).toThrow(DataAccessError);
 
     const cursor = createNextCursor(
       'operation-history',
@@ -50,8 +71,136 @@ describe('data access boundaries', () => {
     });
   });
 
-  it('fails closed when a permission is absent', () => {
-    expect(() => requirePermission(context, 'view_audit')).toThrow(DataAccessError);
+  it('fails closed when a permission is absent', async () => {
+    const context = await contextWith(['app_access', 'view_own_reports']);
+    expect(() => requirePermission(context, 'view_audit')).toThrow();
+  });
+
+  it('requires explicit own or all report visibility', async () => {
+    expect(getReportVisibility(await contextWith(['app_access', 'view_own_reports']))).toBe('own');
+    expect(getReportVisibility(await contextWith(['app_access', 'view_all_reports']))).toBe('all');
+    const noVisibility = await contextWith(['app_access']);
+    expect(() => getReportVisibility(noVisibility)).toThrow(DataAccessError);
+    expect(() => getReportVisibility({ ...noVisibility } as typeof noVisibility)).toThrow(
+      DataAccessError,
+    );
+  });
+
+  it('rejects forged repository contexts before representative read or write client access', async () => {
+    let clientAccesses = 0;
+    const client = new Proxy(
+      {},
+      {
+        get: () => {
+          clientAccesses += 1;
+          throw new Error('The storage client must not be reached.');
+        },
+      },
+    );
+    const repositories = new TaskCommanderRepositories(client as never, [
+      'https://portal.bitrix24.ru',
+    ]);
+    const trusted = await contextWith(['app_access']);
+    const forged = { ...trusted } as typeof trusted;
+
+    await expect(repositories.listSavedFilters(forged)).rejects.toMatchObject({
+      code: 'UNAVAILABLE_RECORD',
+    });
+    await expect(
+      repositories.createSavedFilter(forged, { name: 'Forged', filterPayload: {} }),
+    ).rejects.toMatchObject({ code: 'UNAVAILABLE_RECORD' });
+    expect(clientAccesses).toBe(0);
+  });
+
+  it('keeps user mutations and worker transitions on distinct capabilities', async () => {
+    let clientAccesses = 0;
+    const client = new Proxy(
+      {},
+      {
+        get: () => {
+          clientAccesses += 1;
+          throw new Error('The storage client must not be reached.');
+        },
+      },
+    );
+    const repositories = new TaskCommanderRepositories(client as never, [
+      'https://portal.bitrix24.ru',
+    ]);
+    const user = await contextWith(['app_access', 'run_bulk_operations']);
+    const system = createSystemConsumerContext('test-portal', '1001');
+
+    await expect(repositories.recordTaskResult(user as never, {} as never)).rejects.toMatchObject({
+      code: 'UNAVAILABLE_RECORD',
+    });
+    await expect(repositories.startOperation(user as never, {} as never)).rejects.toMatchObject({
+      code: 'UNAVAILABLE_RECORD',
+    });
+    await expect(
+      repositories.createSavedFilter(system as never, { name: 'System', filterPayload: {} }),
+    ).rejects.toMatchObject({ code: 'UNAVAILABLE_RECORD' });
+    expect(clientAccesses).toBe(0);
+  });
+
+  it('rejects foreign task URLs before any storage call', async () => {
+    let clientAccesses = 0;
+    const client = new Proxy(
+      {},
+      {
+        get: () => {
+          clientAccesses += 1;
+          throw new Error('The storage client must not be reached.');
+        },
+      },
+    );
+    const repositories = new TaskCommanderRepositories(client as never, [
+      'https://portal.bitrix24.ru',
+    ]);
+    const user = await contextWith(['app_access', 'run_bulk_operations']);
+    const system = createSystemConsumerContext('test-portal', '1001');
+
+    await expect(
+      repositories.createOperation(user, {
+        type: 'bulk_change',
+        initiatorDisplayName: 'Test user',
+        sourceOperationId: null,
+        idempotencyKey: crypto.randomUUID(),
+        filterSnapshot: null,
+        selectedTaskIds: ['42'],
+        changes: [],
+        preflightSnapshot: {},
+        summary: { selected: 1, eligible: 0, excluded: 1, unchanged: 0 },
+        correlationId: 'TC-123e4567-e89b-42d3-a456-426614174000',
+        initialResults: [
+          {
+            taskId: '42',
+            title: 'Foreign task',
+            taskUrl: 'https://attacker.example/task/42',
+            outcome: 'excluded_by_preflight',
+            requestedFieldIds: [],
+            reasonCode: 'UPSTREAM_FAILURE',
+            reasonMessage: null,
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'INTEGRITY' });
+    await expect(
+      repositories.recordTaskResult(system, {
+        operationId: crypto.randomUUID(),
+        launchAttempt: 1,
+        taskId: '42',
+        title: 'Foreign task',
+        taskUrl: 'https://attacker.example/task/42',
+        outcome: 'success',
+        requestedFieldIds: [],
+        appliedFieldIds: [],
+        failedFieldIds: [],
+        reasonCode: null,
+        reasonMessage: null,
+        correlationId: null,
+        canRetry: false,
+      }),
+    ).rejects.toMatchObject({ code: 'INTEGRITY' });
+    expect(clientAccesses).toBe(0);
   });
 
   it('classifies stale conditional writes as conflicts', () => {
@@ -67,7 +216,7 @@ describe('data access boundaries', () => {
         BITRIX_ADAPTER: 'mock',
         SUPABASE_URL: 'https://unexpected.supabase.test',
         SUPABASE_SERVICE_ROLE_KEY: 'test-only-key',
-        LOCAL_SUPABASE_ALLOWED_HOSTS: 'approved.supabase.test',
+        SUPABASE_ALLOWED_ORIGINS: 'https://approved.supabase.test',
       }),
     ).toThrow(DataAccessError);
   });
@@ -79,8 +228,32 @@ describe('data access boundaries', () => {
         BITRIX_ADAPTER: 'mock',
         SUPABASE_URL: 'http://dev.supabase.test',
         SUPABASE_SERVICE_ROLE_KEY: 'test-only-key',
-        LOCAL_SUPABASE_ALLOWED_HOSTS: 'dev.supabase.test',
+        SUPABASE_ALLOWED_ORIGINS: 'https://dev.supabase.test',
       }),
+    ).toThrow(DataAccessError);
+  });
+
+  it.each([
+    'https://user:password@approved.supabase.test',
+    'https://approved.supabase.test/unexpected',
+    'https://approved.supabase.test?token=unexpected',
+    'https://approved.supabase.test#unexpected',
+    'https://approved.supabase.test:8443',
+  ])('rejects hostile Supabase URLs before creating a client: %s', (url) => {
+    const requestFetch = () => {
+      throw new Error('Network access must not happen.');
+    };
+    expect(() =>
+      createServerSupabaseClient(
+        {
+          APP_ENV: 'local',
+          BITRIX_ADAPTER: 'mock',
+          SUPABASE_URL: url,
+          SUPABASE_SERVICE_ROLE_KEY: 'test-only-key',
+          SUPABASE_ALLOWED_ORIGINS: 'https://approved.supabase.test',
+        },
+        requestFetch,
+      ),
     ).toThrow(DataAccessError);
   });
 

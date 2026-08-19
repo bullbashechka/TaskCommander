@@ -1,16 +1,76 @@
 import { z } from 'zod';
 
+import { permissionSchema } from './access';
+
 import {
   bitrixIdSchema,
   correlationIdSchema,
   fieldIdSchema,
   isoDateTimeSchema,
   nonNegativeIntegerSchema,
+  positiveIntegerSchema,
 } from './primitives';
 
 const displayNameSchema = z.string().trim().min(1).max(256);
 const subjectIdSchema = z.string().trim().min(1).max(256);
 const reasonCodeSchema = z.string().trim().min(1).max(128);
+export const operationAuditReasonCodeSchema = z.enum([
+  'ACTIVE_OPERATION',
+  'IDEMPOTENCY_PAYLOAD_MISMATCH',
+  'INITIAL_RESULTS_COUNT_MISMATCH',
+  'INITIAL_RESULTS_INVALID',
+  'INTERRUPTED',
+  'LAUNCH_FAILED',
+  'OPERATION_FINALIZATION_INCOMPLETE',
+  'OPERATION_FINALIZATION_REJECTED',
+  'OPERATION_LAUNCH_ATTEMPT_STALE',
+  'OPERATION_LAUNCH_FAILURE_REJECTED',
+  'OPERATION_LAUNCH_RETRY_REJECTED',
+  'OPERATION_REQUEST_INVALID',
+  'OPERATION_START_REJECTED',
+  'OPERATION_UNAVAILABLE',
+  'PROTECTED_RESULT_PAYLOAD_INVALID',
+  'STOP_KIND_INVALID',
+  'TASK_RESULT_CONFLICT',
+  'TASK_RESULT_FIELDS_INVALID',
+  'TASK_RESULT_REFINEMENT_CONFLICT',
+  'TASK_RESULT_REFINEMENT_FIELDS_INVALID',
+  'TASK_RESULT_REFINEMENT_REJECTED',
+  'TASK_RESULT_REFINEMENT_VERSIONS_INVALID',
+  'TASK_RESULT_REJECTED',
+  'UNCONFIRMED_RESULT_RETRY_FORBIDDEN',
+  'UPSTREAM_FAILURE',
+  'UPSTREAM_OUTCOME_UNKNOWN',
+]);
+const accessAuditReasonCodeSchema = z.enum([
+  'role_change',
+  'responsibility_change',
+  'security_policy',
+  'access_cleanup',
+  'employee_request',
+  'other',
+  'EMPLOYEE_INACTIVE',
+  'EMPLOYEE_MISSING',
+  'LEGACY_ACCESS_STATE_AMBIGUOUS',
+  'MANAGER_ROLE_LOST',
+]);
+const reportAuditErrorCodeSchema = z.enum([
+  'UPSTREAM_FAILURE',
+  'REPORT_GENERATION_FAILED',
+  'REPORT_STORAGE_FAILED',
+  'REPORT_DOWNLOAD_FAILED',
+  'REPORT_ARCHIVE_FAILED',
+  'REPORT_DELETE_FAILED',
+]);
+const auditViewReasonCodeSchema = z.enum(['ACCESS_DENIED']);
+const systemAuditErrorCodeSchema = z.union([
+  operationAuditReasonCodeSchema,
+  z.enum(['TASK_RESULT_REFINED']),
+]);
+const auditSystemComponentSchema = z.enum([
+  'operation-state-machine',
+  'operation-result-refinement',
+]);
 
 export const auditActionSchema = z.enum([
   'operation_create',
@@ -83,6 +143,7 @@ const operationDetailsSchema = z
         selected: nonNegativeIntegerSchema,
         successful: nonNegativeIntegerSchema,
         failed: nonNegativeIntegerSchema,
+        unconfirmed: nonNegativeIntegerSchema.default(0),
         conflicted: nonNegativeIntegerSchema,
         partiallyApplied: nonNegativeIntegerSchema,
         notProcessed: nonNegativeIntegerSchema,
@@ -93,14 +154,29 @@ const operationDetailsSchema = z
   })
   .strict();
 
-const accessDetailsSchema = z
+const legacyAccessDetailsSchema = z
   .object({
     kind: z.literal('access'),
-    addedPermissions: z.array(z.string().trim().min(1).max(64)).max(10).default([]),
-    removedPermissions: z.array(z.string().trim().min(1).max(64)).max(10).default([]),
+    addedPermissions: z.array(permissionSchema).max(10).default([]),
+    removedPermissions: z.array(permissionSchema).max(10).default([]),
     addedFieldIds: z.array(fieldIdSchema).max(256).default([]),
     removedFieldIds: z.array(fieldIdSchema).max(256).default([]),
     reasonCode: reasonCodeSchema.nullable().default(null),
+  })
+  .strict();
+
+const redactedAccessDetailsSchema = z
+  .object({
+    kind: z.literal('access'),
+    version: z.literal(2),
+    previousAccessVersion: positiveIntegerSchema.nullable(),
+    newAccessVersion: positiveIntegerSchema,
+    accessState: z.enum(['active', 'revoked']),
+    addedPermissions: z.array(permissionSchema).max(10),
+    removedPermissions: z.array(permissionSchema).max(10),
+    addedFieldCount: nonNegativeIntegerSchema,
+    removedFieldCount: nonNegativeIntegerSchema,
+    reasonCode: reasonCodeSchema.nullable(),
   })
   .strict();
 
@@ -144,9 +220,10 @@ const systemDetailsSchema = z
   })
   .strict();
 
-export const auditDetailsSchema = z.discriminatedUnion('kind', [
+export const auditDetailsSchema = z.union([
   operationDetailsSchema,
-  accessDetailsSchema,
+  legacyAccessDetailsSchema,
+  redactedAccessDetailsSchema,
   reportDetailsSchema,
   auditViewDetailsSchema,
   retentionDetailsSchema,
@@ -246,6 +323,51 @@ function validateAuditEvent(
   }
 }
 
+function validateAuditWriteEvent(
+  value: Parameters<typeof validateAuditEvent>[0],
+  context: z.RefinementCtx,
+): void {
+  validateAuditEvent(value, context);
+  const details = value.details;
+  const allowedCode =
+    details.kind === 'operation'
+      ? details.reasonCode === null ||
+        operationAuditReasonCodeSchema.safeParse(details.reasonCode).success
+      : details.kind === 'access'
+        ? 'version' in details &&
+          details.version === 2 &&
+          (details.reasonCode === null ||
+            accessAuditReasonCodeSchema.safeParse(details.reasonCode).success)
+        : details.kind === 'report'
+          ? details.errorCode === null ||
+            reportAuditErrorCodeSchema.safeParse(details.errorCode).success
+          : details.kind === 'audit_view'
+            ? auditViewReasonCodeSchema.safeParse(details.reasonCode).success
+            : details.kind === 'system'
+              ? systemAuditErrorCodeSchema.safeParse(details.errorCode).success
+              : true;
+  if (!allowedCode) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: [
+        'details',
+        details.kind === 'report' || details.kind === 'system' ? 'errorCode' : 'reasonCode',
+      ],
+      message: 'Unknown audit code.',
+    });
+  }
+  if (
+    details.kind === 'system' &&
+    !auditSystemComponentSchema.safeParse(details.component).success
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['details', 'component'],
+      message: 'Unknown audit component.',
+    });
+  }
+}
+
 const knownAuditEventBaseSchema = z
   .object({
     id: z.string().uuid(),
@@ -270,7 +392,7 @@ export const auditWriteEventSchema = knownAuditEventBaseSchema
     deduplicationScope: z.string().trim().min(1).max(256),
     eventSlot: z.string().trim().min(1).max(64),
   })
-  .superRefine(validateAuditEvent);
+  .superRefine(validateAuditWriteEvent);
 
 const unknownAuditEventSchema = z
   .object({
@@ -299,6 +421,7 @@ export function parseAuditEventForRead(value: unknown): AuditEvent {
 }
 
 export type AuditAction = z.infer<typeof auditActionSchema>;
+export type OperationAuditReasonCode = z.infer<typeof operationAuditReasonCodeSchema>;
 export type AuditActor = z.infer<typeof auditActorSchema>;
 export type AuditEvent = z.infer<typeof auditEventSchema> | z.infer<typeof unknownAuditEventSchema>;
 export type AuditObject = z.infer<typeof auditObjectSchema>;

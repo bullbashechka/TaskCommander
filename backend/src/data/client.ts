@@ -1,6 +1,7 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
 import type { RuntimeEnvironment } from '../runtime/configuration';
+import { parseAllowedServiceUrl } from '../runtime/origin-policy';
 import type { Database } from './database.types';
 import { DataAccessError } from './errors';
 
@@ -14,15 +15,6 @@ function getRequiredValue(value: string | undefined): string {
   return normalized;
 }
 
-function isAllowedLocalSupabaseHost(env: RuntimeEnvironment, url: URL): boolean {
-  if (env.APP_ENV !== 'local') {
-    return true;
-  }
-
-  const configuredHosts = env.LOCAL_SUPABASE_ALLOWED_HOSTS?.split(',') ?? [];
-  return configuredHosts.some((host) => host.trim().toLowerCase() === url.hostname.toLowerCase());
-}
-
 export function createServerSupabaseClient(
   env: RuntimeEnvironment,
   requestFetch: SupabaseFetch = fetch,
@@ -30,14 +22,8 @@ export function createServerSupabaseClient(
   const url = getRequiredValue(env.SUPABASE_URL);
   const serviceRoleKey = getRequiredValue(env.SUPABASE_SERVICE_ROLE_KEY);
 
-  let parsedUrl: URL;
-  try {
-    parsedUrl = new URL(url);
-  } catch {
-    throw new DataAccessError('CONFIGURATION', false);
-  }
-
-  if (parsedUrl.protocol !== 'https:' || !isAllowedLocalSupabaseHost(env, parsedUrl)) {
+  const parsedUrl = parseAllowedServiceUrl(url, env.SUPABASE_ALLOWED_ORIGINS);
+  if (!parsedUrl) {
     throw new DataAccessError('CONFIGURATION', false);
   }
 

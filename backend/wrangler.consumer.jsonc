@@ -4,10 +4,17 @@
   "main": "./src/consumer.ts",
   "compatibility_date": "2026-08-06",
   "compatibility_flags": ["nodejs_compat"],
+  "secrets": {
+    "required": ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"],
+  },
   "vars": {
     "APP_ENV": "local",
     "BITRIX_ADAPTER": "mock",
-    "LOCAL_SUPABASE_ALLOWED_HOSTS": "",
+    "SUPABASE_ALLOWED_ORIGINS": "",
+    "BITRIX_PORTAL_ORIGIN": "https://portal.bitrix24.ru",
+    "BITRIX_MEDIA_ALLOWED_ORIGINS": "https://portal.bitrix24.ru",
+    "OPERATIONS_QUEUE_NAME": "task-commander-local-operations-v1",
+    "ACCESS_COMMANDS_QUEUE_NAME": "task-commander-local-access-commands-v1",
   },
   "queues": {
     "consumers": [
@@ -15,6 +22,13 @@
         "queue": "task-commander-local-operations-v1",
         "max_retries": 3,
         "dead_letter_queue": "task-commander-local-operations-dlq-v1",
+      },
+      {
+        "queue": "task-commander-local-access-commands-v1",
+        "max_batch_size": 5,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "task-commander-local-access-commands-dlq-v1",
       },
     ],
   },
