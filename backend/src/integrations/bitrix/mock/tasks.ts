@@ -20,7 +20,10 @@ import type { MockScenarioController, MockScenarioEffect } from './scenario';
 import type { MockPortalState } from './state';
 import { createRelevantVersion } from './version';
 
-const fieldCapabilities: readonly TaskFieldCapability[] = [
+const baseFieldCapabilities: readonly Omit<
+  TaskFieldCapability,
+  'filterLabel' | 'isFilterable' | 'isSortable' | 'filterValueSource' | 'filterOptions'
+>[] = [
   {
     id: 'title',
     sourceType: 'string',
@@ -130,6 +133,24 @@ const fieldCapabilities: readonly TaskFieldCapability[] = [
     isSupported: true,
   },
   {
+    id: 'UF_TASK_EFFORT',
+    sourceType: 'double',
+    kind: 'number',
+    isMultiple: false,
+    isNullable: true,
+    isEditable: true,
+    isSupported: true,
+  },
+  {
+    id: 'UF_TASK_APPROVED',
+    sourceType: 'boolean',
+    kind: 'boolean',
+    isMultiple: false,
+    isNullable: false,
+    isEditable: true,
+    isSupported: true,
+  },
+  {
     id: 'crm_binding',
     sourceType: 'crm',
     kind: null,
@@ -139,6 +160,60 @@ const fieldCapabilities: readonly TaskFieldCapability[] = [
     isSupported: false,
   },
 ];
+
+const fieldLabels: Readonly<Record<string, string>> = {
+  title: 'Название',
+  description: 'Описание',
+  creator_id: 'Постановщик',
+  responsible_id: 'Исполнитель',
+  accomplice_ids: 'Соисполнители',
+  auditor_ids: 'Наблюдатели',
+  deadline: 'Крайний срок',
+  start_date: 'Дата начала',
+  priority: 'Приоритет',
+  status: 'Статус',
+  group_id: 'Проект',
+  tags: 'Теги',
+  UF_TASK_EFFORT: 'Трудозатраты',
+  UF_TASK_APPROVED: 'Согласовано',
+  crm_binding: 'Связь с CRM',
+};
+
+const fieldOptions: Readonly<Record<string, readonly { value: string; label: string }[]>> = {
+  priority: [
+    { value: 'normal', label: 'Обычный' },
+    { value: 'high', label: 'Высокий' },
+  ],
+  status: [
+    { value: 'pending', label: 'Ждёт выполнения' },
+    { value: 'in_progress', label: 'Выполняется' },
+    { value: 'pending_review', label: 'Ждёт контроля' },
+    { value: 'deferred', label: 'Отложена' },
+  ],
+};
+
+function filterValueSource(
+  capability: (typeof baseFieldCapabilities)[number],
+): TaskFieldCapability['filterValueSource'] {
+  if (!capability.isSupported || capability.kind === null) return null;
+  if (fieldOptions[capability.id]) return 'options';
+  if (capability.kind === 'user') return 'users';
+  if (capability.kind === 'number') return 'number';
+  if (capability.kind === 'date_time') return 'date_time';
+  if (capability.kind === 'boolean') return 'boolean';
+  return 'text';
+}
+
+const fieldCapabilities: readonly TaskFieldCapability[] = baseFieldCapabilities.map(
+  (capability) => ({
+    ...capability,
+    filterLabel: fieldLabels[capability.id] ?? capability.id,
+    isFilterable: capability.isSupported && capability.kind !== null,
+    isSortable: capability.isSupported && capability.kind !== null,
+    filterValueSource: filterValueSource(capability),
+    filterOptions: [...(fieldOptions[capability.id] ?? [])],
+  }),
+);
 
 function isReadable(task: MockTask, userId: string): boolean {
   return task.readableBy.includes(userId);
@@ -234,10 +309,13 @@ function matchesDate(
   if (filter.operator === 'equals') return values.includes(timestamp);
   if (filter.operator === 'before') return timestamp < (values[0] ?? Number.NEGATIVE_INFINITY);
   if (filter.operator === 'after') return timestamp > (values[0] ?? Number.POSITIVE_INFINITY);
-  return (
-    timestamp >= (values[0] ?? Number.NEGATIVE_INFINITY) &&
-    timestamp <= (values[1] ?? Number.POSITIVE_INFINITY)
-  );
+  if (filter.operator === 'between') {
+    return (
+      timestamp >= (values[0] ?? Number.NEGATIVE_INFINITY) &&
+      timestamp <= (values[1] ?? Number.POSITIVE_INFINITY)
+    );
+  }
+  return false;
 }
 
 function matchesNumber(

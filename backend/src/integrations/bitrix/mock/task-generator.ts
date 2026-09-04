@@ -47,6 +47,8 @@ export function createGeneratedTask(index: number): MockTask {
         'status',
         'group_id',
         'tags',
+        'UF_TASK_EFFORT',
+        'UF_TASK_APPROVED',
       ],
       '10': [
         'title',
@@ -60,6 +62,8 @@ export function createGeneratedTask(index: number): MockTask {
         'status',
         'group_id',
         'tags',
+        'UF_TASK_EFFORT',
+        'UF_TASK_APPROVED',
       ],
     },
     deadlineManagedBySubtasks: false,
@@ -76,6 +80,8 @@ export function createGeneratedTask(index: number): MockTask {
       status,
       group_id: String((index % 4) + 1),
       tags: [`tag-${index % 8}`],
+      UF_TASK_EFFORT: index % 40,
+      UF_TASK_APPROVED: index % 2 === 0,
     },
   };
 }

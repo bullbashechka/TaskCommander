@@ -123,6 +123,110 @@ if (integrationEnabled) {
       );
     });
 
+    it('isolates saved filters by portal and owner', async () => {
+      if (!firstContext || !secondContext) {
+        throw new Error('Integration access contexts were not initialized.');
+      }
+
+      const created = await repositories.createSavedFilter(firstContext, {
+        name: 'First owner filter',
+        filterPayload: [],
+      });
+
+      await expect(repositories.listSavedFilters(firstContext)).resolves.toEqual([created]);
+      await expect(repositories.listSavedFilters(secondContext)).resolves.toEqual([]);
+      await expect(
+        repositories.updateSavedFilter(secondContext, {
+          id: created.id,
+          expectedRevision: created.revision,
+          name: 'Hijacked',
+        }),
+      ).rejects.toMatchObject({ code: 'CONFLICT' });
+      await expect(
+        repositories.deleteSavedFilter(secondContext, {
+          id: created.id,
+          expectedRevision: created.revision,
+        }),
+      ).rejects.toMatchObject({ code: 'CONFLICT' });
+      await expect(
+        repositories.deleteSavedFilter(firstContext, {
+          id: created.id,
+          expectedRevision: created.revision,
+        }),
+      ).resolves.toBeUndefined();
+    });
+
+    it('bootstraps an administrator identity without granting persisted access', async () => {
+      const administratorId = '900000000003';
+      const administratorContext = createDataAccessContext(
+        await resolveEffectiveAccess(
+          await createVerifiedTestPrincipal({
+            portalId,
+            userId: administratorId,
+            displayName: 'Integration administrator',
+            isBitrixAdmin: true,
+          }),
+          repositories,
+        ),
+      );
+
+      await repositories.ensurePrincipalIdentity(administratorContext, 'Integration administrator');
+      await expect(
+        repositories.createSavedFilter(administratorContext, {
+          name: 'Administrator filter',
+          filterPayload: [],
+        }),
+      ).resolves.toMatchObject({ name: 'Administrator filter' });
+      const { data, error } = await client
+        .from('user_settings')
+        .select('access_active, permissions, allowed_field_ids')
+        .eq('portal_id', portalId)
+        .eq('user_id', administratorId)
+        .single();
+
+      expect(error).toBeNull();
+      expect(data).toEqual({ access_active: false, permissions: [], allowed_field_ids: [] });
+    });
+
+    it('enforces the saved-filter owner limit across concurrent inserts', async () => {
+      if (!firstContext) {
+        throw new Error('Integration access contexts were not initialized.');
+      }
+      const { error } = await client.from('saved_filter').insert(
+        Array.from({ length: 255 }, (_, index) => ({
+          portal_id: portalId,
+          owner_id: firstUserId,
+          name: `Concurrent limit ${index + 1}`,
+          filter_payload: [],
+        })),
+      );
+      expect(error).toBeNull();
+
+      const results = await Promise.allSettled([
+        repositories.createSavedFilter(firstContext, {
+          name: 'Concurrent winner A',
+          filterPayload: [],
+        }),
+        repositories.createSavedFilter(firstContext, {
+          name: 'Concurrent winner B',
+          filterPayload: [],
+        }),
+      ]);
+      const fulfilled = results.filter((result) => result.status === 'fulfilled');
+      const rejected = results.filter((result) => result.status === 'rejected');
+      const { count, error: countError } = await client
+        .from('saved_filter')
+        .select('id', { count: 'exact', head: true })
+        .eq('portal_id', portalId)
+        .eq('owner_id', firstUserId);
+
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0]).toMatchObject({ reason: { code: 'SAVED_FILTER_LIMIT' } });
+      expect(countError).toBeNull();
+      expect(count).toBe(256);
+    });
+
     it('isolates operation history and atomically records concurrent task results', async () => {
       if (
         !firstContext ||

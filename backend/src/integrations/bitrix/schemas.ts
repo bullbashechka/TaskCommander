@@ -6,7 +6,7 @@ import {
   isoDateTimeSchema,
   safeHttpsUrlSchema,
   taskFieldKindSchema,
-  taskFilterSchema,
+  taskFilterListSchema,
 } from '@task-commander/contracts';
 
 const loopbackApplicationUrlSchema = z
@@ -77,8 +77,42 @@ export const taskFieldCapabilitySchema = z
     isNullable: z.boolean(),
     isEditable: z.boolean(),
     isSupported: z.boolean(),
+    filterLabel: z.string().trim().min(1).max(256),
+    isFilterable: z.boolean(),
+    isSortable: z.boolean(),
+    filterValueSource: z
+      .enum(['text', 'number', 'date_time', 'boolean', 'users', 'options'])
+      .nullable(),
+    filterOptions: z.array(
+      z
+        .object({
+          value: z.string().trim().min(1).max(4096),
+          label: z.string().trim().min(1).max(256),
+        })
+        .strict(),
+    ),
   })
-  .strict();
+  .strict()
+  .superRefine((capability, context) => {
+    if (
+      capability.isFilterable &&
+      (!capability.isSupported || capability.kind === null || capability.filterValueSource === null)
+    ) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ['isFilterable'] });
+    }
+    if (capability.isSortable && !capability.isFilterable) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ['isSortable'] });
+    }
+    if (!capability.isFilterable && capability.filterValueSource !== null) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ['filterValueSource'] });
+    }
+    if (
+      (capability.filterValueSource === 'options' && capability.filterOptions.length === 0) ||
+      (capability.filterValueSource !== 'options' && capability.filterOptions.length > 0)
+    ) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ['filterOptions'] });
+    }
+  });
 
 export const taskSummarySchema = z
   .object({
@@ -96,7 +130,7 @@ export const taskSummarySchema = z
 
 export const taskSearchRequestSchema = z
   .object({
-    filters: z.array(taskFilterSchema).max(64),
+    filters: taskFilterListSchema,
     sort: z
       .object({
         fieldId: fieldIdSchema,

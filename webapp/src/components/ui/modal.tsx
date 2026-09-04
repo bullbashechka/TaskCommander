@@ -28,7 +28,8 @@ export function Modal({
     const focusable = dialog?.querySelector<HTMLElement>(
       'button:not([disabled]), select:not([disabled]), input:not([disabled]), textarea:not([disabled]), [href]',
     );
-    focusable?.focus();
+    if (focusable) focusable.focus();
+    else dialog?.focus();
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
@@ -44,7 +45,11 @@ export function Modal({
       ];
       const first = items[0];
       const last = items.at(-1);
-      if (!first || !last) return;
+      if (!first || !last) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
       if (event.shiftKey && document.activeElement === first) {
         event.preventDefault();
         last.focus();
@@ -66,7 +71,9 @@ export function Modal({
       <button
         aria-label="Закрыть диалог"
         className="dialog-backdrop"
+        onMouseDown={(event) => event.preventDefault()}
         onClick={onClose}
+        tabIndex={-1}
         type="button"
       />
       <div className="dialog-viewport">
@@ -77,6 +84,7 @@ export function Modal({
           className={`dialog-card ${className}`.trim()}
           ref={dialogRef}
           role="dialog"
+          tabIndex={-1}
         >
           <h2 className="dialog-title" id={titleId}>
             {title}

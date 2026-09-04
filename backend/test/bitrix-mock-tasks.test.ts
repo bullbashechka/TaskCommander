@@ -116,6 +116,206 @@ describe('mock Bitrix task catalog', () => {
     expect(new Set(page.items.map((task) => task.responsibleId))).toEqual(new Set(['10', '11']));
   });
 
+  it('combines conditions for different fields with AND semantics', async () => {
+    const state = createMockPortalState({ taskCount: 0 });
+    const matching = state.getMutableTask(mockFixtureIds.visibleTask);
+    const priorityOnly = state.getMutableTask(mockFixtureIds.noEditTask);
+    if (!matching || !priorityOnly) throw new Error('Expected task fixtures.');
+    matching.values.priority = 'high';
+    priorityOnly.title = 'Other priority task';
+    priorityOnly.values.title = priorityOnly.title;
+    priorityOnly.values.priority = 'high';
+
+    const page = expectSuccess(
+      await createMockTasks(state).search({
+        filters: [
+          { kind: 'text', fieldId: 'title', operator: 'contains', values: ['Fixture'] },
+          { kind: 'list', fieldId: 'priority', operator: 'equals', values: ['high'] },
+        ],
+        sort: { fieldId: 'title', direction: 'asc' },
+        page: 1,
+        pageSize: 50,
+      }),
+    );
+
+    expect(page.items.map((task) => task.id)).toEqual([matching.id]);
+  });
+
+  it('filters number and boolean custom fields', async () => {
+    const state = createMockPortalState({ taskCount: 0 });
+    const matching = state.getMutableTask(mockFixtureIds.visibleTask);
+    if (!matching) throw new Error('Expected visible task fixture.');
+    matching.values.UF_TASK_EFFORT = 12;
+    matching.values.UF_TASK_APPROVED = true;
+
+    const page = expectSuccess(
+      await createMockTasks(state).search({
+        filters: [
+          {
+            kind: 'number',
+            fieldId: 'UF_TASK_EFFORT',
+            operator: 'greater_than',
+            values: [10],
+          },
+          {
+            kind: 'boolean',
+            fieldId: 'UF_TASK_APPROVED',
+            operator: 'equals',
+            values: [true],
+          },
+        ],
+        sort: { fieldId: 'UF_TASK_EFFORT', direction: 'desc' },
+        page: 1,
+        pageSize: 50,
+      }),
+    );
+
+    expect(page.items.map((task) => task.id)).toEqual([matching.id]);
+  });
+
+  it('implements date, presence, and negative operator semantics', async () => {
+    const state = createMockPortalState({ taskCount: 0 });
+    const target = state.getMutableTask(mockFixtureIds.visibleTask);
+    const counterexample = state.getMutableTask(mockFixtureIds.subtask);
+    if (!target || !counterexample) throw new Error('Expected task fixtures.');
+    const tasks = createMockTasks(state);
+    const filters = [
+      {
+        kind: 'date_time' as const,
+        fieldId: 'deadline',
+        operator: 'equals' as const,
+        values: ['2026-08-14T05:00:00Z'],
+      },
+      {
+        kind: 'date_time' as const,
+        fieldId: 'deadline',
+        operator: 'before' as const,
+        values: ['2026-08-15T00:00:00Z'],
+      },
+      {
+        kind: 'date_time' as const,
+        fieldId: 'deadline',
+        operator: 'after' as const,
+        values: ['2026-08-13T00:00:00Z'],
+      },
+      {
+        kind: 'date_time' as const,
+        fieldId: 'deadline',
+        operator: 'between' as const,
+        values: ['2026-08-14T04:00:00Z', '2026-08-14T06:00:00Z'],
+      },
+      {
+        kind: 'text' as const,
+        fieldId: 'title',
+        operator: 'not_contains' as const,
+        values: ['absent'],
+      },
+      {
+        kind: 'list' as const,
+        fieldId: 'priority',
+        operator: 'not_equals' as const,
+        values: ['high'],
+      },
+      {
+        kind: 'user' as const,
+        fieldId: 'accomplice_ids',
+        operator: 'not_includes' as const,
+        values: ['99'],
+      },
+      {
+        kind: 'text' as const,
+        fieldId: 'description',
+        operator: 'is_set' as const,
+      },
+    ];
+
+    for (const filter of filters) {
+      if (filter.fieldId === 'deadline') {
+        counterexample.values.deadline =
+          filter.operator === 'after'
+            ? '2026-08-12T00:00:00Z'
+            : '2026-08-16T00:00:00Z';
+      } else if (filter.fieldId === 'title') {
+        counterexample.title = 'Fixture absent task';
+        counterexample.values.title = 'Fixture absent task';
+      } else if (filter.fieldId === 'priority') {
+        counterexample.values.priority = 'high';
+      } else if (filter.fieldId === 'accomplice_ids') {
+        counterexample.values.accomplice_ids = ['99'];
+      } else if (filter.fieldId === 'description') {
+        counterexample.values.description = null;
+      }
+      const page = expectSuccess(
+        await tasks.search({
+          filters: [filter],
+          sort: { fieldId: 'title', direction: 'asc' },
+          page: 1,
+          pageSize: 50,
+        }),
+      );
+      expect(page.items.map((task) => task.id)).toContain(target.id);
+      expect(page.items.map((task) => task.id)).not.toContain(counterexample.id);
+    }
+
+    target.values.deadline = null;
+    counterexample.values.deadline = '2026-08-16T00:00:00Z';
+    const unsetPage = expectSuccess(
+      await tasks.search({
+        filters: [{ kind: 'date_time', fieldId: 'deadline', operator: 'is_not_set' }],
+        sort: { fieldId: 'title', direction: 'asc' },
+        page: 1,
+        pageSize: 50,
+      }),
+    );
+    expect(unsetPage.items.map((task) => task.id)).toContain(target.id);
+    expect(unsetPage.items.map((task) => task.id)).not.toContain(counterexample.id);
+  });
+
+  it('distinguishes OR membership from exact equality for multiple fields', async () => {
+    const state = createMockPortalState({ taskCount: 0 });
+    const oneMember = state.getMutableTask(mockFixtureIds.visibleTask);
+    const twoMembers = state.getMutableTask(mockFixtureIds.subtask);
+    if (!oneMember || !twoMembers) throw new Error('Expected task fixtures.');
+    oneMember.values.accomplice_ids = ['11'];
+    twoMembers.values.accomplice_ids = ['11', '12'];
+    const tasks = createMockTasks(state);
+
+    const exact = expectSuccess(
+      await tasks.search({
+        filters: [
+          {
+            kind: 'user',
+            fieldId: 'accomplice_ids',
+            operator: 'equals',
+            values: ['11'],
+          },
+        ],
+        sort: { fieldId: 'title', direction: 'asc' },
+        page: 1,
+        pageSize: 50,
+      }),
+    );
+    const membership = expectSuccess(
+      await tasks.search({
+        filters: [
+          {
+            kind: 'user',
+            fieldId: 'accomplice_ids',
+            operator: 'includes',
+            values: ['12', '99'],
+          },
+        ],
+        sort: { fieldId: 'title', direction: 'asc' },
+        page: 1,
+        pageSize: 50,
+      }),
+    );
+
+    expect(exact.items.some((task) => task.id === oneMember.id)).toBe(true);
+    expect(exact.items.some((task) => task.id === twoMembers.id)).toBe(false);
+    expect(membership.items.some((task) => task.id === twoMembers.id)).toBe(true);
+  });
+
   it('sorts date-time fields by instant and keeps null values last', async () => {
     const state = createMockPortalState({ taskCount: 0 });
     const later = state.getMutableTask(mockFixtureIds.visibleTask);

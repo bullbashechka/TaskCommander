@@ -207,6 +207,15 @@ describe('data access boundaries', () => {
     expect(toDataAccessError({ code: 'P0001', message: 'TC_DRAFT_REVISION_CONFLICT' })).toEqual(
       expect.objectContaining({ code: 'CONFLICT', retryable: false }),
     );
+    expect(toDataAccessError({ code: 'P0001', message: 'TC_SAVED_FILTER_LIMIT' })).toEqual(
+      expect.objectContaining({ code: 'SAVED_FILTER_LIMIT', retryable: false }),
+    );
+    expect(
+      toDataAccessError({
+        code: '23505',
+        message: 'duplicate key violates saved_filter_owner_name_key',
+      }),
+    ).toEqual(expect.objectContaining({ code: 'SAVED_FILTER_NAME_TAKEN', retryable: false }));
   });
 
   it('rejects a local Supabase endpoint outside the allowlist', () => {

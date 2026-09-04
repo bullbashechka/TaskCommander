@@ -219,6 +219,77 @@ describe('task search API', () => {
     expect(search).not.toHaveBeenCalled();
   });
 
+  it('rejects field-kind mismatches and unknown sort fields before adapter search', async () => {
+    const principal = await createVerifiedTestPrincipal({ userId: '10' });
+    const search = vi.fn<BitrixAdapter['tasks']['search']>();
+    const api = createApi({
+      readPrincipal: async () => principal,
+      readEffectiveAccess: async () => createAppAccess(principal),
+      createBitrixAdapter: (_env, input) =>
+        createAdapterWithTaskSearch(input.currentUserId, search),
+    });
+
+    const mismatch = await postSearch(api, {
+      filters: [{ kind: 'text', fieldId: 'deadline', operator: 'equals', values: ['today'] }],
+    });
+    const unknownSort = await postSearch(api, {
+      sort: { fieldId: 'missing', direction: 'asc' },
+    });
+
+    expect(mismatch.status).toBe(400);
+    expect(unknownSort.status).toBe(400);
+    expect(search).not.toHaveBeenCalled();
+  });
+
+  it('rejects option values absent from the current field catalog', async () => {
+    const principal = await createVerifiedTestPrincipal({ userId: '10' });
+    const search = vi.fn<BitrixAdapter['tasks']['search']>();
+    const api = createApi({
+      readPrincipal: async () => principal,
+      readEffectiveAccess: async () => createAppAccess(principal),
+      createBitrixAdapter: (_env, input) =>
+        createAdapterWithTaskSearch(input.currentUserId, search),
+    });
+
+    const response = await postSearch(api, {
+      filters: [
+        { kind: 'list', fieldId: 'priority', operator: 'equals', values: ['removed-option'] },
+      ],
+    });
+
+    expect(response.status).toBe(400);
+    expect(search).not.toHaveBeenCalled();
+  });
+
+  it('maps field-capability failures before adapter search', async () => {
+    const principal = await createVerifiedTestPrincipal({ userId: '10' });
+    const search = vi.fn<BitrixAdapter['tasks']['search']>();
+    const api = createApi({
+      readPrincipal: async () => principal,
+      readEffectiveAccess: async () => createAppAccess(principal),
+      createBitrixAdapter: (_env, input) => {
+        const adapter = createAdapterWithTaskSearch(input.currentUserId, search);
+        return {
+          ...adapter,
+          tasks: {
+            ...adapter.tasks,
+            getFieldCapabilities: async () => ({
+              ok: false as const,
+              failure: { kind: 'temporary_failure' as const, reasonCode: 'sensitive' },
+            }),
+          },
+        };
+      },
+    });
+
+    const response = await postSearch(api);
+    const responseText = await response.clone().text();
+
+    expect(response.status).toBe(503);
+    expect(responseText).not.toContain('sensitive');
+    expect(search).not.toHaveBeenCalled();
+  });
+
   it('authenticates before exposing request validation details', async () => {
     const search = vi.fn<BitrixAdapter['tasks']['search']>();
     const api = createApi({

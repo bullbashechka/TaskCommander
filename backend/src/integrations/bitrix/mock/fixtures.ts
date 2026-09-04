@@ -47,6 +47,8 @@ const editableFields = [
   'status',
   'group_id',
   'tags',
+  'UF_TASK_EFFORT',
+  'UF_TASK_APPROVED',
 ];
 
 function createFixture(
@@ -68,6 +70,8 @@ function createFixture(
     status: 'in_progress',
     group_id: '1',
     tags: ['fixture'],
+    UF_TASK_EFFORT: 8,
+    UF_TASK_APPROVED: false,
     ...valueOverrides,
   };
 

@@ -62,7 +62,7 @@ const numberFilterSchema = z
       'is_set',
       'is_not_set',
     ]),
-    values: z.array(z.number()).min(1).max(50).optional(),
+    values: z.array(z.number().finite()).min(1).max(50).optional(),
   })
   .strict();
 
@@ -79,7 +79,7 @@ function createListFilterSchema(kind: 'list' | 'tags') {
         'is_set',
         'is_not_set',
       ]),
-      values: z.array(z.string().trim().min(1)).max(50).optional(),
+      values: z.array(z.string().trim().min(1).max(4096)).max(50).optional(),
     })
     .strict();
 }
@@ -148,6 +148,39 @@ export const taskFilterSchema = z
         path: ['values'],
         message: 'This operator requires at least one value.',
       });
+    }
+    if (
+      expectedCount === null &&
+      filter.values !== undefined &&
+      new Set(filter.values).size !== filter.values.length
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['values'],
+        message: 'Filter values must be unique.',
+      });
+    }
+    if (filter.kind === 'date_time' && filter.operator === 'between') {
+      const [start, end] = filter.values ?? [];
+      const reversed =
+        start !== undefined && end !== undefined && Date.parse(start) > Date.parse(end);
+      if (reversed) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['values'],
+          message: 'Range boundaries must be ordered.',
+        });
+      }
+    }
+    if (filter.kind === 'number' && filter.operator === 'between') {
+      const [start, end] = filter.values ?? [];
+      if (start !== undefined && end !== undefined && start > end) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['values'],
+          message: 'Range boundaries must be ordered.',
+        });
+      }
     }
   });
 

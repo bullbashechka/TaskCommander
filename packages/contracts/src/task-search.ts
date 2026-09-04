@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 import { bitrixIdSchema, fieldIdSchema, isoDateTimeSchema, safeHttpsUrlSchema } from './primitives';
-import { taskFilterSchema } from './task-change';
+import { taskFilterListSchema } from './task-filters';
 
 export const taskSearchSortSchema = z
   .object({
@@ -12,7 +12,7 @@ export const taskSearchSortSchema = z
 
 export const taskSearchApiRequestSchema = z
   .object({
-    filters: z.array(taskFilterSchema).max(64).default([]),
+    filters: taskFilterListSchema.default([]),
     sort: taskSearchSortSchema.default({ fieldId: 'deadline', direction: 'asc' }),
     page: z.number().int().safe().positive().default(1),
     pageSize: z.number().int().safe().positive().max(50).default(50),

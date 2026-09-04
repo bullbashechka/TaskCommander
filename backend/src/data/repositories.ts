@@ -6,6 +6,8 @@ import {
   operationStatusSchema,
   operationTypeSchema,
   permissionSchema,
+  bitrixIdSchema,
+  portalIdSchema,
   taskOutcomeSchema,
   taskOutcomeStatusSchema,
   userAccessSchema,
@@ -501,6 +503,36 @@ export class TaskCommanderRepositories {
     return data === null ? null : { ownerId: data.initiator_id };
   }
 
+  public async ensurePrincipalIdentity(
+    context: DataAccessContext,
+    rawDisplayName: string,
+  ): Promise<void> {
+    requireDataAccessContext(context);
+    const portalId = portalIdSchema.parse(context.portalId);
+    const userId = bitrixIdSchema.parse(context.actorId);
+    const displayName = z.string().trim().min(1).max(256).parse(rawDisplayName);
+    const portal = await this.client
+      .from('portal')
+      .upsert(
+        { id: portalId, display_name: portalId },
+        { onConflict: 'id', ignoreDuplicates: true },
+      );
+    if (portal.error) throw toDataAccessError(portal.error);
+
+    const user = await this.client.from('user_settings').upsert(
+      {
+        portal_id: portalId,
+        user_id: userId,
+        display_name: displayName,
+        access_active: false,
+        permissions: [],
+        allowed_field_ids: [],
+      },
+      { onConflict: 'portal_id,user_id', ignoreDuplicates: true },
+    );
+    if (user.error) throw toDataAccessError(user.error);
+  }
+
   public async listSavedFilters(context: DataAccessContext): Promise<SavedFilter[]> {
     requireDataAccessContext(context);
     const rows = await requireData(
@@ -536,14 +568,13 @@ export class TaskCommanderRepositories {
 
   public async updateSavedFilter(
     context: DataAccessContext,
-    input: { id: string; expectedRevision: number; name: string; filterPayload: Json },
+    input: { id: string; expectedRevision: number; name: string },
   ): Promise<SavedFilter> {
     requireDataAccessContext(context);
     const { data, error } = await this.client
       .from('saved_filter')
       .update({
         name: input.name,
-        filter_payload: input.filterPayload,
         revision: input.expectedRevision + 1,
       })
       .eq('id', input.id)
@@ -580,7 +611,7 @@ export class TaskCommanderRepositories {
       throw toDataAccessError(error);
     }
     if (count !== 1) {
-      throw new DataAccessError('UNAVAILABLE_RECORD', false);
+      throw new DataAccessError('CONFLICT', false);
     }
   }
 

@@ -2,11 +2,25 @@ import {
   apiErrorResponseSchema,
   correlationIdSchema,
   effectiveAccessResponseSchema,
+  savedTaskFilterListResponseSchema,
+  savedTaskFilterSchema,
   sessionResponseSchema,
+  taskFilterCatalogResponseSchema,
+  taskFilterUserSearchResponseSchema,
+  taskSearchApiRequestSchema,
+  taskSearchApiResponseSchema,
   type ApiErrorCode,
   type EffectiveAccessResponse,
+  type SavedTaskFilter,
   type SessionPrincipal,
+  type TaskFilterCatalogResponse,
+  type TaskFilterList,
+  type TaskFilterUserSearchResponse,
+  type TaskSearchApiRequest,
+  type TaskSearchApiResponse,
 } from '@task-commander/contracts';
+
+import { notifySecurityContextInvalidated } from '@/app/access-sync';
 
 export type AppApiErrorKind =
   | 'session_required'
@@ -31,6 +45,7 @@ export class AppApiError extends Error {
 }
 
 const requestTimeoutMs = 5_000;
+let terminalSecurityInvalidationPending = false;
 
 type SafeParser<T> = Readonly<{
   safeParse: (value: unknown) => { success: true; data: T } | { success: false };
@@ -123,6 +138,13 @@ async function request<T>(
           ? headerEventId.data
           : undefined;
       const code = parsed.success ? parsed.data.error.code : undefined;
+      if (
+        !terminalSecurityInvalidationPending &&
+        (response.status === 401 || code === 'ACCESS_REVOKED')
+      ) {
+        terminalSecurityInvalidationPending = true;
+        notifySecurityContextInvalidated();
+      }
       throw new AppApiError(
         parsed.success
           ? parsed.data.error.message
@@ -134,7 +156,9 @@ async function request<T>(
         parseRetryAfter(response.headers.get('retry-after')),
       );
     }
-    return parseSuccess(payload, response);
+    const result = parseSuccess(payload, response);
+    terminalSecurityInvalidationPending = false;
+    return result;
   } catch (error) {
     if (error instanceof AppApiError) throw error;
     if (abort.didTimeout()) {
@@ -153,6 +177,7 @@ async function requestJson<T>(
   path: string,
   schema: SafeParser<T>,
   signal?: AbortSignal,
+  init?: RequestInit,
 ): Promise<T> {
   return request(
     path,
@@ -171,6 +196,7 @@ async function requestJson<T>(
       return parsed.data;
     },
     signal,
+    init,
   );
 }
 
@@ -219,6 +245,80 @@ export function createLocalDevSession(signal?: AbortSignal): Promise<void> {
 export async function verifyManageAccess(signal?: AbortSignal): Promise<true> {
   await requestJson('/api/access-management/capabilities', manageAccessResponseSchema, signal);
   return true;
+}
+
+const jsonHeaders = { 'content-type': 'application/json' };
+
+export function fetchTaskFilterCatalog(signal?: AbortSignal): Promise<TaskFilterCatalogResponse> {
+  return requestJson('/api/tasks/fields', taskFilterCatalogResponseSchema, signal);
+}
+
+export function searchTaskFilterUsers(
+  input: { q: string; cursor?: string | null; pageSize?: number },
+  signal?: AbortSignal,
+): Promise<TaskFilterUserSearchResponse> {
+  const query = new URLSearchParams({ q: input.q });
+  if (input.cursor) query.set('cursor', input.cursor);
+  if (input.pageSize) query.set('pageSize', String(input.pageSize));
+  return requestJson(
+    `/api/tasks/users?${query.toString()}`,
+    taskFilterUserSearchResponseSchema,
+    signal,
+  );
+}
+
+export function searchTasks(
+  input: TaskSearchApiRequest,
+  signal?: AbortSignal,
+): Promise<TaskSearchApiResponse> {
+  const parsed = taskSearchApiRequestSchema.parse(input);
+  return requestJson('/api/tasks/search', taskSearchApiResponseSchema, signal, {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(parsed),
+  });
+}
+
+export function listSavedTaskFilters(signal?: AbortSignal): Promise<SavedTaskFilter[]> {
+  return requestJson('/api/tasks/saved-filters', savedTaskFilterListResponseSchema, signal).then(
+    (response) => response.items,
+  );
+}
+
+export function createSavedTaskFilter(
+  input: { name: string; filters: TaskFilterList },
+  signal?: AbortSignal,
+): Promise<SavedTaskFilter> {
+  return requestJson('/api/tasks/saved-filters', savedTaskFilterSchema, signal, {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateSavedTaskFilter(
+  input: SavedTaskFilter,
+  signal?: AbortSignal,
+): Promise<SavedTaskFilter> {
+  return requestJson(`/api/tasks/saved-filters/${input.id}`, savedTaskFilterSchema, signal, {
+    method: 'PUT',
+    headers: jsonHeaders,
+    body: JSON.stringify({
+      name: input.name,
+      expectedRevision: input.revision,
+    }),
+  });
+}
+
+export function deleteSavedTaskFilter(
+  input: Pick<SavedTaskFilter, 'id' | 'revision'>,
+  signal?: AbortSignal,
+): Promise<void> {
+  return requestEmpty(`/api/tasks/saved-filters/${input.id}`, signal, {
+    method: 'DELETE',
+    headers: jsonHeaders,
+    body: JSON.stringify({ expectedRevision: input.revision }),
+  });
 }
 
 export function isRetryableAppError(error: unknown): error is AppApiError {

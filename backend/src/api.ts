@@ -37,9 +37,16 @@ import {
   type EffectiveAccessSettingsReader,
 } from './data/access';
 import { createApiErrorResponse, ApiHttpError } from './http/errors';
-import type { BitrixAdapter, BitrixFailure } from './integrations/bitrix/contract';
+import type { BitrixAdapter } from './integrations/bitrix/contract';
 import { createBitrixAdapter } from './integrations/bitrix/factory';
 import { taskSearchPageSchema } from './integrations/bitrix/schemas';
+import {
+  createTaskFilterCatalog,
+  InvalidTaskSearchDefinitionError,
+  requireValidTaskSearchDefinition,
+} from './task-filters/catalog';
+import { toTaskFilterBitrixApiError } from './task-filters/errors';
+import { createTaskFilterRoutes, type TaskFilterRouteDependencies } from './task-filters/routes';
 import { parseJsonBody } from './http/validation';
 import {
   applySecurityHeaders,
@@ -79,6 +86,7 @@ export interface ApiDependencies {
   readonly createAccessManagementRepository?: (
     env: RuntimeEnvironment,
   ) => AccessManagementRepository;
+  readonly createTaskFilterRepository?: TaskFilterRouteDependencies['createRepository'];
 }
 
 function toApiHttpError(error: EffectiveAccessError): ApiHttpError {
@@ -100,23 +108,6 @@ function toCurrentIdentityApiError(error: CurrentIdentityError): ApiHttpError {
       return new ApiHttpError(401, 'UNAUTHENTICATED');
     case 'unavailable':
       return new ApiHttpError(503, 'ACCESS_VERIFICATION_UNAVAILABLE');
-  }
-}
-
-function toBitrixSearchApiError(failure: BitrixFailure): ApiHttpError {
-  switch (failure.kind) {
-    case 'not_authenticated':
-      return new ApiHttpError(401, 'UNAUTHENTICATED');
-    case 'permission_denied':
-    case 'not_found_or_forbidden':
-      return new ApiHttpError(403, 'FORBIDDEN');
-    case 'rate_limited':
-      return new ApiHttpError(429, 'RATE_LIMITED');
-    case 'temporary_failure':
-    case 'permanent_failure':
-    case 'invalid_external_response':
-    case 'unsupported_capability':
-      return new ApiHttpError(503, 'UPSTREAM_UNAVAILABLE');
   }
 }
 
@@ -204,6 +195,16 @@ export function createApi(dependencies: ApiDependencies = {}) {
       createAdapter: bitrixAdapterFactory,
       createRepository:
         dependencies.createAccessManagementRepository ?? createAccessManagementRepository,
+    }),
+  );
+  api.route(
+    '/api/tasks',
+    createTaskFilterRoutes({
+      readPrincipal: (env, cookie, correlationId) =>
+        readCurrentPrincipal(env, cookie, correlationId),
+      readEffectiveAccess,
+      createAdapter: bitrixAdapterFactory,
+      createRepository: dependencies.createTaskFilterRepository ?? createTaskCommanderRepositories,
     }),
   );
 
@@ -298,11 +299,18 @@ export function createApi(dependencies: ApiDependencies = {}) {
     let rawPage: unknown;
     try {
       const adapter = bitrixAdapterFactory(context.env, { currentUserId: principal.userId });
+      const capabilities = await adapter.tasks.getFieldCapabilities();
+      if (!capabilities.ok) throw toTaskFilterBitrixApiError(capabilities.failure);
+      const catalog = createTaskFilterCatalog(capabilities.value);
+      requireValidTaskSearchDefinition(request, catalog);
       const result = await adapter.tasks.search(request);
-      if (!result.ok) throw toBitrixSearchApiError(result.failure);
+      if (!result.ok) throw toTaskFilterBitrixApiError(result.failure);
       rawPage = result.value;
     } catch (error) {
       if (error instanceof ApiHttpError) throw error;
+      if (error instanceof InvalidTaskSearchDefinitionError) {
+        throw new ApiHttpError(400, 'INVALID_REQUEST');
+      }
       throw new ApiHttpError(503, 'UPSTREAM_UNAVAILABLE');
     }
 

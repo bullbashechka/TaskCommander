@@ -49,6 +49,76 @@ describe('task search contracts', () => {
     ).toBe(true);
   });
 
+  it('rejects duplicate fields and reversed ranges', () => {
+    expect(
+      taskSearchApiRequestSchema.safeParse({
+        filters: [
+          { kind: 'text', fieldId: 'title', operator: 'contains', values: ['one'] },
+          { kind: 'text', fieldId: 'title', operator: 'contains', values: ['two'] },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      taskSearchApiRequestSchema.safeParse({
+        filters: [
+          {
+            kind: 'date_time',
+            fieldId: 'deadline',
+            operator: 'between',
+            values: ['2026-09-05T10:00:00+05:00', '2026-09-04T10:00:00+05:00'],
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      taskSearchApiRequestSchema.safeParse({
+        filters: [
+          {
+            kind: 'number',
+            fieldId: 'effort',
+            operator: 'between',
+            values: [10, 5],
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      taskSearchApiRequestSchema.safeParse({
+        filters: [{ kind: 'number', fieldId: 'effort', operator: 'equals', values: [Infinity] }],
+      }).success,
+    ).toBe(false);
+  });
+
+  it('rejects duplicate OR values', () => {
+    expect(
+      taskSearchApiRequestSchema.safeParse({
+        filters: [
+          {
+            kind: 'user',
+            fieldId: 'responsible_id',
+            operator: 'equals',
+            values: ['10', '10'],
+          },
+        ],
+      }).success,
+    ).toBe(false);
+  });
+
+  it('rejects the date-time not-equals operator absent from the PRD matrix', () => {
+    expect(
+      taskSearchApiRequestSchema.safeParse({
+        filters: [
+          {
+            kind: 'date_time',
+            fieldId: 'deadline',
+            operator: 'not_equals',
+            values: ['2026-09-04T10:00:00Z'],
+          },
+        ],
+      }).success,
+    ).toBe(false);
+  });
+
   it('rejects a page whose upper boundary exceeds the safe integer range', () => {
     expect(
       taskSearchApiRequestSchema.safeParse({

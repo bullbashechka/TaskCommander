@@ -22,6 +22,7 @@ import {
 import { ApiStatusCard, useHealth } from '@/features/health/api-status-card';
 import { HomeDashboard } from '@/features/home/home-dashboard';
 import { RuntimeTable } from '@/features/status/runtime-table';
+import { TaskFiltersPage } from '@/features/tasks/task-filters-page';
 import { ru } from '@/locales/ru';
 
 type RouterContext = {
@@ -131,7 +132,7 @@ const configureRoute = createRoute({ getParentRoute: () => protectedRoute, path:
 const reviewRoute = createRoute({ getParentRoute: () => protectedRoute, path: '/access/review', beforeLoad: routeGuard('access'), validateSearch: parsePreflightSearch, component: ReviewRoutePage, errorComponent: RouteErrorState });
 const commandRoute = createRoute({ getParentRoute: () => protectedRoute, path: '/access/commands/$commandId', beforeLoad: routeGuard('access'), component: CommandRoutePage, errorComponent: RouteErrorState });
 const repairRoute = createRoute({ getParentRoute: () => protectedRoute, path: '/access/admin-repair', beforeLoad: routeGuard('access'), component: AccessAdminRepairPage, errorComponent: RouteErrorState });
-const tasksRoute = createRoute({ getParentRoute: () => protectedRoute, path: '/tasks', beforeLoad: routeGuard('tasks'), component: () => <PlaceholderPage title="Массовое изменение" />, errorComponent: RouteErrorState });
+const tasksRoute = createRoute({ getParentRoute: () => protectedRoute, path: '/tasks', beforeLoad: routeGuard('tasks'), component: TaskFiltersPage, errorComponent: RouteErrorState });
 const operationsRoute = createRoute({ getParentRoute: () => protectedRoute, path: '/operations', beforeLoad: routeGuard('operations'), component: () => <PlaceholderPage title="Операции" />, errorComponent: RouteErrorState });
 const reportsRoute = createRoute({ getParentRoute: () => protectedRoute, path: '/reports', beforeLoad: routeGuard('reports'), component: () => <PlaceholderPage title="Отчёты" />, errorComponent: RouteErrorState });
 const auditRoute = createRoute({ getParentRoute: () => protectedRoute, path: '/audit', beforeLoad: routeGuard('audit'), component: () => <PlaceholderPage title="Аудит" />, errorComponent: RouteErrorState });
