@@ -39,6 +39,7 @@ export function enforceBitrixOriginPolicy(
         validateResult(adapter.tasks.search(request), (page) =>
           page.items.every((item) => portalUrl(item.taskUrl)),
         ),
+      selectAll: (request) => adapter.tasks.selectAll(request),
       readForChange: (request) =>
         validateResult(adapter.tasks.readForChange(request), (snapshot) =>
           portalUrl(snapshot.taskUrl),

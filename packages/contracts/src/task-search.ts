@@ -30,14 +30,25 @@ export const taskSearchApiRequestSchema = z
 
 export type TaskSearchApiRequest = z.infer<typeof taskSearchApiRequestSchema>;
 
+export const taskSelectAllApiRequestSchema = z
+  .object({
+    filters: taskFilterListSchema.default([]),
+    sort: taskSearchSortSchema.default({ fieldId: 'deadline', direction: 'asc' }),
+  })
+  .strict();
+
+export type TaskSelectAllApiRequest = z.infer<typeof taskSelectAllApiRequestSchema>;
+
 export const taskSearchItemSchema = z
   .object({
     id: bitrixIdSchema,
     title: z.string().trim().min(1).max(1024),
     taskUrl: safeHttpsUrlSchema,
     parentId: bitrixIdSchema.nullable(),
+    groupId: bitrixIdSchema.nullable(),
     status: z.enum(['pending', 'in_progress', 'pending_review', 'deferred']),
     responsibleId: bitrixIdSchema,
+    responsibleName: z.string().trim().min(1).max(256).nullable(),
     deadline: isoDateTimeSchema.nullable(),
     priority: z.enum(['normal', 'high']),
     relevantVersion: z.string().trim().min(1).max(256),
@@ -73,3 +84,42 @@ export const taskSearchApiResponseSchema = z
   });
 
 export type TaskSearchApiResponse = z.infer<typeof taskSearchApiResponseSchema>;
+
+const selectedTasksResponseSchema = z
+  .object({
+    kind: z.literal('selected'),
+    taskIds: z.array(bitrixIdSchema).min(1).max(1_000),
+    total: z.number().int().safe().min(1).max(1_000),
+  })
+  .strict();
+
+export const taskSelectAllApiResponseSchema = z
+  .discriminatedUnion('kind', [
+    selectedTasksResponseSchema,
+    z.object({ kind: z.literal('empty'), total: z.literal(0) }).strict(),
+    z
+      .object({
+        kind: z.literal('too_many'),
+        total: z.number().int().safe().min(1_001),
+      })
+      .strict(),
+  ])
+  .superRefine((response, context) => {
+    if (response.kind !== 'selected') return;
+    if (new Set(response.taskIds).size !== response.taskIds.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['taskIds'],
+        message: 'Selected task IDs must be unique.',
+      });
+    }
+    if (response.taskIds.length !== response.total) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['total'],
+        message: 'Selected task total must equal the number of task IDs.',
+      });
+    }
+  });
+
+export type TaskSelectAllApiResponse = z.infer<typeof taskSelectAllApiResponseSchema>;

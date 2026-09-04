@@ -24,6 +24,14 @@ export async function expectBitrixAdapterContract(adapter: BitrixAdapter): Promi
   );
   expect(page.items).toHaveLength(1);
 
+  const selection = expectSuccess(
+    await adapter.tasks.selectAll({
+      filters: [],
+      sort: { fieldId: 'deadline', direction: 'asc' },
+    }),
+  );
+  expect(selection.kind).toBe('too_many');
+
   const task = page.items[0];
   if (!task) {
     throw new Error('The adapter returned an empty first task page.');

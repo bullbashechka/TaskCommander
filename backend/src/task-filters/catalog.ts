@@ -68,7 +68,7 @@ export function requireValidTaskFilters(
 }
 
 export function requireValidTaskSearchDefinition(
-  request: TaskSearchRequest,
+  request: Pick<TaskSearchRequest, 'filters' | 'sort'>,
   catalog: TaskFilterCatalogResponse,
 ): void {
   const fieldsById = new Map(catalog.fields.map((field) => [field.id, field]));

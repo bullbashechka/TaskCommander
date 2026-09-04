@@ -7,6 +7,8 @@ import {
   sessionResponseSchema,
   taskSearchApiRequestSchema,
   taskSearchApiResponseSchema,
+  taskSelectAllApiRequestSchema,
+  taskSelectAllApiResponseSchema,
 } from '@task-commander/contracts';
 
 import {
@@ -39,7 +41,7 @@ import {
 import { createApiErrorResponse, ApiHttpError } from './http/errors';
 import type { BitrixAdapter } from './integrations/bitrix/contract';
 import { createBitrixAdapter } from './integrations/bitrix/factory';
-import { taskSearchPageSchema } from './integrations/bitrix/schemas';
+import { taskSearchPageSchema, taskSelectAllResultSchema } from './integrations/bitrix/schemas';
 import {
   createTaskFilterCatalog,
   InvalidTaskSearchDefinitionError,
@@ -318,12 +320,13 @@ export function createApi(dependencies: ApiDependencies = {}) {
     if (!page.success) throw new ApiHttpError(503, 'UPSTREAM_UNAVAILABLE');
 
     const pageStart = (request.page - 1) * request.pageSize;
-    const returnedEnd = pageStart + page.data.items.length;
-    const expectedHasNextPage = returnedEnd < page.data.total;
+    const expectedItemCount = Math.min(
+      request.pageSize,
+      Math.max(0, page.data.total - pageStart),
+    );
+    const expectedHasNextPage = pageStart + expectedItemCount < page.data.total;
     const invalidPagination =
-      (page.data.items.length > 0 && returnedEnd > page.data.total) ||
-      (pageStart < page.data.total && page.data.items.length === 0) ||
-      (expectedHasNextPage && page.data.items.length !== request.pageSize) ||
+      page.data.items.length !== expectedItemCount ||
       page.data.hasNextPage !== expectedHasNextPage;
     if (invalidPagination) throw new ApiHttpError(503, 'UPSTREAM_UNAVAILABLE');
 
@@ -334,6 +337,46 @@ export function createApi(dependencies: ApiDependencies = {}) {
         pageSize: request.pageSize,
       }),
     );
+  });
+
+  api.post('/api/tasks/select-all', async (context) => {
+    const principal = await readCurrentPrincipal(
+      context.env,
+      context.req.header('cookie') ?? null,
+      context.get('correlationId'),
+    );
+
+    try {
+      const access = await readEffectiveAccess(context.env, principal);
+      requirePermission(access, 'app_access');
+    } catch (error) {
+      if (error instanceof EffectiveAccessError) throw toApiHttpError(error);
+      throw error;
+    }
+
+    const request = await parseJsonBody(context.req.raw, taskSelectAllApiRequestSchema);
+
+    let rawResolution: unknown;
+    try {
+      const adapter = bitrixAdapterFactory(context.env, { currentUserId: principal.userId });
+      const capabilities = await adapter.tasks.getFieldCapabilities();
+      if (!capabilities.ok) throw toTaskFilterBitrixApiError(capabilities.failure);
+      const catalog = createTaskFilterCatalog(capabilities.value);
+      requireValidTaskSearchDefinition(request, catalog);
+      const result = await adapter.tasks.selectAll(request);
+      if (!result.ok) throw toTaskFilterBitrixApiError(result.failure);
+      rawResolution = result.value;
+    } catch (error) {
+      if (error instanceof ApiHttpError) throw error;
+      if (error instanceof InvalidTaskSearchDefinitionError) {
+        throw new ApiHttpError(400, 'INVALID_REQUEST');
+      }
+      throw new ApiHttpError(503, 'UPSTREAM_UNAVAILABLE');
+    }
+
+    const resolution = taskSelectAllResultSchema.safeParse(rawResolution);
+    if (!resolution.success) throw new ApiHttpError(503, 'UPSTREAM_UNAVAILABLE');
+    return context.json(taskSelectAllApiResponseSchema.parse(resolution.data));
   });
 
   api.post('/api/_runtime/probe', async (context) => {

@@ -5,6 +5,8 @@ import {
   fieldIdSchema,
   isoDateTimeSchema,
   safeHttpsUrlSchema,
+  taskSelectAllApiRequestSchema,
+  taskSelectAllApiResponseSchema,
   taskFieldKindSchema,
   taskFilterListSchema,
 } from '@task-commander/contracts';
@@ -120,8 +122,10 @@ export const taskSummarySchema = z
     title: z.string().trim().min(1).max(1024),
     taskUrl: safeHttpsUrlSchema,
     parentId: bitrixIdSchema.nullable(),
+    groupId: bitrixIdSchema.nullable(),
     status: z.enum(['pending', 'in_progress', 'pending_review', 'deferred']),
     responsibleId: bitrixIdSchema,
+    responsibleName: z.string().trim().min(1).max(256).nullable(),
     deadline: isoDateTimeSchema.nullable(),
     priority: z.enum(['normal', 'high']),
     relevantVersion: z.string().trim().min(1).max(256),
@@ -174,6 +178,9 @@ export const taskSearchPageSchema = z
       });
     }
   });
+
+export const taskSelectAllRequestSchema = taskSelectAllApiRequestSchema;
+export const taskSelectAllResultSchema = taskSelectAllApiResponseSchema;
 
 export const taskChangeSnapshotSchema = z
   .object({

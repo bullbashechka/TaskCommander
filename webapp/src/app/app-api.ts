@@ -9,6 +9,8 @@ import {
   taskFilterUserSearchResponseSchema,
   taskSearchApiRequestSchema,
   taskSearchApiResponseSchema,
+  taskSelectAllApiRequestSchema,
+  taskSelectAllApiResponseSchema,
   type ApiErrorCode,
   type EffectiveAccessResponse,
   type SavedTaskFilter,
@@ -18,6 +20,8 @@ import {
   type TaskFilterUserSearchResponse,
   type TaskSearchApiRequest,
   type TaskSearchApiResponse,
+  type TaskSelectAllApiRequest,
+  type TaskSelectAllApiResponse,
 } from '@task-commander/contracts';
 
 import { notifySecurityContextInvalidated } from '@/app/access-sync';
@@ -273,6 +277,18 @@ export function searchTasks(
 ): Promise<TaskSearchApiResponse> {
   const parsed = taskSearchApiRequestSchema.parse(input);
   return requestJson('/api/tasks/search', taskSearchApiResponseSchema, signal, {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(parsed),
+  });
+}
+
+export function selectAllTasks(
+  input: TaskSelectAllApiRequest,
+  signal?: AbortSignal,
+): Promise<TaskSelectAllApiResponse> {
+  const parsed = taskSelectAllApiRequestSchema.parse(input);
+  return requestJson('/api/tasks/select-all', taskSelectAllApiResponseSchema, signal, {
     method: 'POST',
     headers: jsonHeaders,
     body: JSON.stringify(parsed),

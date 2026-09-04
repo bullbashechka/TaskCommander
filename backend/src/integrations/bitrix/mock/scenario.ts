@@ -3,6 +3,7 @@ import type { MockTaskStatus } from './fixtures';
 
 export type MockScenarioMethod =
   | 'tasks.search'
+  | 'tasks.selectAll'
   | 'tasks.readForChange'
   | 'tasks.applyChange'
   | 'users.getCurrent'

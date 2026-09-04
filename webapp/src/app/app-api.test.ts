@@ -6,6 +6,7 @@ import {
   createSavedTaskFilter,
   deleteSavedTaskFilter,
   fetchTaskFilterCatalog,
+  selectAllTasks,
   searchTasks,
   updateSavedTaskFilter,
 } from './app-api';
@@ -86,7 +87,9 @@ describe('task filter API client', () => {
       const payload =
         String(input) === '/api/tasks/search'
           ? { items: [], total: 0, page: 1, pageSize: 50, hasNextPage: false }
-          : saved;
+          : String(input) === '/api/tasks/select-all'
+            ? { kind: 'selected', taskIds: ['42'], total: 1 }
+            : saved;
       return Promise.resolve(
         new Response(status === 204 ? null : JSON.stringify(payload), {
           status,
@@ -102,21 +105,26 @@ describe('task filter API client', () => {
       page: 1,
       pageSize: 50,
     });
+    await selectAllTasks({ filters: [], sort: { fieldId: 'deadline', direction: 'asc' } });
     await createSavedTaskFilter({ name: 'Срочные', filters: [] });
     await updateSavedTaskFilter({ ...saved, name: 'Сегодня' });
     await deleteSavedTaskFilter(saved);
 
     expect(request.mock.calls.map((call) => call[0])).toEqual([
       '/api/tasks/search',
+      '/api/tasks/select-all',
       '/api/tasks/saved-filters',
       `/api/tasks/saved-filters/${saved.id}`,
       `/api/tasks/saved-filters/${saved.id}`,
     ]);
     expect((request.mock.calls[0]?.[1] as RequestInit).method).toBe('POST');
-    expect((request.mock.calls[2]?.[1] as RequestInit).body).toBe(
-      JSON.stringify({ name: 'Сегодня', expectedRevision: 1 }),
+    expect((request.mock.calls[1]?.[1] as RequestInit).body).toBe(
+      JSON.stringify({ filters: [], sort: { fieldId: 'deadline', direction: 'asc' } }),
     );
     expect((request.mock.calls[3]?.[1] as RequestInit).body).toBe(
+      JSON.stringify({ name: 'Сегодня', expectedRevision: 1 }),
+    );
+    expect((request.mock.calls[4]?.[1] as RequestInit).body).toBe(
       JSON.stringify({ expectedRevision: 1 }),
     );
   });

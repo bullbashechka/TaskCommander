@@ -1,11 +1,18 @@
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useMemo, useState } from 'react';
+import {
+  keepPreviousData,
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import type {
   SavedTaskFilter,
   TaskFilterField,
   TaskFilterList,
   TaskSearchApiRequest,
+  TaskSelectAllApiRequest,
 } from '@task-commander/contracts';
 
 import {
@@ -14,6 +21,7 @@ import {
   deleteSavedTaskFilter,
   fetchTaskFilterCatalog,
   listSavedTaskFilters,
+  selectAllTasks,
   searchTaskFilterUsers,
   searchTasks,
   updateSavedTaskFilter,
@@ -32,8 +40,15 @@ import {
   parseTaskFilterDrafts,
   type TaskFilterDraft,
 } from './task-filter-model';
+import { TaskResultsTable } from './task-results-table';
 
 type ErrorDetails = { message: string; eventId?: string };
+type PendingSelectionReset = { apply: () => void };
+type SelectAllMutationInput = {
+  generation: number;
+  request: TaskSelectAllApiRequest;
+  signal: AbortSignal;
+};
 
 function errorDetails(error: unknown): ErrorDetails {
   if (error instanceof AppApiError) {
@@ -242,7 +257,9 @@ function ValueEditor({
               {count === 2 ? (index === 0 ? 'Начало' : 'Конец') : `Значение ${index + 1}`}
             </span>
             <input
-              aria-label={`${field.label}: ${count === 2 ? (index === 0 ? 'начало' : 'конец') : `значение ${index + 1}`}`}
+              aria-label={`${field.label}: ${
+                count === 2 ? (index === 0 ? 'начало' : 'конец') : `значение ${index + 1}`
+              }`}
               onChange={(event) =>
                 onChange(
                   draft.values.map((item, itemIndex) =>
@@ -367,6 +384,15 @@ export function TaskFiltersPage() {
   const [dialogMode, setDialogMode] = useState<'create' | 'rename' | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [appliedRequest, setAppliedRequest] = useState<TaskSearchApiRequest | null>(null);
+  const [selectedTaskIds, setSelectedTaskIds] = useState<Set<string>>(() => new Set());
+  const [selectionSource, setSelectionSource] = useState<'manual' | 'all-filtered'>('manual');
+  const [selectionTotal, setSelectionTotal] = useState<number | null>(null);
+  const [selectionError, setSelectionError] = useState<ErrorDetails | null>(null);
+  const [pendingSelectionReset, setPendingSelectionReset] =
+    useState<PendingSelectionReset | null>(null);
+  const selectionGeneration = useRef(0);
+  const selectionAbortController = useRef<AbortController | null>(null);
+  const filterBuilderHeadingRef = useRef<HTMLHeadingElement>(null);
   const sortableFields = useMemo(
     () => catalog.data?.fields.filter((field) => field.sortable) ?? [],
     [catalog.data],
@@ -394,7 +420,95 @@ export function TaskFiltersPage() {
         ? searchTasks(effectiveAppliedRequest, signal)
         : Promise.reject(new Error('No sortable task fields.')),
     enabled: catalog.isSuccess && effectiveAppliedRequest !== null,
+    placeholderData: keepPreviousData,
   });
+  const selectAllMutation = useMutation({
+    mutationFn: ({ request, signal }: SelectAllMutationInput) => selectAllTasks(request, signal),
+    onSuccess: async (result, input) => {
+      if (input.generation !== selectionGeneration.current) return;
+      if (result.kind === 'selected') {
+        setSelectedTaskIds(new Set(result.taskIds));
+        setSelectionSource('all-filtered');
+        setSelectionTotal(result.total);
+        setSelectionError(null);
+      } else if (result.kind === 'too_many') {
+        setSelectionSource('manual');
+        setSelectionTotal(null);
+        setSelectionError({
+          message:
+            `Найдено ${result.total.toLocaleString('ru-RU')} задач. ` +
+            'Сузьте фильтр до 1 000 задач.',
+        });
+      } else {
+        setSelectedTaskIds(new Set());
+        setSelectionSource('manual');
+        setSelectionTotal(null);
+        setSelectionError({ message: 'Результат изменился: доступных задач больше нет.' });
+      }
+      const refreshed = await search.refetch();
+      if (input.generation !== selectionGeneration.current) return;
+      if (refreshed.isError && result.kind === 'selected') {
+        setSelectionError({
+          message: 'Задачи выбраны, но текущую страницу не удалось обновить.',
+        });
+      } else if (
+        result.kind === 'selected' &&
+        refreshed.data &&
+        (refreshed.data.total !== result.total ||
+          refreshed.data.items.some((task) => !result.taskIds.includes(task.id)))
+      ) {
+        setSelectionSource('manual');
+        setSelectionTotal(null);
+        setSelectionError({
+          message: 'Результат снова изменился после выбора. Повторите выбор всего результата.',
+        });
+      }
+    },
+    onError: (error, input) => {
+      if (input.generation === selectionGeneration.current) {
+        setSelectionError(errorDetails(error));
+      }
+    },
+    onSettled: (_result, _error, input) => {
+      if (input.generation === selectionGeneration.current) {
+        selectionAbortController.current = null;
+      }
+    },
+  });
+  useEffect(() => {
+    if (
+      search.isFetching ||
+      search.isError ||
+      selectionSource !== 'all-filtered' ||
+      selectionTotal === null ||
+      !search.data
+    ) {
+      return;
+    }
+    const resultChanged =
+      search.data.total !== selectionTotal ||
+      search.data.items.some((task) => !selectedTaskIds.has(task.id));
+    if (!resultChanged) return;
+    setSelectionSource('manual');
+    setSelectionTotal(null);
+    setSelectionError({
+      message: 'Результат изменился после выбора. Повторите выбор всего результата.',
+    });
+  }, [
+    search.data,
+    search.isError,
+    search.isFetching,
+    selectedTaskIds,
+    selectionSource,
+    selectionTotal,
+  ]);
+  useEffect(() => {
+    if (!search.data || !effectiveAppliedRequest || search.isPlaceholderData) return;
+    const lastPage = Math.max(1, Math.ceil(search.data.total / search.data.pageSize));
+    if (effectiveAppliedRequest.page > lastPage) {
+      setAppliedRequest({ ...effectiveAppliedRequest, page: lastPage });
+    }
+  }, [effectiveAppliedRequest, search.data, search.isPlaceholderData]);
   const selectedSaved = savedFilters.data?.find((filter) => filter.id === selectedSavedId);
   const usedFieldIds = new Set([
     ...drafts.map((draft) => draft.fieldId),
@@ -570,6 +684,100 @@ export function TaskFiltersPage() {
     );
   }
 
+  function clearSelectionState() {
+    selectionGeneration.current += 1;
+    selectionAbortController.current?.abort();
+    selectionAbortController.current = null;
+    selectAllMutation.reset();
+    setSelectedTaskIds(new Set());
+    setSelectionSource('manual');
+    setSelectionTotal(null);
+    setSelectionError(null);
+  }
+
+  function selectAllCurrentResult() {
+    if (!effectiveAppliedRequest) return;
+    selectionAbortController.current?.abort();
+    const controller = new AbortController();
+    selectionAbortController.current = controller;
+    const generation = selectionGeneration.current + 1;
+    selectionGeneration.current = generation;
+    setSelectionError(null);
+    selectAllMutation.mutate({
+      generation,
+      signal: controller.signal,
+      request: {
+        filters: effectiveAppliedRequest.filters,
+        sort: effectiveAppliedRequest.sort,
+      },
+    });
+  }
+
+  function changeFilter(apply: () => void) {
+    if (selectedTaskIds.size === 0) {
+      clearSelectionState();
+      apply();
+      return;
+    }
+    const currentPageIds = new Set(search.data?.items.map((task) => task.id) ?? []);
+    const includesOffPageSelection = [...selectedTaskIds].some(
+      (taskId) => !currentPageIds.has(taskId),
+    );
+    if (includesOffPageSelection) {
+      setPendingSelectionReset({
+        apply: () => {
+          clearSelectionState();
+          apply();
+        },
+      });
+      return;
+    }
+    clearSelectionState();
+    apply();
+  }
+
+  function toggleTask(taskId: string, selected: boolean) {
+    setSelectionError(null);
+    setSelectionSource('manual');
+    setSelectionTotal(null);
+    setSelectedTaskIds((current) => {
+      if (selected && current.size >= 1000) return current;
+      const next = new Set(current);
+      if (selected) next.add(taskId);
+      else next.delete(taskId);
+      return next;
+    });
+  }
+
+  function togglePage(taskIds: string[], selected: boolean) {
+    const additionalCount = taskIds.filter((taskId) => !selectedTaskIds.has(taskId)).length;
+    if (selected && selectedTaskIds.size + additionalCount > 1000) {
+      setSelectionError({ message: 'Нельзя выбрать больше 1 000 задач.' });
+      return;
+    }
+    setSelectionError(null);
+    setSelectionSource('manual');
+    setSelectionTotal(null);
+    setSelectedTaskIds((current) => {
+      const next = new Set(current);
+      for (const taskId of taskIds) {
+        if (selected) next.add(taskId);
+        else next.delete(taskId);
+      }
+      return next;
+    });
+  }
+
+  function changePage(page: number) {
+    if (!effectiveAppliedRequest || page < 1) return;
+    setAppliedRequest({ ...effectiveAppliedRequest, page });
+  }
+
+  function changePageSize(pageSize: number) {
+    if (!effectiveAppliedRequest) return;
+    setAppliedRequest({ ...effectiveAppliedRequest, page: 1, pageSize });
+  }
+
   function parseCurrentFilters(): TaskFilterList | null {
     const parsed = currentParsed;
     if (!parsed) return null;
@@ -583,28 +791,37 @@ export function TaskFiltersPage() {
 
   function applyFilters(filters = parseCurrentFilters()) {
     if (!filters) return;
-    const next: TaskSearchApiRequest = { filters, sort, page: 1, pageSize: 50 };
+    const next: TaskSearchApiRequest = {
+      filters,
+      sort,
+      page: 1,
+      pageSize: effectiveAppliedRequest?.pageSize ?? 50,
+    };
     if (JSON.stringify(next) === JSON.stringify(effectiveAppliedRequest)) void search.refetch();
     else setAppliedRequest(next);
   }
 
   function applySavedFilter(saved: SavedTaskFilter) {
-    setSelectedSavedId(saved.id);
     if (!areTaskFiltersCompatibleWithCatalog(saved.filters, catalog.data.fields)) {
+      setSelectedSavedId(saved.id);
       setSavedError({ message: 'Набор больше не соответствует доступным полям и значениям.' });
       return;
     }
     const state = draftsFromFilters(saved.filters);
     const parsed = parseTaskFilterDrafts(state.titleSearch, state.drafts, catalog.data.fields);
     if (!parsed.success) {
+      setSelectedSavedId(saved.id);
       setSavedError({ message: 'Набор больше не соответствует доступным полям и значениям.' });
       return;
     }
-    setTitleSearch(state.titleSearch);
-    setDrafts(state.drafts);
-    setValidationError('');
-    setSavedError(null);
-    applyFilters(parsed.filters);
+    changeFilter(() => {
+      setSelectedSavedId(saved.id);
+      setTitleSearch(state.titleSearch);
+      setDrafts(state.drafts);
+      setValidationError('');
+      setSavedError(null);
+      applyFilters(parsed.filters);
+    });
   }
 
   function submitSavedFilter(name: string) {
@@ -626,11 +843,13 @@ export function TaskFiltersPage() {
   }
 
   function clearFilters() {
-    setTitleSearch('');
-    setDrafts([]);
-    setSelectedSavedId('');
-    setValidationError('');
-    applyFilters([]);
+    changeFilter(() => {
+      setTitleSearch('');
+      setDrafts([]);
+      setSelectedSavedId('');
+      setValidationError('');
+      applyFilters([]);
+    });
   }
 
   return (
@@ -667,7 +886,10 @@ export function TaskFiltersPage() {
                 drafts.some((draft) => draft.fieldId === 'title') ||
                 (activeCount >= 256 && !titleSearch.trim())
               }
-              onChange={(event) => setTitleSearch(event.target.value)}
+              onChange={(event) => {
+                const value = event.target.value;
+                changeFilter(() => setTitleSearch(value));
+              }}
               placeholder="Название задачи"
               type="search"
               value={titleSearch}
@@ -695,7 +917,7 @@ export function TaskFiltersPage() {
         <Card className="task-filter-builder-card">
           <div className="task-card-heading">
             <div>
-              <h2 id="task-filter-builder" tabIndex={-1}>
+              <h2 id="task-filter-builder" ref={filterBuilderHeadingRef} tabIndex={-1}>
                 Условия фильтра
               </h2>
               <p>
@@ -721,8 +943,11 @@ export function TaskFiltersPage() {
                 disabled={!selectedFieldId || activeCount >= 256}
                 onClick={() => {
                   const field = fieldsById.get(selectedFieldId);
-                  if (field) setDrafts((current) => [...current, createTaskFilterDraft(field)]);
-                  setSelectedFieldId('');
+                  if (!field) return;
+                  changeFilter(() => {
+                    setDrafts((current) => [...current, createTaskFilterDraft(field)]);
+                    setSelectedFieldId('');
+                  });
                 }}
                 type="button"
               >
@@ -758,9 +983,11 @@ export function TaskFiltersPage() {
                       aria-label={`Оператор поля ${field.label}`}
                       onChange={(event) => {
                         const operator = event.target.value as TaskFilterDraft['operator'];
-                        setDrafts((current) =>
-                          current.map((item) =>
-                            item.key === draft.key ? changeDraftOperator(item, operator) : item,
+                        changeFilter(() =>
+                          setDrafts((current) =>
+                            current.map((item) =>
+                              item.key === draft.key ? changeDraftOperator(item, operator) : item,
+                            ),
                           ),
                         );
                       }}
@@ -775,7 +1002,11 @@ export function TaskFiltersPage() {
                     <button
                       className="button-link"
                       onClick={() =>
-                        setDrafts((current) => current.filter((item) => item.key !== draft.key))
+                        changeFilter(() =>
+                          setDrafts((current) =>
+                            current.filter((item) => item.key !== draft.key),
+                          ),
+                        )
                       }
                       type="button"
                     >
@@ -786,9 +1017,11 @@ export function TaskFiltersPage() {
                     draft={draft}
                     field={field}
                     onChange={(values) =>
-                      setDrafts((current) =>
-                        current.map((item) =>
-                          item.key === draft.key ? { ...item, values } : item,
+                      changeFilter(() =>
+                        setDrafts((current) =>
+                          current.map((item) =>
+                            item.key === draft.key ? { ...item, values } : item,
+                          ),
                         ),
                       )
                     }
@@ -954,6 +1187,179 @@ export function TaskFiltersPage() {
         ) : null}
       </Card>
 
+      {search.isPending ? (
+        <Card className="task-table-loading">
+          <div aria-busy="true" aria-label="Загрузка таблицы задач">
+            <div className="skeleton task-table-skeleton-head" />
+            <div className="skeleton task-table-skeleton-body" />
+          </div>
+        </Card>
+      ) : null}
+
+      {search.data && search.data.total > 0 ? (
+        <Card
+          aria-busy={search.isFetching}
+          aria-label="Результаты поиска задач"
+          className="task-table-card"
+        >
+          {selectedTaskIds.size > 0 || search.data.total > 1000 || selectionError ? (
+            <section
+              aria-live="polite"
+              className="task-selection-summary"
+              id="task-selection-summary"
+              tabIndex={-1}
+            >
+              <div>
+                <strong>Выбрано: {selectedTaskIds.size.toLocaleString('ru-RU')}</strong>
+                <span>
+                  из {(selectionTotal ?? search.data.total).toLocaleString('ru-RU')} задач
+                </span>
+                {selectionSource === 'all-filtered' ? (
+                  <small>Выбран весь результат подтверждённого сервером фильтра.</small>
+                ) : null}
+              </div>
+              <div className="task-selection-actions">
+                <button
+                  className="button-link"
+                  disabled={
+                    hasPendingChanges ||
+                    search.isFetching ||
+                    selectAllMutation.isPending ||
+                    search.data.total === 0 ||
+                    search.data.total > 1000
+                  }
+                  onClick={selectAllCurrentResult}
+                  type="button"
+                >
+                  {selectAllMutation.isPending ? 'Проверяем выбор…' : 'Выбрать все'}
+                </button>
+                <button
+                  className="button-link"
+                  disabled={selectedTaskIds.size === 0 || selectAllMutation.isPending}
+                  onClick={clearSelectionState}
+                  type="button"
+                >
+                  Снять выбор
+                </button>
+              </div>
+              {search.data.total > 1000 ? (
+                <p className="task-selection-limit" role="status">
+                  Выбор всего результата недоступен: найдено{' '}
+                  {search.data.total.toLocaleString('ru-RU')} задач. Сузьте фильтр до 1 000 задач.
+                </p>
+              ) : null}
+              {selectedTaskIds.size >= 1000 ? (
+                <p className="task-selection-limit" role="status">
+                  Достигнут предел одной операции: 1 000 задач.
+                </p>
+              ) : null}
+              {selectionError ? (
+                <InlineError
+                  details={selectionError}
+                  onRetry={
+                    search.data.total <= 1000 ? selectAllCurrentResult : undefined
+                  }
+                />
+              ) : null}
+            </section>
+          ) : null}
+
+          <TaskResultsTable
+            items={search.data.items}
+            onTogglePage={togglePage}
+            onToggleTask={toggleTask}
+            selectedIds={selectedTaskIds}
+            selectionDisabled={
+              hasPendingChanges ||
+              search.isError ||
+              search.isFetching ||
+              selectAllMutation.isPending
+            }
+          />
+
+          <footer className="task-pagination" aria-label="Пагинация задач">
+            <p>
+              {((search.data.page - 1) * search.data.pageSize + 1).toLocaleString('ru-RU')}–
+              {Math.min(
+                search.data.page * search.data.pageSize,
+                search.data.total,
+              ).toLocaleString('ru-RU')}{' '}
+              из {search.data.total.toLocaleString('ru-RU')}
+            </p>
+            <label>
+              На странице
+              <select
+                aria-disabled={search.isError || search.isFetching}
+                onChange={(event) => {
+                  if (!search.isError && !search.isFetching) {
+                    changePageSize(Number(event.target.value));
+                  }
+                }}
+                value={search.data.pageSize}
+              >
+                <option value="25">25</option>
+                <option value="50">50</option>
+              </select>
+            </label>
+            <div className="task-page-actions">
+              <button
+                aria-disabled={search.data.page <= 1 || search.isError || search.isFetching}
+                className="button-secondary"
+                onClick={() => {
+                  if (search.data!.page > 1 && !search.isError && !search.isFetching) {
+                    changePage(search.data!.page - 1);
+                  }
+                }}
+                type="button"
+              >
+                Назад
+              </button>
+              <span>
+                Страница {search.data.page.toLocaleString('ru-RU')} из{' '}
+                {Math.max(
+                  1,
+                  Math.ceil(search.data.total / search.data.pageSize),
+                ).toLocaleString('ru-RU')}
+              </span>
+              <button
+                aria-disabled={
+                  !search.data.hasNextPage || search.isError || search.isFetching
+                }
+                className="button-secondary"
+                onClick={() => {
+                  if (search.data!.hasNextPage && !search.isError && !search.isFetching) {
+                    changePage(search.data!.page + 1);
+                  }
+                }}
+                type="button"
+              >
+                Далее
+              </button>
+            </div>
+          </footer>
+        </Card>
+      ) : null}
+
+      {selectedTaskIds.size > 0 ? (
+        <aside className="task-selection-dock" aria-label="Выбранные задачи">
+          <div>
+            <strong>Выбрано: {selectedTaskIds.size.toLocaleString('ru-RU')}</strong>
+            <span>Лимит одной операции — 1 000 задач</span>
+          </div>
+          <button className="button-link" onClick={clearSelectionState} type="button">
+            Очистить
+          </button>
+          <button
+            className="button-primary"
+            disabled
+            title="Настройка изменений будет реализована на следующем этапе"
+            type="button"
+          >
+            Настроить изменения
+          </button>
+        </aside>
+      ) : null}
+
       {dialogMode ? (
         <SavedFilterDialog
           error={savedError}
@@ -967,6 +1373,37 @@ export function TaskFiltersPage() {
           pending={saveMutation.isPending}
         />
       ) : null}
+      <Modal
+        description={
+          'Изменение фильтра очищает выбор. ' +
+          'Задачи с других страниц потребуется выбрать заново.'
+        }
+        onClose={() => setPendingSelectionReset(null)}
+        open={pendingSelectionReset !== null}
+        returnFocusRef={filterBuilderHeadingRef}
+        title="Изменить фильтр и снять выбор?"
+      >
+        <div className="dialog-actions">
+          <button
+            className="button-secondary"
+            onClick={() => setPendingSelectionReset(null)}
+            type="button"
+          >
+            Отмена
+          </button>
+          <button
+            className="button-primary"
+            onClick={() => {
+              const pending = pendingSelectionReset;
+              setPendingSelectionReset(null);
+              pending?.apply();
+            }}
+            type="button"
+          >
+            Снять выбор и продолжить
+          </button>
+        </div>
+      </Modal>
       <Modal
         description="Набор исчезнет только из вашей учётной записи."
         onClose={() => {

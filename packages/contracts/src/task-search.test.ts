@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { taskSearchApiRequestSchema, taskSearchApiResponseSchema } from './task-search';
+import {
+  taskSearchApiRequestSchema,
+  taskSearchApiResponseSchema,
+  taskSelectAllApiRequestSchema,
+  taskSelectAllApiResponseSchema,
+} from './task-search';
 
 describe('task search contracts', () => {
   it('applies the documented deadline-first defaults', () => {
@@ -10,6 +15,54 @@ describe('task search contracts', () => {
       page: 1,
       pageSize: 50,
     });
+  });
+
+  it('accepts only filters and a sort for an authoritative select-all request', () => {
+    expect(taskSelectAllApiRequestSchema.parse({})).toEqual({
+      filters: [],
+      sort: { fieldId: 'deadline', direction: 'asc' },
+    });
+    expect(
+      taskSelectAllApiRequestSchema.safeParse({
+        filters: [],
+        sort: { fieldId: 'deadline', direction: 'asc' },
+        taskIds: ['42'],
+        total: 1,
+      }).success,
+    ).toBe(false);
+  });
+
+  it('enforces the select-all outcome bounds and selected total', () => {
+    expect(
+      taskSelectAllApiResponseSchema.safeParse({ kind: 'empty', total: 0 }).success,
+    ).toBe(true);
+    expect(
+      taskSelectAllApiResponseSchema.safeParse({
+        kind: 'selected',
+        taskIds: ['42', '43'],
+        total: 2,
+      }).success,
+    ).toBe(true);
+    expect(
+      taskSelectAllApiResponseSchema.safeParse({
+        kind: 'selected',
+        taskIds: ['42', '42'],
+        total: 2,
+      }).success,
+    ).toBe(false);
+    expect(
+      taskSelectAllApiResponseSchema.safeParse({
+        kind: 'selected',
+        taskIds: ['42'],
+        total: 2,
+      }).success,
+    ).toBe(false);
+    expect(
+      taskSelectAllApiResponseSchema.safeParse({ kind: 'too_many', total: 1_000 }).success,
+    ).toBe(false);
+    expect(
+      taskSelectAllApiResponseSchema.safeParse({ kind: 'too_many', total: 1_001 }).success,
+    ).toBe(true);
   });
 
   it.each([
@@ -137,8 +190,10 @@ describe('task search contracts', () => {
             title: 'Task',
             taskUrl: 'https://portal.bitrix24.ru/tasks/42',
             parentId: null,
+            groupId: null,
             status: 'in_progress',
             responsibleId: '10',
+            responsibleName: 'Operator',
             deadline: null,
             priority: 'normal',
           },

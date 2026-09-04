@@ -2,7 +2,11 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { SavedTaskFilter, TaskFilterCatalogResponse } from '@task-commander/contracts';
+import type {
+  SavedTaskFilter,
+  TaskFilterCatalogResponse,
+  TaskSearchItem,
+} from '@task-commander/contracts';
 
 import {
   AppApiError,
@@ -10,6 +14,7 @@ import {
   deleteSavedTaskFilter,
   fetchTaskFilterCatalog,
   listSavedTaskFilters,
+  selectAllTasks,
   searchTaskFilterUsers,
   searchTasks,
   updateSavedTaskFilter,
@@ -23,6 +28,7 @@ vi.mock('@/app/app-api', async (importOriginal) => ({
   deleteSavedTaskFilter: vi.fn(),
   fetchTaskFilterCatalog: vi.fn(),
   listSavedTaskFilters: vi.fn(),
+  selectAllTasks: vi.fn(),
   searchTaskFilterUsers: vi.fn(),
   searchTasks: vi.fn(),
   updateSavedTaskFilter: vi.fn(),
@@ -79,6 +85,50 @@ const saved: SavedTaskFilter = {
   updatedAt: '2026-09-04T10:00:00Z',
 };
 
+const firstTask: TaskSearchItem = {
+  id: '42',
+  title: 'Подготовить квартальный отчёт',
+  taskUrl: 'https://portal.bitrix24.ru/company/personal/user/10/tasks/task/view/42/',
+  parentId: null,
+  groupId: '1',
+  status: 'in_progress',
+  responsibleId: '10',
+  responsibleName: 'Иван Петров',
+  deadline: '2026-08-14T05:00:00Z',
+  priority: 'high',
+  relevantVersion: 'version-42',
+};
+
+const secondTask: TaskSearchItem = {
+  ...firstTask,
+  id: '43',
+  title: 'Согласовать квартальный отчёт',
+  taskUrl: 'https://portal.bitrix24.ru/company/personal/user/10/tasks/task/view/43/',
+  relevantVersion: 'version-43',
+};
+
+const firstPageTasks: TaskSearchItem[] = [
+  firstTask,
+  ...Array.from({ length: 49 }, (_, index) => {
+    const id = String(100 + index);
+    return {
+      ...firstTask,
+      id,
+      title: `Задача первой страницы ${index + 2}`,
+      taskUrl: `https://portal.bitrix24.ru/company/personal/user/10/tasks/task/view/${id}/`,
+      relevantVersion: `version-${id}`,
+    };
+  }),
+];
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((promiseResolve) => {
+    resolve = promiseResolve;
+  });
+  return { promise, resolve };
+}
+
 function renderPage() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
@@ -93,12 +143,13 @@ describe('task filter page', () => {
     vi.mocked(fetchTaskFilterCatalog).mockResolvedValue(catalog);
     vi.mocked(listSavedTaskFilters).mockResolvedValue([saved]);
     vi.mocked(searchTasks).mockResolvedValue({
-      items: [],
-      total: 7,
+      items: [firstTask],
+      total: 1,
       page: 1,
       pageSize: 50,
       hasNextPage: false,
     });
+    vi.mocked(selectAllTasks).mockResolvedValue({ kind: 'selected', taskIds: ['42'], total: 1 });
     vi.mocked(searchTaskFilterUsers).mockResolvedValue({ items: [], nextCursor: null });
     vi.mocked(createSavedTaskFilter).mockResolvedValue(saved);
     vi.mocked(updateSavedTaskFilter).mockResolvedValue(saved);
@@ -535,6 +586,465 @@ describe('task filter page', () => {
     expect(
       await screen.findByText('Изменение сохранено, но список наборов не удалось обновить.'),
     ).toBeInTheDocument();
+  });
+
+  it('keeps manual task selection across result pages', async () => {
+    vi.mocked(searchTasks).mockImplementation(async (request) => ({
+      items: request.page === 1 ? firstPageTasks : [secondTask],
+      total: 51,
+      page: request.page,
+      pageSize: request.pageSize,
+      hasNextPage: request.page === 1,
+    }));
+    renderPage();
+
+    const firstCheckbox = await screen.findByRole('checkbox', {
+      name: `Выбрать задачу: ${firstTask.title}`,
+    });
+    fireEvent.click(firstCheckbox);
+    fireEvent.click(screen.getByRole('button', { name: 'Далее' }));
+    fireEvent.click(
+      await screen.findByRole('checkbox', { name: `Выбрать задачу: ${secondTask.title}` }),
+    );
+    expect(screen.getAllByText('Выбрано: 2')).toHaveLength(2);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Назад' }));
+    expect(
+      await screen.findByRole('checkbox', { name: `Выбрать задачу: ${firstTask.title}` }),
+    ).toBeChecked();
+  });
+
+  it('warns before a filter edit clears a selection from another page', async () => {
+    vi.mocked(searchTasks).mockImplementation(async (request) => ({
+      items: request.page === 1 ? firstPageTasks : [secondTask],
+      total: 51,
+      page: request.page,
+      pageSize: request.pageSize,
+      hasNextPage: request.page === 1,
+    }));
+    renderPage();
+    fireEvent.click(
+      await screen.findByRole('checkbox', { name: `Выбрать задачу: ${firstTask.title}` }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Далее' }));
+    await screen.findByRole('checkbox', { name: `Выбрать задачу: ${secondTask.title}` });
+
+    const titleSearch = screen.getByRole('searchbox', { name: 'Поиск по названию' });
+    fireEvent.change(titleSearch, { target: { value: 'Новый фильтр' } });
+    expect(
+      await screen.findByRole('heading', { name: 'Изменить фильтр и снять выбор?' }),
+    ).toBeInTheDocument();
+    expect(titleSearch).toHaveValue('');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Снять выбор и продолжить' }));
+    expect(titleSearch).toHaveValue('Новый фильтр');
+    expect(screen.queryByText('Выбрано: 1')).not.toBeInTheDocument();
+  });
+
+  it('clears a current-page selection immediately when a filter condition changes', async () => {
+    renderPage();
+    const taskCheckbox = await screen.findByRole('checkbox', {
+      name: `Выбрать задачу: ${firstTask.title}`,
+    });
+    fireEvent.click(taskCheckbox);
+    expect(taskCheckbox).toBeChecked();
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Поиск по названию' }), {
+      target: { value: 'Другой результат' },
+    });
+
+    expect(taskCheckbox).not.toBeChecked();
+    expect(
+      screen.queryByRole('heading', { name: 'Изменить фильтр и снять выбор?' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('uses the server result for selecting the whole filtered set', async () => {
+    vi.mocked(searchTasks).mockResolvedValue({
+      items: [firstTask, secondTask],
+      total: 2,
+      page: 1,
+      pageSize: 50,
+      hasNextPage: false,
+    });
+    vi.mocked(selectAllTasks).mockResolvedValue({
+      kind: 'selected',
+      taskIds: ['42', '43'],
+      total: 2,
+    });
+    renderPage();
+    fireEvent.click(
+      await screen.findByRole('checkbox', { name: `Выбрать задачу: ${firstTask.title}` }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Выбрать все' }));
+
+    expect(await screen.findAllByText('Выбрано: 2')).toHaveLength(2);
+    expect(
+      screen.getByText('Выбран весь результат подтверждённого сервером фильтра.'),
+    ).toBeInTheDocument();
+    expect(selectAllTasks).toHaveBeenCalledWith(
+      {
+        filters: [],
+        sort: { fieldId: 'deadline', direction: 'asc' },
+      },
+      expect.any(AbortSignal),
+    );
+  });
+
+  it('ignores a select-all response from a filter generation that was cleared', async () => {
+    const pendingSelection = deferred<Awaited<ReturnType<typeof selectAllTasks>>>();
+    vi.mocked(selectAllTasks).mockReturnValue(pendingSelection.promise);
+    renderPage();
+    fireEvent.click(
+      await screen.findByRole('checkbox', { name: `Выбрать задачу: ${firstTask.title}` }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Выбрать все' }));
+    const selectAllSignal = vi.mocked(selectAllTasks).mock.calls[0]?.[1];
+    expect(selectAllSignal).toBeInstanceOf(AbortSignal);
+
+    const titleSearch = screen.getByRole('searchbox', { name: 'Поиск по названию' });
+    fireEvent.change(titleSearch, { target: { value: 'Новый фильтр' } });
+    expect(titleSearch).toHaveValue('Новый фильтр');
+    expect(selectAllSignal?.aborted).toBe(true);
+    expect(screen.queryByText('Выбрано: 1')).not.toBeInTheDocument();
+
+    await act(async () => {
+      pendingSelection.resolve({ kind: 'selected', taskIds: ['42'], total: 1 });
+      await pendingSelection.promise;
+    });
+    await waitFor(() => expect(screen.queryByText('Выбрано: 1')).not.toBeInTheDocument());
+    expect(searchTasks).toHaveBeenCalledTimes(1);
+  });
+
+  it(
+    'downgrades a previous whole-result selection when the server reports too many tasks',
+    async () => {
+      vi.mocked(selectAllTasks)
+        .mockResolvedValueOnce({ kind: 'selected', taskIds: ['42'], total: 1 })
+        .mockResolvedValueOnce({ kind: 'too_many', total: 1001 });
+      renderPage();
+      fireEvent.click(
+        await screen.findByRole('checkbox', { name: `Выбрать задачу: ${firstTask.title}` }),
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Выбрать все' }));
+      expect(
+        await screen.findByText('Выбран весь результат подтверждённого сервером фильтра.'),
+      ).toBeInTheDocument();
+
+      const selectAllButton = screen.getByRole('button', { name: 'Выбрать все' });
+      await waitFor(() => expect(selectAllButton).toBeEnabled());
+      fireEvent.click(selectAllButton);
+      expect(await screen.findByText(/Найдено 1 001 задач/)).toBeInTheDocument();
+      expect(
+        screen.queryByText('Выбран весь результат подтверждённого сервером фильтра.'),
+      ).not.toBeInTheDocument();
+      expect(screen.getAllByText('Выбрано: 1')).toHaveLength(2);
+    },
+  );
+
+  it('clears empty-result selection metadata when the filter changes', async () => {
+    vi.mocked(selectAllTasks).mockResolvedValue({ kind: 'empty', total: 0 });
+    renderPage();
+    fireEvent.click(
+      await screen.findByRole('checkbox', { name: `Выбрать задачу: ${firstTask.title}` }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Выбрать все' }));
+    expect(
+      await screen.findByText('Результат изменился: доступных задач больше нет.'),
+    ).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Поиск по названию' }), {
+      target: { value: 'Другой фильтр' },
+    });
+    expect(
+      screen.queryByText('Результат изменился: доступных задач больше нет.'),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/Выбрано: 0/)).not.toBeInTheDocument();
+  });
+
+  it('withdraws whole-result provenance when the refreshed page composition changes', async () => {
+    vi.mocked(searchTasks)
+      .mockResolvedValueOnce({
+        items: [firstTask],
+        total: 1,
+        page: 1,
+        pageSize: 50,
+        hasNextPage: false,
+      })
+      .mockResolvedValue({
+        items: [secondTask],
+        total: 1,
+        page: 1,
+        pageSize: 50,
+        hasNextPage: false,
+      });
+    renderPage();
+    fireEvent.click(
+      await screen.findByRole('checkbox', { name: `Выбрать задачу: ${firstTask.title}` }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Выбрать все' }));
+
+    expect(
+      await screen.findByText(
+        'Результат снова изменился после выбора. Повторите выбор всего результата.',
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText('Выбран весь результат подтверждённого сервером фильтра.'),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole('checkbox', { name: `Выбрать задачу: ${secondTask.title}` }),
+    ).not.toBeChecked();
+  });
+
+  it('withdraws whole-result provenance after a later page returns a different task', async () => {
+    const replacementTask = {
+      ...secondTask,
+      id: '44',
+      title: 'Новая задача в результате',
+      taskUrl: 'https://portal.bitrix24.ru/company/personal/user/10/tasks/task/view/44/',
+      relevantVersion: 'version-44',
+    };
+    vi.mocked(searchTasks).mockImplementation(async (request) => ({
+      items: request.page === 1 ? firstPageTasks : [replacementTask],
+      total: 51,
+      page: request.page,
+      pageSize: request.pageSize,
+      hasNextPage: request.page === 1,
+    }));
+    vi.mocked(selectAllTasks).mockResolvedValue({
+      kind: 'selected',
+      taskIds: [...firstPageTasks.map((task) => task.id), secondTask.id],
+      total: 51,
+    });
+    renderPage();
+    fireEvent.click(
+      await screen.findByRole('checkbox', { name: `Выбрать задачу: ${firstTask.title}` }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Выбрать все' }));
+    expect(
+      await screen.findByText('Выбран весь результат подтверждённого сервером фильтра.'),
+    ).toBeInTheDocument();
+    const nextButton = screen.getByRole('button', { name: 'Далее' });
+    await waitFor(() => expect(nextButton).toHaveAttribute('aria-disabled', 'false'));
+    fireEvent.click(nextButton);
+
+    expect(
+      await screen.findByRole('checkbox', { name: `Выбрать задачу: ${replacementTask.title}` }),
+    ).not.toBeChecked();
+    expect(
+      await screen.findByText(
+        'Результат изменился после выбора. Повторите выбор всего результата.',
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText('Выбран весь результат подтверждённого сервером фильтра.'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('keeps pagination focus while the next page replaces placeholder rows', async () => {
+    const nextPage = deferred<Awaited<ReturnType<typeof searchTasks>>>();
+    vi.mocked(searchTasks).mockImplementation((request) =>
+      request.page === 1
+        ? Promise.resolve({
+            items: firstPageTasks,
+            total: 51,
+            page: 1,
+            pageSize: request.pageSize,
+            hasNextPage: true,
+          })
+        : nextPage.promise,
+    );
+    renderPage();
+    const nextButton = await screen.findByRole('button', { name: 'Далее' });
+    nextButton.focus();
+    fireEvent.click(nextButton);
+
+    expect(document.activeElement).toBe(nextButton);
+    expect(screen.getByRole('region', { name: 'Результаты поиска задач' })).toHaveAttribute(
+      'aria-busy',
+      'true',
+    );
+
+    await act(async () => {
+      nextPage.resolve({
+        items: [secondTask],
+        total: 51,
+        page: 2,
+        pageSize: 50,
+        hasNextPage: false,
+      });
+      await nextPage.promise;
+    });
+    await screen.findByRole('checkbox', { name: `Выбрать задачу: ${secondTask.title}` });
+    expect(document.activeElement).toBe(nextButton);
+  });
+
+  it('corrects a disappeared page once while the replacement page is pending', async () => {
+    const correctedPage = deferred<Awaited<ReturnType<typeof searchTasks>>>();
+    let secondPageRequests = 0;
+    vi.mocked(searchTasks).mockImplementation((request) => {
+      if (request.pageSize === 50) {
+        return Promise.resolve({
+          items: firstPageTasks,
+          total: 75,
+          page: 1,
+          pageSize: 50,
+          hasNextPage: true,
+        });
+      }
+      if (request.page === 1) {
+        return Promise.resolve({
+          items: firstPageTasks.slice(0, 25),
+          total: 75,
+          page: 1,
+          pageSize: 25,
+          hasNextPage: true,
+        });
+      }
+      if (request.page === 2) {
+        secondPageRequests += 1;
+        if (secondPageRequests > 1) return correctedPage.promise;
+        return Promise.resolve({
+          items: firstPageTasks.slice(25),
+          total: 75,
+          page: 2,
+          pageSize: 25,
+          hasNextPage: true,
+        });
+      }
+      return Promise.resolve({
+        items: [],
+        total: 50,
+        page: 3,
+        pageSize: 25,
+        hasNextPage: false,
+      });
+    });
+    renderPage();
+    await screen.findByRole('checkbox', { name: `Выбрать задачу: ${firstTask.title}` });
+    fireEvent.change(screen.getByRole('combobox', { name: 'На странице' }), {
+      target: { value: '25' },
+    });
+    await waitFor(() =>
+      expect(searchTasks).toHaveBeenLastCalledWith(
+        expect.objectContaining({ page: 1, pageSize: 25 }),
+        expect.any(AbortSignal),
+      ),
+    );
+    const nextButton = screen.getByRole('button', { name: 'Далее' });
+    fireEvent.click(nextButton);
+    await screen.findByRole('checkbox', { name: 'Выбрать задачу: Задача первой страницы 27' });
+    fireEvent.click(screen.getByRole('button', { name: 'Далее' }));
+
+    await waitFor(() => expect(secondPageRequests).toBe(2));
+    expect(screen.getByRole('region', { name: 'Результаты поиска задач' })).toHaveAttribute(
+      'aria-busy',
+      'true',
+    );
+
+    await act(async () => {
+      correctedPage.resolve({
+        items: firstPageTasks.slice(25),
+        total: 50,
+        page: 2,
+        pageSize: 25,
+        hasNextPage: false,
+      });
+      await correctedPage.promise;
+    });
+    expect(await screen.findByText('Страница 2 из 2')).toBeInTheDocument();
+    expect(secondPageRequests).toBe(2);
+  });
+
+  it('returns focus to the filter builder after deleting the trigger condition', async () => {
+    vi.mocked(searchTasks).mockImplementation(async (request) => ({
+      items: request.page === 1 ? firstPageTasks : [secondTask],
+      total: 51,
+      page: request.page,
+      pageSize: request.pageSize,
+      hasNextPage: request.page === 1,
+    }));
+    renderPage();
+    await screen.findByRole('checkbox', { name: `Выбрать задачу: ${firstTask.title}` });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Поле нового условия' }), {
+      target: { value: 'priority' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Добавить' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Высокий' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Применить' }));
+    await waitFor(() => expect(searchTasks).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole('checkbox', { name: `Выбрать задачу: ${firstTask.title}` }));
+    fireEvent.click(screen.getByRole('button', { name: 'Далее' }));
+    await screen.findByRole('checkbox', { name: `Выбрать задачу: ${secondTask.title}` });
+
+    const deleteCondition = screen.getByRole('button', { name: 'Удалить условие' });
+    deleteCondition.focus();
+    fireEvent.click(deleteCondition);
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Снять выбор и продолжить' }),
+    );
+
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByRole('heading', { name: 'Условия фильтра' }),
+      ),
+    );
+    expect(screen.queryByRole('button', { name: 'Удалить условие' })).not.toBeInTheDocument();
+  });
+
+  it('preserves manual selection across page-size and sorting changes', async () => {
+    renderPage();
+    const taskCheckbox = await screen.findByRole('checkbox', {
+      name: `Выбрать задачу: ${firstTask.title}`,
+    });
+    fireEvent.click(taskCheckbox);
+
+    fireEvent.change(screen.getByRole('combobox', { name: 'На странице' }), {
+      target: { value: '25' },
+    });
+    await waitFor(() =>
+      expect(searchTasks).toHaveBeenLastCalledWith(
+        expect.objectContaining({ page: 1, pageSize: 25 }),
+        expect.any(AbortSignal),
+      ),
+    );
+    expect(
+      screen.getByRole('checkbox', { name: `Выбрать задачу: ${firstTask.title}` }),
+    ).toBeChecked();
+
+    fireEvent.change(screen.getByLabelText('Направление'), { target: { value: 'desc' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Применить' }));
+    await waitFor(() =>
+      expect(searchTasks).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          page: 1,
+          pageSize: 25,
+          sort: { fieldId: 'deadline', direction: 'desc' },
+        }),
+        expect.any(AbortSignal),
+      ),
+    );
+    expect(
+      screen.getByRole('checkbox', { name: `Выбрать задачу: ${firstTask.title}` }),
+    ).toBeChecked();
+  });
+
+  it('blocks selecting the whole result when the server count exceeds 1,000', async () => {
+    vi.mocked(searchTasks).mockResolvedValue({
+      items: firstPageTasks,
+      total: 1001,
+      page: 1,
+      pageSize: 50,
+      hasNextPage: true,
+    });
+    renderPage();
+
+    expect(
+      await screen.findByText(/Выбор всего результата недоступен: найдено 1 001 задач/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Выбрать все' })).toBeDisabled();
+    expect(selectAllTasks).not.toHaveBeenCalled();
   });
 
   it('disables the title shortcut when the dynamic catalog does not expose it', async () => {

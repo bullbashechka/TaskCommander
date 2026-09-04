@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { createMockPortalState } from '../src/integrations/bitrix/mock/state';
 import { mockFixtureIds } from '../src/integrations/bitrix/mock/fixtures';
+import { createMockScenario } from '../src/integrations/bitrix/mock/scenario';
 import { createMockTasks } from '../src/integrations/bitrix/mock/tasks';
 
 function expectSuccess<T>(result: { ok: true; value: T } | { ok: false }): T {
@@ -69,6 +70,82 @@ describe('mock Bitrix task catalog', () => {
     expect(state.taskOverrides.size).toBe(0);
   });
 
+  it.each([
+    ['empty', 0, 'empty', 0],
+    ['at the selection limit', 993, 'selected', 1_000],
+    ['above the selection limit', 994, 'too_many', 1_001],
+  ] as const)('resolves select-all %s atomically', async (_name, taskCount, kind, total) => {
+    const resolution = expectSuccess(
+      await createMockTasks(createMockPortalState({ taskCount })).selectAll({
+        filters:
+          taskCount === 0
+            ? [
+                {
+                  kind: 'text',
+                  fieldId: 'title',
+                  operator: 'contains',
+                  values: ['not-present-in-any-task'],
+                },
+              ]
+            : [],
+        sort: { fieldId: 'deadline', direction: 'asc' },
+      }),
+    );
+
+    expect(resolution).toMatchObject({ kind, total });
+    if (resolution.kind === 'selected') {
+      expect(resolution.taskIds).toHaveLength(total);
+      expect(new Set(resolution.taskIds).size).toBe(total);
+    }
+  });
+
+  it('selects only readable unfinished tasks and preserves recurring instances', async () => {
+    const resolution = expectSuccess(
+      await createMockTasks(createMockPortalState({ taskCount: 0 })).selectAll({
+        filters: [],
+        sort: { fieldId: 'deadline', direction: 'asc' },
+      }),
+    );
+
+    expect(resolution.kind).toBe('selected');
+    if (resolution.kind === 'selected') {
+      expect(resolution.taskIds).toContain(mockFixtureIds.recurringInstance);
+      expect(resolution.taskIds).not.toContain(mockFixtureIds.completedTask);
+      expect(resolution.taskIds).not.toContain(mockFixtureIds.templateTask);
+      expect(resolution.taskIds).not.toContain(mockFixtureIds.recurrenceRuleTask);
+      expect(resolution.taskIds).not.toContain(mockFixtureIds.hiddenTask);
+    }
+  });
+
+  it('resolves the filtered selection against one current mock state', async () => {
+    const state = createMockPortalState({ taskCount: 0 });
+    const tasks = createMockTasks(
+      state,
+      createMockScenario([
+        {
+          method: 'tasks.selectAll',
+          effect: {
+            kind: 'mutate_task',
+            taskId: mockFixtureIds.visibleTask,
+            patch: { values: { priority: 'high' } },
+          },
+        },
+      ]),
+    );
+
+    const resolution = expectSuccess(
+      await tasks.selectAll({
+        filters: [{ kind: 'list', fieldId: 'priority', operator: 'equals', values: ['high'] }],
+        sort: { fieldId: 'deadline', direction: 'asc' },
+      }),
+    );
+
+    expect(resolution.kind).toBe('selected');
+    if (resolution.kind === 'selected') {
+      expect(resolution.taskIds).toContain(mockFixtureIds.visibleTask);
+    }
+  });
+
   it('uses native readability for each current user', async () => {
     const operatorPage = expectSuccess(
       await createMockTasks(createMockPortalState({ currentUserId: '10', taskCount: 0 })).search({
@@ -89,6 +166,7 @@ describe('mock Bitrix task catalog', () => {
 
     expect(operatorPage.items.some((task) => task.id === mockFixtureIds.hiddenTask)).toBe(false);
     expect(operatorPage.items.every((task) => task.taskUrl.includes('/user/10/'))).toBe(true);
+    expect(operatorPage.items.every((task) => task.groupId !== null)).toBe(true);
     expect(
       administratorPage.items.some((task) => task.id === mockFixtureIds.hiddenTask),
     ).toBe(true);

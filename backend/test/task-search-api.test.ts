@@ -95,6 +95,8 @@ describe('task search API', () => {
     ]);
     expect(body.items.some((task) => task.id === mockFixtureIds.hiddenTask)).toBe(false);
     expect(body.items.every((task) => task.relevantVersion.length > 0)).toBe(true);
+    expect(body.items.every((task) => task.groupId !== null)).toBe(true);
+    expect(body.items.every((task) => task.responsibleName !== null)).toBe(true);
   });
 
   it('uses the principal user ID when creating the search adapter', async () => {
@@ -175,6 +177,34 @@ describe('task search API', () => {
     });
 
     const response = await postSearch(api);
+    const body = apiErrorResponseSchema.parse(await response.json());
+
+    expect(response.status).toBe(503);
+    expect(body.error.code).toBe('UPSTREAM_UNAVAILABLE');
+  });
+
+  it('rejects an adapter page containing more rows than the requested page size', async () => {
+    const principal = await createVerifiedTestPrincipal({ userId: '10' });
+    const source = createMockBitrixAdapter({ currentUserId: principal.userId, taskCount: 30 });
+    const api = createApi({
+      readPrincipal: async () => principal,
+      readEffectiveAccess: async () => createAppAccess(principal),
+      createBitrixAdapter: (_env, input) =>
+        createAdapterWithTaskSearch(input.currentUserId, async (request) => {
+          const sourcePage = await source.tasks.search({ ...request, pageSize: 50 });
+          if (!sourcePage.ok) return sourcePage;
+          return {
+            ok: true,
+            value: {
+              items: sourcePage.value.items.slice(0, 30),
+              total: 30,
+              hasNextPage: false,
+            },
+          };
+        }),
+    });
+
+    const response = await postSearch(api, { page: 1, pageSize: 25 });
     const body = apiErrorResponseSchema.parse(await response.json());
 
     expect(response.status).toBe(503);

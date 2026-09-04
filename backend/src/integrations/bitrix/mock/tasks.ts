@@ -9,11 +9,13 @@ import type {
   TaskFieldCapability,
   TaskSearchPage,
   TaskSearchRequest,
+  TaskSelectAllResult,
 } from '../contract';
 import {
   taskApplyRequestSchema,
   taskReadForChangeRequestSchema,
   taskSearchRequestSchema,
+  taskSelectAllRequestSchema,
 } from '../schemas';
 import type { MockTask } from './fixtures';
 import type { MockScenarioController, MockScenarioEffect } from './scenario';
@@ -430,6 +432,7 @@ function createTaskUrl(taskId: string, userId: string): string {
 async function toSummary(
   task: MockTask,
   userId: string,
+  responsibleName: string | null,
 ): Promise<TaskSearchPage['items'][number]> {
   if (task.status === 'completed') {
     throw new Error('Completed tasks cannot be returned as mutable task summaries.');
@@ -454,8 +457,10 @@ async function toSummary(
     title: task.title,
     taskUrl,
     parentId: task.parentId,
+    groupId: typeof task.values.group_id === 'string' ? task.values.group_id : null,
     status: task.status,
     responsibleId: String(getFieldValue(task, 'responsible_id')),
+    responsibleName,
     deadline: typeof task.values.deadline === 'string' ? task.values.deadline : null,
     priority: task.values.priority === 'high' ? 'high' : 'normal',
     relevantVersion: await createRelevantVersion(snapshotWithoutVersion),
@@ -625,7 +630,14 @@ export function createMockTasks(
       const items = await Promise.all(
         matching
           .slice(start, start + request.pageSize)
-          .map((task) => toSummary(task, state.currentUserId)),
+          .map((task) => {
+            const responsibleId = String(getFieldValue(task, 'responsible_id'));
+            return toSummary(
+              task,
+              state.currentUserId,
+              state.users.get(responsibleId)?.displayName ?? null,
+            );
+          }),
       );
       const page: TaskSearchPage = {
         items,
@@ -633,6 +645,27 @@ export function createMockTasks(
         hasNextPage: start + request.pageSize < matching.length,
       };
       return { ok: true, value: page };
+    },
+    async selectAll(input) {
+      const request = taskSelectAllRequestSchema.parse(input);
+      const effects = scenario.take('tasks.selectAll');
+      for (const effect of effects) applyTaskMutation(state, effect);
+      const failure = getFailure(effects);
+      if (failure) return { ok: false, failure };
+
+      const matching = filterAndSortTasks(state, {
+        ...request,
+        page: 1,
+        pageSize: 50,
+      });
+      const total = matching.length;
+      const resolution: TaskSelectAllResult =
+        total === 0
+          ? { kind: 'empty', total: 0 }
+          : total > 1_000
+            ? { kind: 'too_many', total }
+            : { kind: 'selected', taskIds: matching.map((task) => task.id), total };
+      return { ok: true, value: resolution };
     },
     async readForChange(input) {
       const request = taskReadForChangeRequestSchema.parse(input);

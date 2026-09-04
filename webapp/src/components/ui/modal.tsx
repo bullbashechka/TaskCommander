@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, type ReactNode } from 'react';
+import { useEffect, useId, useRef, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 
 export function Modal({
@@ -8,6 +8,7 @@ export function Modal({
   description,
   className = '',
   children,
+  returnFocusRef,
 }: {
   open: boolean;
   onClose: () => void;
@@ -15,6 +16,7 @@ export function Modal({
   description: string;
   className?: string;
   children: ReactNode;
+  returnFocusRef?: RefObject<HTMLElement | null>;
 }) {
   const titleId = useId();
   const descriptionId = useId();
@@ -61,9 +63,10 @@ export function Modal({
     document.addEventListener('keydown', onKeyDown);
     return () => {
       document.removeEventListener('keydown', onKeyDown);
-      previousFocus?.focus();
+      if (previousFocus?.isConnected) previousFocus.focus();
+      else returnFocusRef?.current?.focus();
     };
-  }, [onClose, open]);
+  }, [onClose, open, returnFocusRef]);
 
   if (!open) return null;
   return createPortal(

@@ -21,6 +21,8 @@ import {
   taskReadForChangeRequestSchema,
   taskSearchPageSchema,
   taskSearchRequestSchema,
+  taskSelectAllRequestSchema,
+  taskSelectAllResultSchema,
 } from './schemas';
 
 export type BitrixFailure = z.infer<typeof bitrixFailureSchema>;
@@ -29,6 +31,8 @@ export type BitrixResult<T> = { ok: true; value: T } | { ok: false; failure: Bit
 export type TaskFieldCapability = z.infer<typeof taskFieldCapabilitySchema>;
 export type TaskSearchRequest = z.infer<typeof taskSearchRequestSchema>;
 export type TaskSearchPage = z.infer<typeof taskSearchPageSchema>;
+export type TaskSelectAllRequest = z.infer<typeof taskSelectAllRequestSchema>;
+export type TaskSelectAllResult = z.infer<typeof taskSelectAllResultSchema>;
 export type TaskChangeSnapshot = z.infer<typeof taskChangeSnapshotSchema>;
 export type TaskReadForChangeRequest = z.infer<typeof taskReadForChangeRequestSchema>;
 export type TaskApplyRequest = z.infer<typeof taskApplyRequestSchema>;
@@ -49,6 +53,7 @@ export type BitrixDiskFile = z.infer<typeof diskFileSchema>;
 export interface BitrixTasks {
   getFieldCapabilities(): Promise<BitrixResult<readonly TaskFieldCapability[]>>;
   search(request: TaskSearchRequest): Promise<BitrixResult<TaskSearchPage>>;
+  selectAll(request: TaskSelectAllRequest): Promise<BitrixResult<TaskSelectAllResult>>;
   readForChange(request: TaskReadForChangeRequest): Promise<BitrixResult<TaskChangeSnapshot>>;
   applyChange(request: TaskApplyRequest): Promise<BitrixResult<TaskApplyOutcome>>;
 }

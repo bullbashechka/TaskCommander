@@ -6,6 +6,7 @@ import {
   taskApplyRequestSchema,
   taskChangeSnapshotSchema,
   taskSearchRequestSchema,
+  taskSelectAllRequestSchema,
 } from '../src/integrations/bitrix/schemas';
 
 describe('Bitrix adapter schemas', () => {
@@ -36,6 +37,15 @@ describe('Bitrix adapter schemas', () => {
         pageSize: 2,
       }).success,
     ).toBe(false);
+  });
+
+  it('accepts a select-all request without pagination values', () => {
+    expect(
+      taskSelectAllRequestSchema.parse({
+        filters: [],
+        sort: { fieldId: 'deadline', direction: 'asc' },
+      }),
+    ).toMatchObject({ filters: [] });
   });
 
   it('rejects an unknown upstream failure kind', () => {
