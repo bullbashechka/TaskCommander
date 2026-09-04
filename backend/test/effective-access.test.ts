@@ -29,6 +29,7 @@ const defaultSettings = {
   accessActive: true,
   permissions: ['app_access', 'change_allowed_fields'],
   allowedFieldIds: ['title'],
+  accessVersion: 1,
 };
 
 function reader(settings: unknown | null): EffectiveAccessSettingsReader {
@@ -40,6 +41,7 @@ async function resolve(
     accessActive: boolean;
     permissions: Permission[];
     allowedFieldIds: string[];
+    accessVersion: number;
   }> = {},
 ) {
   return resolveEffectiveAccess(
@@ -63,6 +65,12 @@ describe('effective access', () => {
     const malformedRows: unknown[] = [
       null,
       { ...defaultSettings, accessActive: false },
+      { ...defaultSettings, accessVersion: null },
+      {
+        accessActive: defaultSettings.accessActive,
+        permissions: defaultSettings.permissions,
+        allowedFieldIds: defaultSettings.allowedFieldIds,
+      },
       { ...defaultSettings, accessActive: 'false' },
       { ...defaultSettings, permissions: 'app_access' },
       { ...defaultSettings, permissions: ['app_access', 'app_access'] },
@@ -284,13 +292,7 @@ describe('effective access', () => {
         fieldIds: ['title', 'title'],
       }),
     ).resolves.toEqual(['title']);
-    for (const fieldIds of [
-      [],
-      'title',
-      [''],
-      [1],
-      ['title', 'status'],
-    ]) {
+    for (const fieldIds of [[], 'title', [''], [1], ['title', 'status']]) {
       await expect(
         requireAuthorizedTaskFields(access, adapter, {
           taskId: mockFixtureIds.visibleTask,

@@ -3,6 +3,7 @@ import type { z } from 'zod';
 import {
   bitrixDepartmentSchema,
   bitrixAccessStatusSchema,
+  bitrixProjectAccessStatusSchema,
   bitrixFailureSchema,
   bitrixEmployeeProfileSchema,
   bitrixUserSchema,
@@ -39,6 +40,7 @@ export type TaskApplyRequest = z.infer<typeof taskApplyRequestSchema>;
 export type TaskApplyOutcome = z.infer<typeof taskApplyOutcomeSchema>;
 export type BitrixUser = z.infer<typeof bitrixUserSchema>;
 export type BitrixAccessStatus = z.infer<typeof bitrixAccessStatusSchema>;
+export type BitrixProjectAccessStatus = z.infer<typeof bitrixProjectAccessStatusSchema>;
 export type BitrixEmployeeProfile = z.infer<typeof bitrixEmployeeProfileSchema>;
 export type EmployeeSearchRequest = z.infer<typeof employeeSearchRequestSchema>;
 export type EmployeeSearchPage = z.infer<typeof employeeSearchPageSchema>;
@@ -75,15 +77,17 @@ export interface BitrixUsers {
 export interface BitrixOrganization {
   getDepartments(): Promise<BitrixResult<readonly BitrixDepartment[]>>;
   getLeadership(userId: string): Promise<BitrixResult<readonly BitrixDepartment[]>>;
-  snapshotDepartmentMembers(
-    departmentId: string,
-  ): Promise<BitrixResult<DepartmentMemberSnapshot>>;
+  snapshotDepartmentMembers(departmentId: string): Promise<BitrixResult<DepartmentMemberSnapshot>>;
+  getProjectAccessStatuses(
+    projectIds: readonly string[],
+  ): Promise<BitrixResult<readonly BitrixProjectAccessStatus[]>>;
 }
 
 export interface BitrixCalendar {
-  getPortalCalendar(
-    input: { fromYear: number; toYear: number },
-  ): Promise<BitrixResult<PortalCalendar>>;
+  getPortalCalendar(input: {
+    fromYear: number;
+    toYear: number;
+  }): Promise<BitrixResult<PortalCalendar>>;
 }
 
 export interface BitrixNotifications {

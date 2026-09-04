@@ -37,6 +37,7 @@ import { isUrlFromOrigins } from '../runtime/origin-policy';
 
 type Client = SupabaseClient<Database>;
 type OperationRow = DatabaseTable<'bulk_operation'>;
+type OperationDraftRow = DatabaseTable<'operation_draft'>;
 type TaskResultRow = DatabaseTable<'task_processing_result'>;
 type AuditRow = DatabaseTable<'audit_event'>;
 const taskResultRefinementBatchSize = 100;
@@ -473,7 +474,7 @@ export class TaskCommanderRepositories {
   }): Promise<unknown | null> {
     const { data, error } = await this.client
       .from('user_settings')
-      .select('access_active, permissions, allowed_field_ids')
+      .select('access_active, permissions, allowed_field_ids, access_version')
       .eq('portal_id', input.portalId)
       .eq('user_id', input.userId)
       .maybeSingle();
@@ -489,6 +490,7 @@ export class TaskCommanderRepositories {
       accessActive: data.access_active,
       permissions: data.permissions,
       allowedFieldIds: data.allowed_field_ids,
+      accessVersion: data.access_version,
     };
   }
 
@@ -634,6 +636,22 @@ export class TaskCommanderRepositories {
     return data ? mapDraft(data) : null;
   }
 
+  public async getCurrentDraftForPreflight(context: DataAccessContext): Promise<{
+    draft: BulkOperationDraft;
+    preflightSnapshot: Json | null;
+  } | null> {
+    requireDataAccessContext(context);
+    const { data, error } = await this.client
+      .from('operation_draft')
+      .select('*')
+      .eq('portal_id', context.portalId)
+      .eq('owner_id', context.actorId)
+      .gt('expires_at', new Date().toISOString())
+      .maybeSingle();
+    if (error) throw toDataAccessError(error);
+    return data ? { draft: mapDraft(data), preflightSnapshot: data.preflight_snapshot } : null;
+  }
+
   public async saveDraft(
     context: DataAccessContext,
     input: {
@@ -663,6 +681,42 @@ export class TaskCommanderRepositories {
       }),
     );
     return mapDraft(row);
+  }
+
+  public async saveTaskPreflight(
+    context: DataAccessContext,
+    input: {
+      draftId: string;
+      expectedRevision: number;
+      preflightSnapshot: Json;
+    },
+  ): Promise<{ draft: BulkOperationDraft; preflightSnapshot: Json }> {
+    requireDataAccessContext(context);
+    const saveTaskPreflightRpc = this.client.rpc.bind(this.client) as unknown as (
+      functionName: 'save_task_preflight',
+      args: {
+        p_portal_id: string;
+        p_owner_id: string;
+        p_draft_id: string;
+        p_expected_revision: number;
+        p_expected_access_version: number | null;
+        p_is_bitrix_admin: boolean;
+        p_preflight_snapshot: Json;
+      },
+    ) => PromiseLike<{ data: OperationDraftRow | null; error: unknown | null }>;
+    const row = await requireData(
+      saveTaskPreflightRpc('save_task_preflight', {
+        p_portal_id: context.portalId,
+        p_owner_id: context.actorId,
+        p_draft_id: input.draftId,
+        p_expected_revision: input.expectedRevision,
+        p_expected_access_version: context.accessVersion,
+        p_is_bitrix_admin: context.isBitrixAdmin,
+        p_preflight_snapshot: input.preflightSnapshot,
+      }),
+    );
+    if (row.preflight_snapshot === null) throw new DataAccessError('INTEGRITY', false);
+    return { draft: mapDraft(row), preflightSnapshot: row.preflight_snapshot };
   }
 
   public async createOperation(

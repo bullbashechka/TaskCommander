@@ -35,6 +35,8 @@ export async function createRelevantVersion(
       status: snapshot.status,
       values: snapshot.values,
       editableFieldIds: snapshot.editableFieldIds,
+      isTemplate: snapshot.isTemplate,
+      isRecurrenceRule: snapshot.isRecurrenceRule,
       deadlineManagedBySubtasks: snapshot.deadlineManagedBySubtasks,
     }),
   );

@@ -3,9 +3,12 @@ import { Hono } from 'hono';
 import {
   bulkOperationDraftAvailabilitySchema,
   bulkOperationDraftSchema,
+  preflightPreviewSchema,
   saveBulkOperationDraftRequestSchema,
   taskChangeCatalogResponseSchema,
+  taskPreflightRequestSchema,
   type BulkOperationDraft,
+  type PreflightPreview,
 } from '@task-commander/contracts';
 
 import type { VerifiedSessionPrincipal } from '../auth/session-service';
@@ -19,9 +22,11 @@ import {
 import type { Json } from '../data/database.types';
 import { DataAccessError } from '../data/errors';
 import { ApiHttpError } from '../http/errors';
+import { clientRateLimitKey, requireRateLimit } from '../http/security';
 import { parseJsonBody } from '../http/validation';
 import type { BitrixAdapter } from '../integrations/bitrix/contract';
 import type { RuntimeEnvironment } from '../runtime/configuration';
+import { configuredOrigins } from '../runtime/origin-policy';
 import {
   createTaskFilterCatalog,
   InvalidTaskSearchDefinitionError,
@@ -33,10 +38,15 @@ import {
   InvalidTaskChangeDefinitionError,
   requireValidBulkChanges,
 } from './catalog';
+import { buildTaskPreflight, TaskPreflightError } from './preflight';
 
 export type TaskChangeRepository = Readonly<{
   ensurePrincipalIdentity(context: DataAccessContext, displayName: string): Promise<void>;
   getCurrentDraft(context: DataAccessContext): Promise<BulkOperationDraft | null>;
+  getCurrentDraftForPreflight(context: DataAccessContext): Promise<{
+    draft: BulkOperationDraft;
+    preflightSnapshot: Json | null;
+  } | null>;
   saveDraft(
     context: DataAccessContext,
     input: {
@@ -50,6 +60,14 @@ export type TaskChangeRepository = Readonly<{
       replaceExpired?: boolean;
     },
   ): Promise<BulkOperationDraft>;
+  saveTaskPreflight(
+    context: DataAccessContext,
+    input: {
+      draftId: string;
+      expectedRevision: number;
+      preflightSnapshot: Json;
+    },
+  ): Promise<{ draft: BulkOperationDraft; preflightSnapshot: Json }>;
 }>;
 
 export type TaskChangeRouteDependencies = Readonly<{
@@ -87,8 +105,63 @@ function throwDataApiError(error: unknown): never {
   if (error instanceof DataAccessError) {
     if (error.code === 'CONFLICT') throw new ApiHttpError(409, 'CONFLICT');
     if (error.code === 'RATE_LIMITED') throw new ApiHttpError(429, 'RATE_LIMITED');
+    if (error.code === 'PREFLIGHT_TOO_LARGE') {
+      throw new ApiHttpError(413, 'PREFLIGHT_TOO_LARGE');
+    }
   }
   throw new ApiHttpError(503, 'UPSTREAM_UNAVAILABLE');
+}
+
+function throwPreflightApiError(error: TaskPreflightError): never {
+  switch (error.code) {
+    case 'UNAUTHENTICATED':
+      throw new ApiHttpError(401, 'UNAUTHENTICATED');
+    case 'RATE_LIMITED':
+      throw new ApiHttpError(429, 'RATE_LIMITED');
+    case 'PREFLIGHT_TOO_LARGE':
+      throw new ApiHttpError(413, 'PREFLIGHT_TOO_LARGE');
+    case 'UPSTREAM_UNAVAILABLE':
+      throw new ApiHttpError(503, 'UPSTREAM_UNAVAILABLE');
+  }
+}
+
+function sameSet(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value) => right.includes(value));
+}
+
+function sameAccess(left: EffectiveAccess, right: EffectiveAccess): boolean {
+  return (
+    left.principal.portalId === right.principal.portalId &&
+    left.principal.userId === right.principal.userId &&
+    left.principal.isBitrixAdmin === right.principal.isBitrixAdmin &&
+    left.accessVersion === right.accessVersion &&
+    sameSet(left.permissions, right.permissions) &&
+    left.fieldScope.kind === right.fieldScope.kind &&
+    (left.fieldScope.kind === 'all' ||
+      (right.fieldScope.kind === 'subset' &&
+        sameSet(left.fieldScope.fieldIds, right.fieldScope.fieldIds)))
+  );
+}
+
+function previewMatchesDraft(preview: PreflightPreview, draft: BulkOperationDraft): boolean {
+  const fieldIds = draft.changes.map((change) => change.fieldId);
+  return (
+    preview.draftId === draft.id &&
+    preview.sourceDraftRevision === draft.revision &&
+    preview.draftRevision === draft.revision + 1 &&
+    preview.entries.length === draft.selectedTaskIds.length &&
+    preview.entries.every((entry, index) => {
+      if (entry.taskId !== draft.selectedTaskIds[index]) return false;
+      if (entry.changedFieldIds.some((fieldId) => !fieldIds.includes(fieldId))) return false;
+      if (entry.currentValues === null || entry.targetValues === null) {
+        return entry.currentValues === null && entry.targetValues === null;
+      }
+      return (
+        sameSet(Object.keys(entry.currentValues), fieldIds) &&
+        sameSet(Object.keys(entry.targetValues), fieldIds)
+      );
+    })
+  );
 }
 
 export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies) {
@@ -114,9 +187,33 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
     }
   }
 
-  async function loadCapabilities(env: RuntimeEnvironment, principal: VerifiedSessionPrincipal) {
+  async function authorizePreflight(context: {
+    env: RuntimeEnvironment;
+    req: { header(name: string): string | undefined; raw: Request };
+    get(name: 'correlationId'): string;
+  }) {
+    await requireRateLimit(
+      context.env.ACCESS_FANOUT_RATE_LIMITER,
+      `client:${clientRateLimitKey(context.req.raw)}:task-preflight`,
+    );
+    const authorization = await authorize(context);
+    await requireRateLimit(
+      context.env.ACCESS_FANOUT_RATE_LIMITER,
+      `${authorization.principal.portalId}:${authorization.principal.userId}:task-preflight`,
+    );
+    return authorization;
+  }
+
+  function createAdapter(env: RuntimeEnvironment, currentUserId: string): BitrixAdapter {
     try {
-      const adapter = dependencies.createAdapter(env, { currentUserId: principal.userId });
+      return dependencies.createAdapter(env, { currentUserId });
+    } catch {
+      throw new ApiHttpError(503, 'UPSTREAM_UNAVAILABLE');
+    }
+  }
+
+  async function loadCapabilities(adapter: BitrixAdapter) {
+    try {
       const result = await adapter.tasks.getFieldCapabilities();
       if (!result.ok) throw toTaskFilterBitrixApiError(result.failure);
       return result.value;
@@ -128,7 +225,8 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
 
   routes.get('/change-fields', async (context) => {
     const { principal, access } = await authorize(context);
-    const capabilities = await loadCapabilities(context.env, principal);
+    const adapter = createAdapter(context.env, principal.userId);
+    const capabilities = await loadCapabilities(adapter);
     return context.json(
       taskChangeCatalogResponseSchema.parse(
         createTaskChangeCatalog(capabilities, access.fieldScope),
@@ -153,7 +251,8 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
       saveBulkOperationDraftRequestSchema,
       131_072,
     );
-    const capabilities = await loadCapabilities(context.env, principal);
+    const adapter = createAdapter(context.env, principal.userId);
+    const capabilities = await loadCapabilities(adapter);
     try {
       requireValidTaskSearchDefinition(input, createTaskFilterCatalog(capabilities));
       requireValidBulkChanges(
@@ -182,6 +281,104 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
       ) {
         throw new ApiHttpError(400, 'INVALID_REQUEST');
       }
+      if (error instanceof ApiHttpError) throw error;
+      throwDataApiError(error);
+    }
+  });
+
+  routes.post('/preflight', async (context) => {
+    const authorization = await authorizePreflight(context);
+    if (!authorization.principal.isBitrixAdmin && authorization.access.accessVersion === null) {
+      throw new ApiHttpError(503, 'UPSTREAM_UNAVAILABLE');
+    }
+    const input = await parseJsonBody(context.req.raw, taskPreflightRequestSchema, 4_096);
+    const repository = dependencies.createRepository(context.env);
+    let current: Awaited<ReturnType<TaskChangeRepository['getCurrentDraftForPreflight']>>;
+    try {
+      current = await repository.getCurrentDraftForPreflight(authorization.dataContext);
+    } catch (error) {
+      throwDataApiError(error);
+    }
+    if (!current || current.draft.id !== input.draftId) {
+      throw new ApiHttpError(409, 'CONFLICT');
+    }
+    if (current.draft.revision === input.expectedRevision + 1) {
+      const existing = preflightPreviewSchema.safeParse(current.preflightSnapshot);
+      if (
+        !existing.success ||
+        existing.data.draftId !== input.draftId ||
+        existing.data.sourceDraftRevision !== input.expectedRevision ||
+        existing.data.actorAccessVersion !== authorization.access.accessVersion ||
+        !previewMatchesDraft(existing.data, {
+          ...current.draft,
+          revision: input.expectedRevision,
+        })
+      ) {
+        throw new ApiHttpError(409, 'CONFLICT');
+      }
+      return context.json(existing.data);
+    }
+    if (current.draft.revision !== input.expectedRevision) {
+      throw new ApiHttpError(409, 'CONFLICT');
+    }
+
+    const adapter = createAdapter(context.env, authorization.principal.userId);
+    const capabilities = await loadCapabilities(adapter);
+    const catalog = createTaskChangeCatalog(capabilities, authorization.access.fieldScope);
+    try {
+      requireValidTaskSearchDefinition(current.draft, createTaskFilterCatalog(capabilities));
+      requireValidBulkChanges(current.draft.changes, catalog);
+    } catch (error) {
+      if (
+        error instanceof InvalidTaskChangeDefinitionError ||
+        error instanceof InvalidTaskSearchDefinitionError
+      ) {
+        throw new ApiHttpError(400, 'INVALID_REQUEST');
+      }
+      throw error;
+    }
+
+    let preview: PreflightPreview;
+    try {
+      preview = await buildTaskPreflight({
+        adapter,
+        draft: current.draft,
+        catalog,
+        actorAccessVersion: authorization.access.accessVersion,
+        trustedPortalOrigins: configuredOrigins(
+          context.env.BITRIX_PORTAL_ORIGIN,
+          context.env.APP_ENV === 'local',
+        ),
+      });
+    } catch (error) {
+      if (error instanceof TaskPreflightError) throwPreflightApiError(error);
+      throw new ApiHttpError(503, 'UPSTREAM_UNAVAILABLE');
+    }
+
+    if (!previewMatchesDraft(preview, current.draft)) {
+      throw new ApiHttpError(503, 'UPSTREAM_UNAVAILABLE');
+    }
+
+    const renewed = await authorize(context);
+    if (!sameAccess(authorization.access, renewed.access)) {
+      throw new ApiHttpError(409, 'CONFLICT');
+    }
+    try {
+      const saved = await repository.saveTaskPreflight(renewed.dataContext, {
+        draftId: input.draftId,
+        expectedRevision: input.expectedRevision,
+        preflightSnapshot: asJson(preview),
+      });
+      const stored = preflightPreviewSchema.parse(saved.preflightSnapshot);
+      if (
+        stored.draftRevision !== saved.draft.revision ||
+        stored.actorAccessVersion !== renewed.access.accessVersion ||
+        !previewMatchesDraft(stored, current.draft)
+      ) {
+        throw new ApiHttpError(503, 'UPSTREAM_UNAVAILABLE');
+      }
+      return context.json(stored);
+    } catch (error) {
       if (error instanceof ApiHttpError) throw error;
       throwDataApiError(error);
     }

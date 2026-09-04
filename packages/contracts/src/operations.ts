@@ -10,7 +10,7 @@ import {
   positiveIntegerSchema,
   safeHttpsUrlSchema,
 } from './primitives';
-import { bulkChangeCommandSchema } from './task-change';
+import { bulkChangeCommandSchema, taskChangeValueSchema } from './task-change';
 import { taskFilterListSchema } from './task-filters';
 import { taskSearchSortSchema } from './task-search';
 
@@ -126,6 +126,64 @@ export const preflightTaskEntrySchema = z
     reasonCode: z.string().trim().min(1).max(128).nullable(),
     reasonMessage: z.string().trim().min(1).max(512).nullable(),
     relevantVersion: z.string().trim().min(1).max(256).nullable(),
+    currentValues: z.record(fieldIdSchema, taskChangeValueSchema).nullable(),
+    targetValues: z.record(fieldIdSchema, taskChangeValueSchema).nullable(),
+  })
+  .strict()
+  .superRefine((entry, context) => {
+    const currentFieldIds = entry.currentValues === null ? null : Object.keys(entry.currentValues);
+    const targetFieldIds = entry.targetValues === null ? null : Object.keys(entry.targetValues);
+    const invalidValueShape =
+      new Set(entry.changedFieldIds).size !== entry.changedFieldIds.length ||
+      (currentFieldIds === null) !== (targetFieldIds === null) ||
+      (currentFieldIds !== null &&
+        targetFieldIds !== null &&
+        (currentFieldIds.length === 0 ||
+          currentFieldIds.length !== targetFieldIds.length ||
+          currentFieldIds.some((fieldId) => !targetFieldIds.includes(fieldId)) ||
+          entry.changedFieldIds.some((fieldId) => !targetFieldIds.includes(fieldId))));
+    if (invalidValueShape) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid preflight values.' });
+    }
+    if (entry.disposition === 'eligible') {
+      if (
+        entry.changedFieldIds.length === 0 ||
+        entry.reasonCode !== null ||
+        entry.reasonMessage !== null ||
+        entry.relevantVersion === null ||
+        entry.currentValues === null ||
+        entry.targetValues === null
+      ) {
+        context.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid eligible entry.' });
+      }
+      return;
+    }
+    if (entry.disposition === 'no_change') {
+      if (
+        entry.changedFieldIds.length !== 0 ||
+        entry.reasonCode !== null ||
+        entry.reasonMessage !== null ||
+        entry.relevantVersion === null ||
+        entry.currentValues === null ||
+        entry.targetValues === null
+      ) {
+        context.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid no-change entry.' });
+      }
+      return;
+    }
+    if (
+      entry.changedFieldIds.length !== 0 ||
+      entry.reasonCode === null ||
+      entry.reasonMessage === null
+    ) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid excluded entry.' });
+    }
+  });
+
+export const taskPreflightRequestSchema = z
+  .object({
+    draftId: draftIdSchema,
+    expectedRevision: positiveIntegerSchema,
   })
   .strict();
 
@@ -133,11 +191,41 @@ export const preflightPreviewSchema = z
   .object({
     draftId: draftIdSchema,
     draftRevision: positiveIntegerSchema,
+    sourceDraftRevision: positiveIntegerSchema,
+    actorAccessVersion: positiveIntegerSchema.nullable(),
     checkedAt: isoDateTimeSchema,
-    entries: z.array(preflightTaskEntrySchema).max(1000),
+    canProceed: z.boolean(),
+    entries: z.array(preflightTaskEntrySchema).min(1).max(1000),
     summary: operationSummarySchema,
   })
-  .strict();
+  .strict()
+  .superRefine((preview, context) => {
+    const eligible = preview.entries.filter((entry) => entry.disposition === 'eligible').length;
+    const excluded = preview.entries.filter(
+      (entry) => entry.disposition === 'excluded_by_preflight',
+    ).length;
+    const unchanged = preview.entries.filter((entry) => entry.disposition === 'no_change').length;
+    const executionCounters = [
+      preview.summary.successful,
+      preview.summary.failed,
+      preview.summary.unconfirmed,
+      preview.summary.conflicted,
+      preview.summary.partiallyApplied,
+      preview.summary.notProcessed,
+    ];
+    if (
+      preview.draftRevision !== preview.sourceDraftRevision + 1 ||
+      new Set(preview.entries.map((entry) => entry.taskId)).size !== preview.entries.length ||
+      preview.summary.selected !== preview.entries.length ||
+      preview.summary.eligible !== eligible ||
+      preview.summary.excluded !== excluded ||
+      preview.summary.unchanged !== unchanged ||
+      executionCounters.some((count) => count !== 0) ||
+      preview.canProceed !== eligible > 0
+    ) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid preflight summary.' });
+    }
+  });
 
 export const bulkOperationDraftSchema = z
   .object({
@@ -275,6 +363,9 @@ export const reportTaskEntrySchema = z
 export type BulkOperationDraft = z.infer<typeof bulkOperationDraftSchema>;
 export type BulkOperationDraftAvailability = z.infer<typeof bulkOperationDraftAvailabilitySchema>;
 export type SaveBulkOperationDraftRequest = z.infer<typeof saveBulkOperationDraftRequestSchema>;
+export type TaskPreflightRequest = z.infer<typeof taskPreflightRequestSchema>;
+export type PreflightTaskEntry = z.infer<typeof preflightTaskEntrySchema>;
+export type PreflightPreview = z.infer<typeof preflightPreviewSchema>;
 export type BulkOperation = z.infer<typeof bulkOperationSchema>;
 export type TaskOutcome = z.infer<typeof taskOutcomeSchema>;
 export type TaskOutcomeRefinement = z.infer<typeof taskOutcomeRefinementSchema>;

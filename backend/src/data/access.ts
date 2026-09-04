@@ -40,6 +40,7 @@ const effectiveAccessSettingsSchema = z
     allowedFieldIds: z
       .array(canonicalPersistedFieldIdSchema)
       .refine((fieldIds) => new Set(fieldIds).size === fieldIds.length),
+    accessVersion: z.number().int().safe().positive(),
   })
   .strict();
 
@@ -58,6 +59,7 @@ export interface EffectiveAccess {
   readonly principal: SessionPrincipal;
   readonly permissions: readonly Permission[];
   readonly fieldScope: FieldScope;
+  readonly accessVersion: number | null;
   readonly [effectiveAccessBrand]: true;
 }
 
@@ -65,6 +67,8 @@ export interface DataAccessContext {
   readonly portalId: string;
   readonly actorId: string;
   readonly permissions: readonly Permission[];
+  readonly isBitrixAdmin: boolean;
+  readonly accessVersion: number | null;
   readonly [dataAccessContextBrand]: true;
 }
 
@@ -138,11 +142,13 @@ function asEffectiveAccess(
   principal: SessionPrincipal,
   permissions: readonly Permission[],
   fieldScope: FieldScope,
+  accessVersion: number | null,
 ): EffectiveAccess {
   const access: EffectiveAccess = {
     principal: freezePrincipal(principal),
     permissions: Object.freeze([...permissions]),
     fieldScope: freezeFieldScope(fieldScope),
+    accessVersion,
     [effectiveAccessBrand]: true,
   };
   Object.freeze(access);
@@ -162,7 +168,7 @@ export async function resolveEffectiveAccess(
     throw new EffectiveAccessError('forbidden');
   }
   if (principal.isBitrixAdmin) {
-    return asEffectiveAccess(principal, appPermissions, { kind: 'all' });
+    return asEffectiveAccess(principal, appPermissions, { kind: 'all' }, null);
   }
 
   let rawSettings: unknown | null;
@@ -180,10 +186,15 @@ export async function resolveEffectiveAccess(
     throw new EffectiveAccessError('forbidden');
   }
 
-  return asEffectiveAccess(principal, parsed.data.permissions, {
-    kind: 'subset',
-    fieldIds: parsed.data.allowedFieldIds,
-  });
+  return asEffectiveAccess(
+    principal,
+    parsed.data.permissions,
+    {
+      kind: 'subset',
+      fieldIds: parsed.data.allowedFieldIds,
+    },
+    parsed.data.accessVersion,
+  );
 }
 
 export function createDataAccessContext(access: EffectiveAccess): DataAccessContext {
@@ -193,6 +204,8 @@ export function createDataAccessContext(access: EffectiveAccess): DataAccessCont
     portalId: portalIdSchema.parse(access.principal.portalId),
     actorId: bitrixIdSchema.parse(access.principal.userId),
     permissions: Object.freeze([...access.permissions]),
+    isBitrixAdmin: access.principal.isBitrixAdmin,
+    accessVersion: access.accessVersion,
     [dataAccessContextBrand]: true,
   };
   Object.freeze(context);

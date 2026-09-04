@@ -2,6 +2,7 @@ import {
   apiErrorResponseSchema,
   bulkOperationDraftAvailabilitySchema,
   bulkOperationDraftSchema,
+  preflightPreviewSchema,
   correlationIdSchema,
   effectiveAccessResponseSchema,
   savedTaskFilterListResponseSchema,
@@ -9,6 +10,7 @@ import {
   sessionResponseSchema,
   saveBulkOperationDraftRequestSchema,
   taskChangeCatalogResponseSchema,
+  taskPreflightRequestSchema,
   taskFilterCatalogResponseSchema,
   taskFilterUserSearchResponseSchema,
   taskSearchApiRequestSchema,
@@ -18,11 +20,13 @@ import {
   type ApiErrorCode,
   type BulkOperationDraft,
   type BulkOperationDraftAvailability,
+  type PreflightPreview,
   type EffectiveAccessResponse,
   type SavedTaskFilter,
   type SessionPrincipal,
   type SaveBulkOperationDraftRequest,
   type TaskChangeCatalogResponse,
+  type TaskPreflightRequest,
   type TaskFilterCatalogResponse,
   type TaskFilterList,
   type TaskFilterUserSearchResponse,
@@ -320,6 +324,18 @@ export function saveBulkOperationDraft(
   const parsed = saveBulkOperationDraftRequestSchema.parse(input);
   return requestJson('/api/tasks/draft', bulkOperationDraftSchema, signal, {
     method: 'PUT',
+    headers: jsonHeaders,
+    body: JSON.stringify(parsed),
+  });
+}
+
+export function createTaskPreflight(
+  input: TaskPreflightRequest,
+  signal?: AbortSignal,
+): Promise<PreflightPreview> {
+  const parsed = taskPreflightRequestSchema.parse(input);
+  return requestJson('/api/tasks/preflight', preflightPreviewSchema, signal, {
+    method: 'POST',
     headers: jsonHeaders,
     body: JSON.stringify(parsed),
   });

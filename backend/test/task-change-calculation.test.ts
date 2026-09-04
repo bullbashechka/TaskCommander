@@ -103,6 +103,8 @@ function snapshot(values: TaskChangeSnapshot['values']): TaskChangeSnapshot {
     status: 'in_progress',
     values,
     editableFieldIds: Object.keys(values),
+    isTemplate: false,
+    isRecurrenceRule: false,
     deadlineManagedBySubtasks: false,
     relevantVersion: 'version-1',
   };

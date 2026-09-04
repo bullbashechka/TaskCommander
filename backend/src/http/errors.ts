@@ -17,6 +17,7 @@ const safeMessages: Record<ApiErrorCode, string> = {
   CONFLICT: 'Данные изменились. Обновите страницу и повторите действие.',
   SAVED_FILTER_LIMIT: 'Достигнут лимит личных наборов фильтров.',
   SAVED_FILTER_NAME_TAKEN: 'Личный набор с таким именем уже существует.',
+  PREFLIGHT_TOO_LARGE: 'Результат проверки превышает допустимый размер.',
   RATE_LIMITED: 'Слишком много запросов. Повторите попытку позже.',
   UPSTREAM_UNAVAILABLE: 'Внешний сервис временно недоступен.',
   INTERNAL_ERROR: 'Внутренняя ошибка API.',

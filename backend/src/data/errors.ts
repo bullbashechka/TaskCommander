@@ -4,6 +4,7 @@ export type DataAccessErrorCode =
   | 'CONFLICT'
   | 'SAVED_FILTER_LIMIT'
   | 'SAVED_FILTER_NAME_TAKEN'
+  | 'PREFLIGHT_TOO_LARGE'
   | 'UNAVAILABLE_RECORD'
   | 'INTEGRITY'
   | 'ACTIVE_OPERATION'
@@ -37,6 +38,10 @@ export function toDataAccessError(error: unknown): DataAccessError {
 
     if (code === 'P0001' && message.startsWith('TC_SAVED_FILTER_LIMIT')) {
       return new DataAccessError('SAVED_FILTER_LIMIT', false);
+    }
+
+    if (code === '22023' && message.startsWith('TC_TASK_PREFLIGHT_TOO_LARGE')) {
+      return new DataAccessError('PREFLIGHT_TOO_LARGE', false);
     }
 
     if (code === '23505' && message.includes('saved_filter_owner_name_key')) {

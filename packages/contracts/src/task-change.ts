@@ -19,6 +19,16 @@ export const taskFieldKindSchema = z.enum([
 
 export type TaskFieldKind = z.infer<typeof taskFieldKindSchema>;
 
+export const taskChangeValueSchema = z.union([
+  z.string().max(4096),
+  z.number().finite(),
+  z.boolean(),
+  z.null(),
+  z.array(z.string().trim().min(1).max(4096)).max(256),
+]);
+
+export type TaskChangeValue = z.infer<typeof taskChangeValueSchema>;
+
 export const taskFieldDefinitionSchema = z
   .object({
     id: fieldIdSchema,

@@ -14,6 +14,7 @@ export type MockScenarioMethod =
   | 'organization.getDepartments'
   | 'organization.getLeadership'
   | 'organization.snapshotDepartmentMembers'
+  | 'organization.getProjectAccessStatuses'
   | 'calendar.getPortalCalendar'
   | 'notifications.sendOnce'
   | 'disk.putReportOnce'

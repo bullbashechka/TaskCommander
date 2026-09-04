@@ -449,6 +449,8 @@ async function toSummary(
     status: task.status,
     values,
     editableFieldIds: getEditableFieldIds(task, userId, Object.keys(values)),
+    isTemplate: task.isTemplate,
+    isRecurrenceRule: task.isRecurrenceRule,
     deadlineManagedBySubtasks: task.deadlineManagedBySubtasks,
   };
 
@@ -539,6 +541,8 @@ async function createChangeSnapshot(
     status: task.status,
     values,
     editableFieldIds: getEditableFieldIds(task, state.currentUserId, fieldIds),
+    isTemplate: task.isTemplate,
+    isRecurrenceRule: task.isRecurrenceRule,
     deadlineManagedBySubtasks: task.deadlineManagedBySubtasks,
   };
 
@@ -628,16 +632,14 @@ export function createMockTasks(
       const matching = filterAndSortTasks(state, request);
       const start = (request.page - 1) * request.pageSize;
       const items = await Promise.all(
-        matching
-          .slice(start, start + request.pageSize)
-          .map((task) => {
-            const responsibleId = String(getFieldValue(task, 'responsible_id'));
-            return toSummary(
-              task,
-              state.currentUserId,
-              state.users.get(responsibleId)?.displayName ?? null,
-            );
-          }),
+        matching.slice(start, start + request.pageSize).map((task) => {
+          const responsibleId = String(getFieldValue(task, 'responsible_id'));
+          return toSummary(
+            task,
+            state.currentUserId,
+            state.users.get(responsibleId)?.displayName ?? null,
+          );
+        }),
       );
       const page: TaskSearchPage = {
         items,

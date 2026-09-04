@@ -4,11 +4,14 @@ import {
   bulkOperationDraftAvailabilitySchema,
   bulkOperationDraftSchema,
   taskChangeCatalogResponseSchema,
+  preflightPreviewSchema,
+  type BulkOperationDraft,
 } from '@task-commander/contracts';
 
 import { createApi } from '../src/api';
 import { resolveEffectiveAccess } from '../src/data/access';
 import { DataAccessError } from '../src/data/errors';
+import type { Json } from '../src/data/database.types';
 import { createMockBitrixAdapter } from '../src/integrations/bitrix/mock';
 import type { TaskChangeRepository } from '../src/task-changes/routes';
 import { createVerifiedTestPrincipal } from './verified-session-test-helper';
@@ -17,6 +20,7 @@ const environment = {
   APP_ENV: 'local',
   APP_ORIGIN: 'https://example.test',
   BITRIX_PORTAL_ORIGIN: 'https://portal.bitrix24.ru',
+  ACCESS_FANOUT_RATE_LIMITER: { limit: vi.fn().mockResolvedValue({ success: true }) },
 };
 
 const headers = {
@@ -31,6 +35,9 @@ async function setup(input?: {
   allowedFieldIds?: string[];
   saveError?: DataAccessError;
   includeForbiddenCapabilities?: boolean;
+  currentDraft?: BulkOperationDraft;
+  currentPreflightSnapshot?: Json | null;
+  renewedAccessVersion?: number;
 }) {
   const principal = await createVerifiedTestPrincipal({ userId: '10' });
   const permissions = input?.permissions ?? [
@@ -43,9 +50,34 @@ async function setup(input?: {
       accessActive: true,
       permissions,
       allowedFieldIds: input?.allowedFieldIds ?? ['title', 'status', 'tags'],
+      accessVersion: 1,
     }),
   });
-  const getCurrentDraft = vi.fn<TaskChangeRepository['getCurrentDraft']>().mockResolvedValue(null);
+  const renewedAccess =
+    input?.renewedAccessVersion === undefined
+      ? access
+      : await resolveEffectiveAccess(principal, {
+          findEffectiveAccessSettings: async () => ({
+            accessActive: true,
+            permissions,
+            allowedFieldIds: input.allowedFieldIds ?? ['title', 'status', 'tags'],
+            accessVersion: input.renewedAccessVersion,
+          }),
+        });
+  let accessReadCount = 0;
+  const getCurrentDraft = vi
+    .fn<TaskChangeRepository['getCurrentDraft']>()
+    .mockResolvedValue(input?.currentDraft ?? null);
+  const getCurrentDraftForPreflight = vi
+    .fn<TaskChangeRepository['getCurrentDraftForPreflight']>()
+    .mockResolvedValue(
+      input?.currentDraft
+        ? {
+            draft: input.currentDraft,
+            preflightSnapshot: input.currentPreflightSnapshot ?? null,
+          }
+        : null,
+    );
   const saveDraft = vi
     .fn<TaskChangeRepository['saveDraft']>()
     .mockImplementation(async (_context, draft) => {
@@ -64,10 +96,21 @@ async function setup(input?: {
         expiresAt: '2026-09-05T10:00:00Z',
       });
     });
+  const saveTaskPreflight = vi
+    .fn<TaskChangeRepository['saveTaskPreflight']>()
+    .mockImplementation(async (_context, preflight) => {
+      if (!input?.currentDraft) throw new DataAccessError('CONFLICT', false);
+      return {
+        draft: { ...input.currentDraft, revision: preflight.expectedRevision + 1 },
+        preflightSnapshot: preflight.preflightSnapshot,
+      };
+    });
   const repository: TaskChangeRepository = {
     ensurePrincipalIdentity: vi.fn(),
     getCurrentDraft,
+    getCurrentDraftForPreflight,
     saveDraft,
+    saveTaskPreflight,
   };
   const adapterFactory = vi.fn((_env: unknown, adapterInput: { currentUserId: string }) => {
     const adapter = createMockBitrixAdapter({ currentUserId: adapterInput.currentUserId });
@@ -116,12 +159,36 @@ async function setup(input?: {
   });
   const api = createApi({
     readPrincipal: async () => principal,
-    readEffectiveAccess: async () => access,
+    readEffectiveAccess: async () => {
+      accessReadCount += 1;
+      return accessReadCount >= 2 ? renewedAccess : access;
+    },
     createBitrixAdapter: adapterFactory,
     createTaskChangeRepository: () => repository,
   });
-  return { api, adapterFactory, getCurrentDraft, saveDraft };
+  return {
+    api,
+    adapterFactory,
+    getCurrentDraft,
+    getCurrentDraftForPreflight,
+    saveDraft,
+    saveTaskPreflight,
+  };
 }
+
+const currentDraft: BulkOperationDraft = {
+  id: '123e4567-e89b-42d3-a456-426614174000',
+  ownerId: '10',
+  revision: 3,
+  status: 'preparing',
+  filters: [],
+  sort: { fieldId: 'deadline', direction: 'asc' },
+  selectedTaskIds: ['42', '45', '48', '49'],
+  changes: [{ fieldId: 'title', kind: 'text', action: 'set', value: 'Updated title' }],
+  createdAt: '2026-09-04T10:00:00Z',
+  updatedAt: '2026-09-04T10:00:00Z',
+  expiresAt: '2026-09-05T10:00:00Z',
+};
 
 describe('task change routes', () => {
   it('returns only supported, editable and allowlisted fields without completed status', async () => {
@@ -329,5 +396,151 @@ describe('task change routes', () => {
     );
 
     expect(response.status).toBe(409);
+  });
+
+  it('preflights every selected task and persists the owner-bound revision snapshot', async () => {
+    const { api, saveTaskPreflight } = await setup({ currentDraft });
+    const response = await api.request(
+      'https://example.test/api/tasks/preflight',
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ draftId: currentDraft.id, expectedRevision: 3 }),
+      },
+      environment,
+    );
+    const preview = preflightPreviewSchema.parse(await response.json());
+
+    expect(response.status).toBe(200);
+    expect(preview.entries.map((entry) => [entry.taskId, entry.disposition])).toEqual([
+      ['42', 'eligible'],
+      ['45', 'excluded_by_preflight'],
+      ['48', 'excluded_by_preflight'],
+      ['49', 'excluded_by_preflight'],
+    ]);
+    expect(preview.entries[1]).toMatchObject({
+      title: null,
+      taskUrl: null,
+      reasonCode: 'TASK_COMPLETED',
+    });
+    expect(preview.entries[2]).toMatchObject({
+      title: null,
+      taskUrl: null,
+      reasonCode: 'TASK_UNAVAILABLE',
+    });
+    expect(preview.summary).toMatchObject({ selected: 4, eligible: 1, excluded: 3 });
+    expect(preview.canProceed).toBe(true);
+    expect(saveTaskPreflight).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        draftId: currentDraft.id,
+        expectedRevision: 3,
+      }),
+    );
+  });
+
+  it('returns an already persisted preflight for an exact HTTP retry', async () => {
+    const first = await setup({ currentDraft });
+    const firstResponse = await first.api.request(
+      'https://example.test/api/tasks/preflight',
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ draftId: currentDraft.id, expectedRevision: 3 }),
+      },
+      environment,
+    );
+    const preview = preflightPreviewSchema.parse(await firstResponse.json());
+    const replayDraft = { ...currentDraft, revision: 4, status: 'awaiting_confirmation' as const };
+    const replay = await setup({
+      currentDraft: replayDraft,
+      currentPreflightSnapshot: preview as unknown as Json,
+    });
+    const response = await replay.api.request(
+      'https://example.test/api/tasks/preflight',
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ draftId: currentDraft.id, expectedRevision: 3 }),
+      },
+      environment,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(preview);
+    expect(replay.adapterFactory).not.toHaveBeenCalled();
+    expect(replay.saveTaskPreflight).not.toHaveBeenCalled();
+  });
+
+  it('rejects a foreign or stale draft binding before Bitrix reads', async () => {
+    const { api, adapterFactory, saveTaskPreflight } = await setup({ currentDraft });
+    const response = await api.request(
+      'https://example.test/api/tasks/preflight',
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          draftId: '223e4567-e89b-42d3-a456-426614174000',
+          expectedRevision: 3,
+        }),
+      },
+      environment,
+    );
+
+    expect(response.status).toBe(409);
+    expect(adapterFactory).not.toHaveBeenCalled();
+    expect(saveTaskPreflight).not.toHaveBeenCalled();
+  });
+
+  it('rejects access changed during external validation before persistence', async () => {
+    const { api, saveTaskPreflight } = await setup({ currentDraft, renewedAccessVersion: 2 });
+    const response = await api.request(
+      'https://example.test/api/tasks/preflight',
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ draftId: currentDraft.id, expectedRevision: 3 }),
+      },
+      environment,
+    );
+
+    expect(response.status).toBe(409);
+    expect(saveTaskPreflight).not.toHaveBeenCalled();
+  });
+
+  it('rejects a stored replay that no longer matches the draft selection', async () => {
+    const first = await setup({ currentDraft });
+    const firstResponse = await first.api.request(
+      'https://example.test/api/tasks/preflight',
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ draftId: currentDraft.id, expectedRevision: 3 }),
+      },
+      environment,
+    );
+    const preview = preflightPreviewSchema.parse(await firstResponse.json());
+    const corrupted = {
+      ...preview,
+      entries: preview.entries.map((entry, index) =>
+        index === 0 ? { ...entry, taskId: '999' } : entry,
+      ),
+    };
+    const replay = await setup({
+      currentDraft: { ...currentDraft, revision: 4, status: 'awaiting_confirmation' },
+      currentPreflightSnapshot: corrupted as unknown as Json,
+    });
+    const response = await replay.api.request(
+      'https://example.test/api/tasks/preflight',
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ draftId: currentDraft.id, expectedRevision: 3 }),
+      },
+      environment,
+    );
+
+    expect(response.status).toBe(409);
+    expect(replay.saveTaskPreflight).not.toHaveBeenCalled();
   });
 });

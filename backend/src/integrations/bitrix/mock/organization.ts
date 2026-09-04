@@ -76,5 +76,29 @@ export function createMockOrganization(
         },
       };
     },
+    async getProjectAccessStatuses(projectIds) {
+      const effects = scenario.take('organization.getProjectAccessStatuses');
+      const failure = getFailure(effects);
+      if (failure) return { ok: false, failure };
+      if (
+        projectIds.length === 0 ||
+        projectIds.length > 50 ||
+        new Set(projectIds).size !== projectIds.length
+      ) {
+        return {
+          ok: false,
+          failure: { kind: 'permanent_failure', reasonCode: 'invalid_project_ids' },
+        };
+      }
+      const availableProjectIds = new Set(['1', '2', '3', '4']);
+      return {
+        ok: true,
+        value: projectIds.map((projectId) =>
+          availableProjectIds.has(projectId)
+            ? { state: 'available' as const, projectId }
+            : { state: 'missing' as const, projectId },
+        ),
+      };
+    },
   };
 }

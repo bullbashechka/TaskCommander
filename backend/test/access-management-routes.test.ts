@@ -13,6 +13,7 @@ function administratorAccess(principal: Awaited<ReturnType<typeof createVerified
       accessActive: true,
       permissions: appPermissions,
       allowedFieldIds: [],
+      accessVersion: 1,
     }),
   });
 }

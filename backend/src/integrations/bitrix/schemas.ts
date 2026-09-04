@@ -8,6 +8,7 @@ import {
   taskSelectAllApiRequestSchema,
   taskSelectAllApiResponseSchema,
   taskFieldKindSchema,
+  taskChangeValueSchema,
   taskFilterListSchema,
 } from '@task-commander/contracts';
 
@@ -29,13 +30,7 @@ const loopbackApplicationUrlSchema = z
   });
 const applicationUrlSchema = z.union([safeHttpsUrlSchema, loopbackApplicationUrlSchema]);
 
-export const bitrixTaskValueSchema = z.union([
-  z.string().max(4096),
-  z.number(),
-  z.boolean(),
-  z.null(),
-  z.array(z.string().trim().min(1).max(4096)).max(256),
-]);
+export const bitrixTaskValueSchema = taskChangeValueSchema;
 
 export const bitrixFailureSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('not_authenticated') }).strict(),
@@ -190,6 +185,8 @@ export const taskChangeSnapshotSchema = z
     status: z.enum(['pending', 'in_progress', 'pending_review', 'deferred', 'completed']),
     values: z.record(fieldIdSchema, bitrixTaskValueSchema),
     editableFieldIds: z.array(fieldIdSchema).max(256),
+    isTemplate: z.boolean(),
+    isRecurrenceRule: z.boolean(),
     deadlineManagedBySubtasks: z.boolean(),
     relevantVersion: z.string().trim().min(1).max(256),
   })
@@ -256,6 +253,21 @@ export const bitrixAccessStatusSchema = z.discriminatedUnion('state', [
     .object({
       state: z.literal('missing'),
       userId: bitrixIdSchema,
+    })
+    .strict(),
+]);
+
+export const bitrixProjectAccessStatusSchema = z.discriminatedUnion('state', [
+  z
+    .object({
+      state: z.literal('available'),
+      projectId: bitrixIdSchema,
+    })
+    .strict(),
+  z
+    .object({
+      state: z.literal('missing'),
+      projectId: bitrixIdSchema,
     })
     .strict(),
 ]);

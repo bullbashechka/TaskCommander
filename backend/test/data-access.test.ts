@@ -26,6 +26,7 @@ async function contextWith(permissions: string[]) {
           accessActive: true,
           permissions,
           allowedFieldIds: [],
+          accessVersion: 1,
         }),
       },
     ),

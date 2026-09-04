@@ -13,6 +13,7 @@ describe('access manager authorization', () => {
         accessActive: true,
         permissions: ['app_access', 'manage_access'],
         allowedFieldIds: ['title'],
+        accessVersion: 1,
       }),
     });
 

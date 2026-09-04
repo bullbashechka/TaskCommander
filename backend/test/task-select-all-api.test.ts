@@ -1,9 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import {
-  apiErrorResponseSchema,
-  taskSelectAllApiResponseSchema,
-} from '@task-commander/contracts';
+import { apiErrorResponseSchema, taskSelectAllApiResponseSchema } from '@task-commander/contracts';
 
 import { createApi } from '../src/api';
 import { resolveEffectiveAccess } from '../src/data/access';
@@ -34,6 +31,7 @@ async function createAppAccess(
       accessActive: true,
       permissions,
       allowedFieldIds: [],
+      accessVersion: 1,
     }),
   });
 }
@@ -127,35 +125,32 @@ describe('task select-all API', () => {
     expect(selectAll).not.toHaveBeenCalled();
   });
 
-  it(
-    'rejects client totals, task IDs, malformed filters, and duplicate filters before selection',
-    async () => {
-      const principal = await createVerifiedTestPrincipal({ userId: '10' });
-      const selectAll = vi.fn<BitrixAdapter['tasks']['selectAll']>();
-      const api = createApi({
-        readPrincipal: async () => principal,
-        readEffectiveAccess: async () => createAppAccess(principal),
-        createBitrixAdapter: (_env, input) =>
-          createAdapterWithTaskSelection(input.currentUserId, selectAll),
-      });
+  it('rejects client totals, task IDs, malformed filters, and duplicate filters before selection', async () => {
+    const principal = await createVerifiedTestPrincipal({ userId: '10' });
+    const selectAll = vi.fn<BitrixAdapter['tasks']['selectAll']>();
+    const api = createApi({
+      readPrincipal: async () => principal,
+      readEffectiveAccess: async () => createAppAccess(principal),
+      createBitrixAdapter: (_env, input) =>
+        createAdapterWithTaskSelection(input.currentUserId, selectAll),
+    });
 
-      const clientValues = await postSelectAll(api, { taskIds: ['42'], total: 1 });
-      const malformed = await postSelectAll(api, {
-        filters: [{ kind: 'date_time', fieldId: 'deadline', operator: 'between', values: [] }],
-      });
-      const duplicates = await postSelectAll(api, {
-        filters: [
-          { kind: 'text', fieldId: 'title', operator: 'contains', values: ['one'] },
-          { kind: 'text', fieldId: 'title', operator: 'contains', values: ['two'] },
-        ],
-      });
+    const clientValues = await postSelectAll(api, { taskIds: ['42'], total: 1 });
+    const malformed = await postSelectAll(api, {
+      filters: [{ kind: 'date_time', fieldId: 'deadline', operator: 'between', values: [] }],
+    });
+    const duplicates = await postSelectAll(api, {
+      filters: [
+        { kind: 'text', fieldId: 'title', operator: 'contains', values: ['one'] },
+        { kind: 'text', fieldId: 'title', operator: 'contains', values: ['two'] },
+      ],
+    });
 
-      expect(clientValues.status).toBe(400);
-      expect(malformed.status).toBe(400);
-      expect(duplicates.status).toBe(400);
-      expect(selectAll).not.toHaveBeenCalled();
-    },
-  );
+    expect(clientValues.status).toBe(400);
+    expect(malformed.status).toBe(400);
+    expect(duplicates.status).toBe(400);
+    expect(selectAll).not.toHaveBeenCalled();
+  });
 
   it('returns safe upstream errors and rejects malformed selection results', async () => {
     const principal = await createVerifiedTestPrincipal({ userId: '10' });
@@ -176,10 +171,10 @@ describe('task select-all API', () => {
       readPrincipal: async () => principal,
       readEffectiveAccess: async () => createAppAccess(principal),
       createBitrixAdapter: (_env, input) =>
-        createAdapterWithTaskSelection(
-          input.currentUserId,
-          async () => ({ ok: true, value: { kind: 'selected', taskIds: ['42', '42'], total: 2 } }),
-        ),
+        createAdapterWithTaskSelection(input.currentUserId, async () => ({
+          ok: true,
+          value: { kind: 'selected', taskIds: ['42', '42'], total: 2 },
+        })),
     });
     const malformed = await postSelectAll(malformedApi);
 

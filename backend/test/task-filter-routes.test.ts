@@ -38,6 +38,7 @@ async function createAppAccess(
       accessActive: true,
       permissions,
       allowedFieldIds: [],
+      accessVersion: 1,
     }),
   });
 }

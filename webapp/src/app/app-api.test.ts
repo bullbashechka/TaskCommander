@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   AppApiError,
   createLocalDevSession,
+  createTaskPreflight,
   createSavedTaskFilter,
   deleteSavedTaskFilter,
   fetchTaskFilterCatalog,
@@ -178,5 +179,64 @@ describe('task filter API client', () => {
     await expect(fetchTaskFilterCatalog()).resolves.toEqual({ version: 1, fields: [] });
     await expect(fetchTaskFilterCatalog()).rejects.toMatchObject({ code: 'ACCESS_REVOKED' });
     expect(notifySecurityContextInvalidated).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('task preflight API client', () => {
+  it('posts only the draft binding and parses the strict preview', async () => {
+    const preview = {
+      draftId: '123e4567-e89b-42d3-a456-426614174000',
+      sourceDraftRevision: 2,
+      draftRevision: 3,
+      actorAccessVersion: 7,
+      checkedAt: '2026-09-04T10:00:00Z',
+      canProceed: true,
+      entries: [
+        {
+          taskId: '42',
+          title: 'Task',
+          taskUrl: 'https://portal.bitrix24.ru/tasks/42',
+          disposition: 'eligible',
+          changedFieldIds: ['title'],
+          reasonCode: null,
+          reasonMessage: null,
+          relevantVersion: 'version-1',
+          currentValues: { title: 'Before' },
+          targetValues: { title: 'After' },
+        },
+      ],
+      summary: {
+        selected: 1,
+        eligible: 1,
+        excluded: 0,
+        unchanged: 0,
+        successful: 0,
+        failed: 0,
+        unconfirmed: 0,
+        conflicted: 0,
+        partiallyApplied: 0,
+        notProcessed: 0,
+      },
+    };
+    const request = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify(preview), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      ),
+    );
+    vi.stubGlobal('fetch', request);
+
+    await expect(
+      createTaskPreflight({ draftId: preview.draftId, expectedRevision: 2 }),
+    ).resolves.toEqual(preview);
+    expect(request).toHaveBeenCalledWith(
+      '/api/tasks/preflight',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ draftId: preview.draftId, expectedRevision: 2 }),
+      }),
+    );
   });
 });

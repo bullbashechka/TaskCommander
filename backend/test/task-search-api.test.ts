@@ -36,6 +36,7 @@ async function createAppAccess(
       accessActive: true,
       permissions,
       allowedFieldIds: [],
+      accessVersion: 1,
     }),
   });
 }
@@ -170,10 +171,14 @@ describe('task search API', () => {
       readPrincipal: async () => principal,
       readEffectiveAccess: async () => createAppAccess(principal),
       createBitrixAdapter: (_env, input) =>
-        createAdapterWithTaskSearch(input.currentUserId, async () => ({
-          ok: true,
-          value: { items: [{ id: '42' }], total: 1, hasNextPage: false },
-        }) as never),
+        createAdapterWithTaskSearch(
+          input.currentUserId,
+          async () =>
+            ({
+              ok: true,
+              value: { items: [{ id: '42' }], total: 1, hasNextPage: false },
+            }) as never,
+        ),
     });
 
     const response = await postSearch(api);

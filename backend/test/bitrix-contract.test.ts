@@ -83,6 +83,8 @@ describe('Bitrix adapter schemas', () => {
       status: 'in_progress',
       values: { deadline: '2026-08-14T10:00:00+05:00' },
       editableFieldIds: ['deadline'],
+      isTemplate: false,
+      isRecurrenceRule: false,
       deadlineManagedBySubtasks: false,
       relevantVersion: 'dGVzdC12ZXJzaW9u',
     });
