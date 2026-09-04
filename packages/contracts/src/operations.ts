@@ -11,6 +11,43 @@ import {
   safeHttpsUrlSchema,
 } from './primitives';
 import { bulkChangeCommandSchema } from './task-change';
+import { taskFilterListSchema } from './task-filters';
+import { taskSearchSortSchema } from './task-search';
+
+const textEncoder = new TextEncoder();
+
+function postgresJsonbTextSizeUpperBound(value: unknown): number {
+  if (value === null) return 4;
+  if (typeof value === 'string') return textEncoder.encode(JSON.stringify(value)).byteLength;
+  if (typeof value === 'boolean') return value ? 4 : 5;
+  if (typeof value === 'number') {
+    // PostgreSQL may expand an IEEE-754 exponent into plain decimal notation.
+    return 326;
+  }
+  if (Array.isArray(value)) {
+    return (
+      2 +
+      value.reduce((size, item) => size + postgresJsonbTextSizeUpperBound(item), 0) +
+      Math.max(0, value.length - 1) * 2
+    );
+  }
+  if (typeof value === 'object') {
+    const entries = Object.entries(value);
+    return (
+      2 +
+      entries.reduce(
+        (size, [key, item]) =>
+          size +
+          textEncoder.encode(JSON.stringify(key)).byteLength +
+          2 +
+          postgresJsonbTextSizeUpperBound(item),
+        0,
+      ) +
+      Math.max(0, entries.length - 1) * 2
+    );
+  }
+  return Number.POSITIVE_INFINITY;
+}
 
 export const draftStatusSchema = z.enum(['preparing', 'awaiting_confirmation']);
 
@@ -108,13 +145,67 @@ export const bulkOperationDraftSchema = z
     ownerId: bitrixIdSchema,
     revision: positiveIntegerSchema,
     status: draftStatusSchema,
-    selectedTaskIds: z.array(bitrixIdSchema).min(1).max(1000),
-    changes: z.array(bulkChangeCommandSchema).min(1).max(64),
+    filters: taskFilterListSchema,
+    sort: taskSearchSortSchema,
+    selectedTaskIds: z
+      .array(bitrixIdSchema)
+      .min(1)
+      .max(1000)
+      .refine((taskIds) => new Set(taskIds).size === taskIds.length),
+    changes: z
+      .array(bulkChangeCommandSchema)
+      .min(1)
+      .max(64)
+      .refine(
+        (changes) => new Set(changes.map((change) => change.fieldId)).size === changes.length,
+      ),
     createdAt: isoDateTimeSchema,
     updatedAt: isoDateTimeSchema,
     expiresAt: isoDateTimeSchema,
   })
   .strict();
+
+export const bulkOperationDraftAvailabilitySchema = z
+  .object({ draft: bulkOperationDraftSchema.nullable() })
+  .strict();
+
+export const saveBulkOperationDraftRequestSchema = z
+  .object({
+    expectedRevision: nonNegativeIntegerSchema,
+    replaceExpired: z.boolean().default(false),
+    selectedTaskIds: z
+      .array(bitrixIdSchema)
+      .min(1)
+      .max(1000)
+      .refine((taskIds) => new Set(taskIds).size === taskIds.length),
+    filters: taskFilterListSchema.default([]),
+    sort: taskSearchSortSchema,
+    changes: z
+      .array(bulkChangeCommandSchema)
+      .min(1)
+      .max(64)
+      .refine(
+        (changes) => new Set(changes.map((change) => change.fieldId)).size === changes.length,
+      ),
+  })
+  .strict()
+  .superRefine((request, context) => {
+    const changesSize = postgresJsonbTextSizeUpperBound(request.changes);
+    if (changesSize > 65_536) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['changes'],
+        message: 'Serialized changes exceed the storage limit.',
+      });
+    }
+    const requestSize = textEncoder.encode(JSON.stringify(request)).byteLength;
+    if (requestSize > 120_000) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Serialized draft exceeds the request limit.',
+      });
+    }
+  });
 
 export const taskOutcomeSchema = z
   .object({
@@ -182,6 +273,8 @@ export const reportTaskEntrySchema = z
   .strict();
 
 export type BulkOperationDraft = z.infer<typeof bulkOperationDraftSchema>;
+export type BulkOperationDraftAvailability = z.infer<typeof bulkOperationDraftAvailabilitySchema>;
+export type SaveBulkOperationDraftRequest = z.infer<typeof saveBulkOperationDraftRequestSchema>;
 export type BulkOperation = z.infer<typeof bulkOperationSchema>;
 export type TaskOutcome = z.infer<typeof taskOutcomeSchema>;
 export type TaskOutcomeRefinement = z.infer<typeof taskOutcomeRefinementSchema>;

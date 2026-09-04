@@ -76,6 +76,70 @@ describe('data access boundaries', () => {
     expect(() => requirePermission(context, 'view_audit')).toThrow();
   });
 
+  it('returns null when the current user has no operation draft', async () => {
+    const query = {
+      select() {
+        return this;
+      },
+      eq() {
+        return this;
+      },
+      gt() {
+        return this;
+      },
+      maybeSingle: async () => ({ data: null, error: null }),
+    };
+    const repositories = new TaskCommanderRepositories({ from: () => query } as never, [
+      'https://portal.bitrix24.ru',
+    ]);
+
+    await expect(
+      repositories.getCurrentDraft(await contextWith(['app_access'])),
+    ).resolves.toBeNull();
+  });
+
+  it('restores safe defaults for a legacy draft with null snapshots', async () => {
+    const query = {
+      select() {
+        return this;
+      },
+      eq() {
+        return this;
+      },
+      gt() {
+        return this;
+      },
+      maybeSingle: async () => ({
+        data: {
+          id: '123e4567-e89b-42d3-a456-426614174000',
+          portal_id: 'test-portal',
+          owner_id: '1001',
+          revision: 1,
+          status: 'preparing',
+          filter_snapshot: null,
+          sort_snapshot: null,
+          selected_task_ids: ['42'],
+          changes: [{ fieldId: 'title', kind: 'text', action: 'set', value: 'Legacy' }],
+          preflight_snapshot: null,
+          created_at: '2026-09-04T10:00:00.000Z',
+          updated_at: '2026-09-04T10:00:00.000Z',
+          expires_at: '2026-09-05T10:00:00.000Z',
+        },
+        error: null,
+      }),
+    };
+    const repositories = new TaskCommanderRepositories({ from: () => query } as never, [
+      'https://portal.bitrix24.ru',
+    ]);
+
+    await expect(
+      repositories.getCurrentDraft(await contextWith(['app_access'])),
+    ).resolves.toMatchObject({
+      filters: [],
+      sort: { fieldId: 'deadline', direction: 'asc' },
+    });
+  });
+
   it('requires explicit own or all report visibility', async () => {
     expect(getReportVisibility(await contextWith(['app_access', 'view_own_reports']))).toBe('own');
     expect(getReportVisibility(await contextWith(['app_access', 'view_all_reports']))).toBe('all');

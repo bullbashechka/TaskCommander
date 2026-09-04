@@ -1,10 +1,14 @@
 import {
   apiErrorResponseSchema,
+  bulkOperationDraftAvailabilitySchema,
+  bulkOperationDraftSchema,
   correlationIdSchema,
   effectiveAccessResponseSchema,
   savedTaskFilterListResponseSchema,
   savedTaskFilterSchema,
   sessionResponseSchema,
+  saveBulkOperationDraftRequestSchema,
+  taskChangeCatalogResponseSchema,
   taskFilterCatalogResponseSchema,
   taskFilterUserSearchResponseSchema,
   taskSearchApiRequestSchema,
@@ -12,9 +16,13 @@ import {
   taskSelectAllApiRequestSchema,
   taskSelectAllApiResponseSchema,
   type ApiErrorCode,
+  type BulkOperationDraft,
+  type BulkOperationDraftAvailability,
   type EffectiveAccessResponse,
   type SavedTaskFilter,
   type SessionPrincipal,
+  type SaveBulkOperationDraftRequest,
+  type TaskChangeCatalogResponse,
   type TaskFilterCatalogResponse,
   type TaskFilterList,
   type TaskFilterUserSearchResponse,
@@ -290,6 +298,28 @@ export function selectAllTasks(
   const parsed = taskSelectAllApiRequestSchema.parse(input);
   return requestJson('/api/tasks/select-all', taskSelectAllApiResponseSchema, signal, {
     method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(parsed),
+  });
+}
+
+export function fetchTaskChangeCatalog(signal?: AbortSignal): Promise<TaskChangeCatalogResponse> {
+  return requestJson('/api/tasks/change-fields', taskChangeCatalogResponseSchema, signal);
+}
+
+export function getBulkOperationDraft(
+  signal?: AbortSignal,
+): Promise<BulkOperationDraftAvailability> {
+  return requestJson('/api/tasks/draft', bulkOperationDraftAvailabilitySchema, signal);
+}
+
+export function saveBulkOperationDraft(
+  input: SaveBulkOperationDraftRequest,
+  signal?: AbortSignal,
+): Promise<BulkOperationDraft> {
+  const parsed = saveBulkOperationDraftRequestSchema.parse(input);
+  return requestJson('/api/tasks/draft', bulkOperationDraftSchema, signal, {
+    method: 'PUT',
     headers: jsonHeaders,
     body: JSON.stringify(parsed),
   });

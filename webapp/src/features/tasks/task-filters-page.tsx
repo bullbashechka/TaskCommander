@@ -8,6 +8,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import type {
+  BulkOperationDraft,
   SavedTaskFilter,
   TaskFilterField,
   TaskFilterList,
@@ -20,12 +21,15 @@ import {
   createSavedTaskFilter,
   deleteSavedTaskFilter,
   fetchTaskFilterCatalog,
+  getBulkOperationDraft,
   listSavedTaskFilters,
   selectAllTasks,
   searchTaskFilterUsers,
   searchTasks,
   updateSavedTaskFilter,
 } from '@/app/app-api';
+import { bulkChangeAccessFingerprint, canStartBulkChange } from '@/app/access-policy';
+import { useAppAccess } from '@/app/app-context';
 import { AppState } from '@/components/ui/app-state';
 import { Card } from '@/components/ui/card';
 import { Modal } from '@/components/ui/modal';
@@ -41,6 +45,7 @@ import {
   type TaskFilterDraft,
 } from './task-filter-model';
 import { TaskResultsTable } from './task-results-table';
+import { BulkChangeEditor } from './bulk-change-editor';
 
 type ErrorDetails = { message: string; eventId?: string };
 type PendingSelectionReset = { apply: () => void };
@@ -48,6 +53,14 @@ type SelectAllMutationInput = {
   generation: number;
   request: TaskSelectAllApiRequest;
   signal: AbortSignal;
+};
+type EditorSession = {
+  selectedTaskIds: string[];
+  filters: TaskFilterList;
+  sort: TaskSearchApiRequest['sort'];
+  initialDraft: BulkOperationDraft | null;
+  initialRevision: number;
+  replaceExpired: boolean;
 };
 
 function errorDetails(error: unknown): ErrorDetails {
@@ -361,6 +374,7 @@ function SavedFilterDialog({
 }
 
 export function TaskFiltersPage() {
+  const app = useAppAccess();
   const queryClient = useQueryClient();
   const catalog = useQuery({
     queryKey: ['task-filter-catalog'],
@@ -390,9 +404,12 @@ export function TaskFiltersPage() {
   const [selectionError, setSelectionError] = useState<ErrorDetails | null>(null);
   const [pendingSelectionReset, setPendingSelectionReset] =
     useState<PendingSelectionReset | null>(null);
+  const [draftChoiceOpen, setDraftChoiceOpen] = useState(false);
+  const [editorSession, setEditorSession] = useState<EditorSession | null>(null);
   const selectionGeneration = useRef(0);
   const selectionAbortController = useRef<AbortController | null>(null);
   const filterBuilderHeadingRef = useRef<HTMLHeadingElement>(null);
+  const configureButtonRef = useRef<HTMLButtonElement>(null);
   const sortableFields = useMemo(
     () => catalog.data?.fields.filter((field) => field.sortable) ?? [],
     [catalog.data],
@@ -405,6 +422,13 @@ export function TaskFiltersPage() {
       direction: 'asc',
     };
   }, [catalog.data, sortableFields]);
+  const accessFingerprint = app ? bulkChangeAccessFingerprint(app) : 'isolated';
+  const currentOperationDraft = useQuery({
+    queryKey: ['bulk-operation-draft', app?.generation ?? 0, accessFingerprint],
+    queryFn: ({ signal }) => getBulkOperationDraft(signal),
+    enabled: app ? canStartBulkChange(app) : false,
+    staleTime: 30_000,
+  });
   useEffect(() => {
     if (!defaultSort?.fieldId) return;
     if (!sortableFields.some((field) => field.id === sort.fieldId)) setSort(defaultSort);
@@ -643,6 +667,31 @@ export function TaskFiltersPage() {
     },
   });
 
+  if (editorSession) {
+    return (
+      <div className="page-content">
+        <BulkChangeEditor
+          filters={editorSession.filters}
+          initialDraft={editorSession.initialDraft}
+          initialRevision={editorSession.initialRevision}
+          onBack={() => {
+            setEditorSession(null);
+            window.setTimeout(() => configureButtonRef.current?.focus(), 0);
+          }}
+          onSaved={(draft) => {
+            queryClient.setQueryData(
+              ['bulk-operation-draft', app?.generation ?? 0, accessFingerprint],
+              { draft },
+            );
+          }}
+          selectedTaskIds={editorSession.selectedTaskIds}
+          sort={editorSession.sort}
+          replaceExpired={editorSession.replaceExpired}
+        />
+      </div>
+    );
+  }
+
   if (catalog.isPending) {
     return (
       <div className="page-content">
@@ -693,6 +742,57 @@ export function TaskFiltersPage() {
     setSelectionSource('manual');
     setSelectionTotal(null);
     setSelectionError(null);
+  }
+
+  function openEditor(initialDraft: BulkOperationDraft | null) {
+    if (!effectiveAppliedRequest) return;
+    if (
+      initialDraft &&
+      (!areTaskFiltersCompatibleWithCatalog(initialDraft.filters, catalog.data.fields) ||
+        !sortableFields.some((field) => field.id === initialDraft.sort.fieldId))
+    ) {
+      setDraftChoiceOpen(false);
+      setSelectionError({
+        message: 'Черновик использует поля, которые больше недоступны. Начните настройку заново.',
+      });
+      return;
+    }
+    const restoredTaskIds = initialDraft?.selectedTaskIds ?? [...selectedTaskIds];
+    if (restoredTaskIds.length === 0) return;
+    if (initialDraft) {
+      const restoredFilters = draftsFromFilters(initialDraft.filters);
+      setTitleSearch(restoredFilters.titleSearch);
+      setDrafts(restoredFilters.drafts);
+      setSort(initialDraft.sort);
+      setAppliedRequest({
+        filters: initialDraft.filters,
+        sort: initialDraft.sort,
+        page: 1,
+        pageSize: effectiveAppliedRequest.pageSize,
+      });
+      setSelectedSavedId('');
+      setSelectedTaskIds(new Set(initialDraft.selectedTaskIds));
+      setSelectionSource('manual');
+      setSelectionTotal(null);
+    }
+    setDraftChoiceOpen(false);
+    setEditorSession({
+      selectedTaskIds: [...restoredTaskIds],
+      filters: initialDraft?.filters ?? effectiveAppliedRequest.filters,
+      sort: initialDraft?.sort ?? effectiveAppliedRequest.sort,
+      initialDraft,
+      initialRevision: initialDraft?.revision ?? currentOperationDraft.data?.draft?.revision ?? 0,
+      replaceExpired: initialDraft === null,
+    });
+  }
+
+  function configureChanges() {
+    if (selectAllMutation.isPending) return;
+    if (currentOperationDraft.data?.draft) {
+      setDraftChoiceOpen(true);
+      return;
+    }
+    openEditor(null);
   }
 
   function selectAllCurrentResult() {
@@ -865,9 +965,6 @@ export function TaskFiltersPage() {
           <h1>Выбор задач</h1>
           <p>Условия применяются к незавершённым задачам. Разные поля соединяются через И.</p>
         </div>
-        <button className="button-primary" disabled type="button">
-          Настроить изменения
-        </button>
       </header>
 
       <Card className="task-toolbar-card">
@@ -1344,15 +1441,24 @@ export function TaskFiltersPage() {
         <aside className="task-selection-dock" aria-label="Выбранные задачи">
           <div>
             <strong>Выбрано: {selectedTaskIds.size.toLocaleString('ru-RU')}</strong>
-            <span>Лимит одной операции — 1 000 задач</span>
+            <span>
+              {currentOperationDraft.isError
+                ? 'Не удалось проверить сохранённый черновик.'
+                : 'Лимит одной операции — 1 000 задач'}
+            </span>
           </div>
           <button className="button-link" onClick={clearSelectionState} type="button">
             Очистить
           </button>
           <button
             className="button-primary"
-            disabled
-            title="Настройка изменений будет реализована на следующем этапе"
+            disabled={
+              selectAllMutation.isPending ||
+              (app ? !canStartBulkChange(app) : false) ||
+              (app !== null && (currentOperationDraft.isPending || currentOperationDraft.isError))
+            }
+            onClick={configureChanges}
+            ref={configureButtonRef}
             type="button"
           >
             Настроить изменения
@@ -1373,6 +1479,33 @@ export function TaskFiltersPage() {
           pending={saveMutation.isPending}
         />
       ) : null}
+      <Modal
+        description="Можно продолжить сохранённую настройку или явно заменить её текущим выбором задач."
+        onClose={() => setDraftChoiceOpen(false)}
+        open={draftChoiceOpen}
+        returnFocusRef={configureButtonRef}
+        title="Найден черновик массовой операции"
+      >
+        <div className="dialog-actions">
+          <button
+            className="button-secondary"
+            onClick={() => setDraftChoiceOpen(false)}
+            type="button"
+          >
+            Отмена
+          </button>
+          <button className="button-secondary" onClick={() => openEditor(null)} type="button">
+            Начать заново
+          </button>
+          <button
+            className="button-primary"
+            onClick={() => openEditor(currentOperationDraft.data?.draft ?? null)}
+            type="button"
+          >
+            Продолжить черновик
+          </button>
+        </div>
+      </Modal>
       <Modal
         description={
           'Изменение фильтра очищает выбор. ' +

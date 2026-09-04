@@ -51,8 +51,17 @@ describe('access policy', () => {
   });
 
   it('blocks a mutation immediately when the browser is offline', () => {
-    const app = snapshot(['app_access', 'run_bulk_operations'], { canMutate: false });
+    const app = snapshot(['app_access', 'run_bulk_operations', 'change_allowed_fields'], {
+      canMutate: false,
+    });
 
     expect(canStartBulkChange(app)).toBe(false);
+  });
+
+  it('requires both launch and field-change permissions', () => {
+    expect(canStartBulkChange(snapshot(['app_access', 'run_bulk_operations']))).toBe(false);
+    expect(
+      canStartBulkChange(snapshot(['app_access', 'run_bulk_operations', 'change_allowed_fields'])),
+    ).toBe(true);
   });
 });

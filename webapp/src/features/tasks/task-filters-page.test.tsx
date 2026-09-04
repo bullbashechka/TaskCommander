@@ -12,13 +12,17 @@ import {
   AppApiError,
   createSavedTaskFilter,
   deleteSavedTaskFilter,
+  fetchTaskChangeCatalog,
   fetchTaskFilterCatalog,
+  getBulkOperationDraft,
   listSavedTaskFilters,
   selectAllTasks,
   searchTaskFilterUsers,
   searchTasks,
+  saveBulkOperationDraft,
   updateSavedTaskFilter,
 } from '@/app/app-api';
+import { AppAccessProvider, type AppAccessSnapshot } from '@/app/app-context';
 
 import { TaskFiltersPage } from './task-filters-page';
 
@@ -26,11 +30,14 @@ vi.mock('@/app/app-api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/app/app-api')>()),
   createSavedTaskFilter: vi.fn(),
   deleteSavedTaskFilter: vi.fn(),
+  fetchTaskChangeCatalog: vi.fn(),
   fetchTaskFilterCatalog: vi.fn(),
+  getBulkOperationDraft: vi.fn(),
   listSavedTaskFilters: vi.fn(),
   selectAllTasks: vi.fn(),
   searchTaskFilterUsers: vi.fn(),
   searchTasks: vi.fn(),
+  saveBulkOperationDraft: vi.fn(),
   updateSavedTaskFilter: vi.fn(),
 }));
 
@@ -74,6 +81,38 @@ const catalog: TaskFilterCatalogResponse = {
       ],
     },
   ],
+};
+
+const changeCatalog = {
+  version: 1 as const,
+  fields: [
+    {
+      id: 'title',
+      label: 'Название',
+      kind: 'text' as const,
+      isMultiple: false,
+      isNullable: false,
+      valueSource: 'text' as const,
+      options: [],
+      actions: ['set' as const],
+    },
+  ],
+};
+
+const appSnapshot: AppAccessSnapshot = {
+  principal: {
+    portalId: 'portal.test',
+    userId: '10',
+    displayName: 'Тестовый пользователь',
+    isBitrixAdmin: false,
+  },
+  access: {
+    permissions: ['app_access', 'run_bulk_operations', 'change_allowed_fields'],
+    fieldScope: { kind: 'subset', fieldIds: ['title'] },
+  },
+  accessManagement: 'denied',
+  generation: 1,
+  canMutate: true,
 };
 
 const saved: SavedTaskFilter = {
@@ -129,18 +168,23 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function renderPage() {
+function renderPage(app?: AppAccessSnapshot) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(
-    <QueryClientProvider client={queryClient}>
+  const page = app ? (
+    <AppAccessProvider value={app}>
       <TaskFiltersPage />
-    </QueryClientProvider>,
+    </AppAccessProvider>
+  ) : (
+    <TaskFiltersPage />
   );
+  return render(<QueryClientProvider client={queryClient}>{page}</QueryClientProvider>);
 }
 
 describe('task filter page', () => {
   beforeEach(() => {
     vi.mocked(fetchTaskFilterCatalog).mockResolvedValue(catalog);
+    vi.mocked(fetchTaskChangeCatalog).mockResolvedValue(changeCatalog);
+    vi.mocked(getBulkOperationDraft).mockResolvedValue({ draft: null });
     vi.mocked(listSavedTaskFilters).mockResolvedValue([saved]);
     vi.mocked(searchTasks).mockResolvedValue({
       items: [firstTask],
@@ -614,6 +658,64 @@ describe('task filter page', () => {
     ).toBeChecked();
   });
 
+  it('hands the selected task IDs to the change editor without placing them in navigation', async () => {
+    renderPage(appSnapshot);
+    fireEvent.click(
+      await screen.findByRole('checkbox', { name: `Выбрать задачу: ${firstTask.title}` }),
+    );
+    const configure = screen.getByRole('button', { name: 'Настроить изменения' });
+    await waitFor(() => expect(configure).toBeEnabled());
+    fireEvent.click(configure);
+
+    const editorHeading = await screen.findByRole('heading', { name: 'Настройка изменений' });
+    await waitFor(() => expect(editorHeading).toHaveFocus());
+    expect(screen.getByText('1 задача')).toBeInTheDocument();
+    expect(getBulkOperationDraft).toHaveBeenCalledTimes(1);
+  });
+
+  it('restores an existing operation draft only after an explicit action', async () => {
+    vi.mocked(getBulkOperationDraft).mockResolvedValue({
+      draft: {
+        id: '123e4567-e89b-42d3-a456-426614174000',
+        ownerId: '10',
+        revision: 3,
+        status: 'preparing',
+        filters: [{ kind: 'list', fieldId: 'priority', operator: 'equals', values: ['high'] }],
+        sort: { fieldId: 'priority', direction: 'desc' },
+        selectedTaskIds: ['42'],
+        changes: [{ fieldId: 'title', kind: 'text', action: 'set', value: 'Из черновика' }],
+        createdAt: '2026-09-04T10:00:00Z',
+        updatedAt: '2026-09-04T10:00:00Z',
+        expiresAt: '2026-09-05T10:00:00Z',
+      },
+    });
+    renderPage(appSnapshot);
+    fireEvent.click(
+      await screen.findByRole('checkbox', { name: `Выбрать задачу: ${firstTask.title}` }),
+    );
+    const configure = screen.getByRole('button', { name: 'Настроить изменения' });
+    await waitFor(() => expect(configure).toBeEnabled());
+    fireEvent.click(configure);
+
+    expect(
+      await screen.findByRole('heading', { name: 'Найден черновик массовой операции' }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Настройка изменений' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Продолжить черновик' }));
+    expect(await screen.findByDisplayValue('Из черновика')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Назад к задачам' }));
+    await screen.findByRole('heading', { name: 'Выбор задач' });
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Настроить изменения' })).toHaveFocus(),
+    );
+    await waitFor(() => {
+      expect(vi.mocked(searchTasks).mock.calls.at(-1)?.[0]).toMatchObject({
+        filters: [{ kind: 'list', fieldId: 'priority', operator: 'equals', values: ['high'] }],
+        sort: { fieldId: 'priority', direction: 'desc' },
+      });
+    });
+  });
+
   it('warns before a filter edit clears a selection from another page', async () => {
     vi.mocked(searchTasks).mockImplementation(async (request) => ({
       items: request.page === 1 ? firstPageTasks : [secondTask],
@@ -689,6 +791,28 @@ describe('task filter page', () => {
       },
       expect.any(AbortSignal),
     );
+  });
+
+  it('blocks opening the editor while select-all is resolving', async () => {
+    const pendingSelection = deferred<Awaited<ReturnType<typeof selectAllTasks>>>();
+    vi.mocked(selectAllTasks).mockReturnValue(pendingSelection.promise);
+    renderPage(appSnapshot);
+    fireEvent.click(
+      await screen.findByRole('checkbox', { name: `Выбрать задачу: ${firstTask.title}` }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Выбрать все' }));
+
+    const configure = screen.getByRole('button', { name: 'Настроить изменения' });
+    expect(screen.getAllByRole('button', { name: 'Настроить изменения' })).toHaveLength(1);
+    expect(configure).toBeDisabled();
+    fireEvent.click(configure);
+    expect(screen.queryByRole('heading', { name: 'Настройка изменений' })).not.toBeInTheDocument();
+
+    await act(async () => {
+      pendingSelection.resolve({ kind: 'selected', taskIds: ['42'], total: 1 });
+      await pendingSelection.promise;
+    });
+    await waitFor(() => expect(configure).toBeEnabled());
   });
 
   it('ignores a select-all response from a filter generation that was cleared', async () => {

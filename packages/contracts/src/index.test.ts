@@ -182,6 +182,8 @@ describe('domain contracts', () => {
       ownerId: '10',
       revision: 1,
       status: 'preparing',
+      filters: [],
+      sort: { fieldId: 'deadline', direction: 'asc' },
       selectedTaskIds: ['42'],
       changes: [
         {

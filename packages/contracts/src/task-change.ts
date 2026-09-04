@@ -31,6 +31,93 @@ export const taskFieldDefinitionSchema = z
 
 export type TaskFieldDefinition = z.infer<typeof taskFieldDefinitionSchema>;
 
+export const taskChangeActionSchema = z.enum(['set', 'clear', 'shift', 'replace', 'add', 'remove']);
+
+export type TaskChangeAction = z.infer<typeof taskChangeActionSchema>;
+
+export const taskChangeValueOptionSchema = z
+  .object({
+    value: z.string().trim().min(1).max(4096),
+    label: z.string().trim().min(1).max(256),
+  })
+  .strict();
+
+export const taskChangeFieldSchema = z
+  .object({
+    id: fieldIdSchema,
+    label: z.string().trim().min(1).max(256),
+    kind: taskFieldKindSchema,
+    isMultiple: z.boolean(),
+    isNullable: z.boolean(),
+    valueSource: z.enum(['text', 'number', 'date_time', 'boolean', 'users', 'options']),
+    options: z
+      .array(taskChangeValueOptionSchema)
+      .refine((options) => new Set(options.map((option) => option.value)).size === options.length),
+    actions: z
+      .array(taskChangeActionSchema)
+      .min(1)
+      .max(4)
+      .refine((actions) => new Set(actions).size === actions.length),
+  })
+  .strict()
+  .superRefine((field, context) => {
+    const validSource =
+      (field.kind === 'text' && field.valueSource === 'text') ||
+      (field.kind === 'number' && field.valueSource === 'number') ||
+      (field.kind === 'boolean' && field.valueSource === 'boolean') ||
+      (field.kind === 'date_time' && field.valueSource === 'date_time') ||
+      (field.kind === 'user' && field.valueSource === 'users') ||
+      ((field.kind === 'list' || field.kind === 'tags') &&
+        (field.valueSource === 'text' || field.valueSource === 'options'));
+    if (!validSource) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['valueSource'],
+        message: 'Value source must match the field kind.',
+      });
+    }
+    if (
+      (field.valueSource === 'options' && field.options.length === 0) ||
+      (field.valueSource !== 'options' && field.options.length > 0)
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['options'],
+        message: 'Options must match the value source.',
+      });
+    }
+    const expectedActions: TaskChangeAction[] =
+      field.isMultiple && ['user', 'list', 'tags'].includes(field.kind)
+        ? ['replace', 'add', 'remove']
+        : field.kind === 'date_time'
+          ? ['set', 'shift']
+          : ['set'];
+    if (field.isNullable) expectedActions.push('clear');
+    if (
+      field.actions.length !== expectedActions.length ||
+      field.actions.some((action, index) => action !== expectedActions[index])
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['actions'],
+        message: 'Actions must match the field shape.',
+      });
+    }
+  });
+
+export type TaskChangeField = z.infer<typeof taskChangeFieldSchema>;
+
+export const taskChangeCatalogResponseSchema = z
+  .object({
+    version: z.literal(1),
+    fields: z
+      .array(taskChangeFieldSchema)
+      .refine((fields) => new Set(fields.map((field) => field.id)).size === fields.length),
+  })
+  .strict();
+
+export type TaskChangeCatalogResponse = z.infer<typeof taskChangeCatalogResponseSchema>;
+
 const textFilterSchema = z
   .object({
     kind: z.literal('text'),
@@ -186,21 +273,55 @@ export const taskFilterSchema = z
 
 export type TaskFilter = z.infer<typeof taskFilterSchema>;
 
-const scalarValueSchema = z.union([z.string().max(4096), z.number(), z.boolean(), bitrixIdSchema]);
-
-const setScalarChangeSchema = z
+const setTextChangeSchema = z
   .object({
     fieldId: fieldIdSchema,
-    kind: z.enum(['text', 'number', 'boolean', 'user', 'list']),
+    kind: z.literal('text'),
     action: z.literal('set'),
-    value: scalarValueSchema,
+    value: z.string().trim().min(1).max(4096),
+  })
+  .strict();
+
+const setNumberChangeSchema = z
+  .object({
+    fieldId: fieldIdSchema,
+    kind: z.literal('number'),
+    action: z.literal('set'),
+    value: z.number().finite(),
+  })
+  .strict();
+
+const setBooleanChangeSchema = z
+  .object({
+    fieldId: fieldIdSchema,
+    kind: z.literal('boolean'),
+    action: z.literal('set'),
+    value: z.boolean(),
+  })
+  .strict();
+
+const setUserChangeSchema = z
+  .object({
+    fieldId: fieldIdSchema,
+    kind: z.literal('user'),
+    action: z.literal('set'),
+    value: bitrixIdSchema,
+  })
+  .strict();
+
+const setListChangeSchema = z
+  .object({
+    fieldId: fieldIdSchema,
+    kind: z.literal('list'),
+    action: z.literal('set'),
+    value: z.string().trim().min(1).max(4096),
   })
   .strict();
 
 const clearChangeSchema = z
   .object({
     fieldId: fieldIdSchema,
-    kind: z.enum(['text', 'number', 'date_time', 'user', 'list', 'tags']),
+    kind: z.enum(['text', 'number', 'boolean', 'date_time', 'user', 'list', 'tags']),
     action: z.literal('clear'),
   })
   .strict();
@@ -225,21 +346,43 @@ const shiftDateChangeSchema = z
   })
   .strict();
 
-const collectionChangeSchema = z
+const userCollectionChangeSchema = z
   .object({
     fieldId: fieldIdSchema,
-    kind: z.enum(['user', 'list', 'tags']),
+    kind: z.literal('user'),
     action: z.enum(['replace', 'add', 'remove']),
-    values: z.array(z.string().trim().min(1)).min(1).max(256),
+    values: z
+      .array(bitrixIdSchema)
+      .min(1)
+      .max(256)
+      .refine((values) => new Set(values).size === values.length),
+  })
+  .strict();
+
+const stringCollectionChangeSchema = z
+  .object({
+    fieldId: fieldIdSchema,
+    kind: z.enum(['list', 'tags']),
+    action: z.enum(['replace', 'add', 'remove']),
+    values: z
+      .array(z.string().trim().min(1).max(4096))
+      .min(1)
+      .max(256)
+      .refine((values) => new Set(values).size === values.length),
   })
   .strict();
 
 export const bulkChangeCommandSchema = z.union([
-  setScalarChangeSchema,
+  setTextChangeSchema,
+  setNumberChangeSchema,
+  setBooleanChangeSchema,
+  setUserChangeSchema,
+  setListChangeSchema,
   clearChangeSchema,
   setDateChangeSchema,
   shiftDateChangeSchema,
-  collectionChangeSchema,
+  userCollectionChangeSchema,
+  stringCollectionChangeSchema,
 ]);
 
 export type BulkChangeCommand = z.infer<typeof bulkChangeCommandSchema>;

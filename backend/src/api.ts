@@ -49,6 +49,7 @@ import {
 } from './task-filters/catalog';
 import { toTaskFilterBitrixApiError } from './task-filters/errors';
 import { createTaskFilterRoutes, type TaskFilterRouteDependencies } from './task-filters/routes';
+import { createTaskChangeRoutes, type TaskChangeRouteDependencies } from './task-changes/routes';
 import { parseJsonBody } from './http/validation';
 import {
   applySecurityHeaders,
@@ -89,6 +90,7 @@ export interface ApiDependencies {
     env: RuntimeEnvironment,
   ) => AccessManagementRepository;
   readonly createTaskFilterRepository?: TaskFilterRouteDependencies['createRepository'];
+  readonly createTaskChangeRepository?: TaskChangeRouteDependencies['createRepository'];
 }
 
 function toApiHttpError(error: EffectiveAccessError): ApiHttpError {
@@ -207,6 +209,16 @@ export function createApi(dependencies: ApiDependencies = {}) {
       readEffectiveAccess,
       createAdapter: bitrixAdapterFactory,
       createRepository: dependencies.createTaskFilterRepository ?? createTaskCommanderRepositories,
+    }),
+  );
+  api.route(
+    '/api/tasks',
+    createTaskChangeRoutes({
+      readPrincipal: (env, cookie, correlationId) =>
+        readCurrentPrincipal(env, cookie, correlationId),
+      readEffectiveAccess,
+      createAdapter: bitrixAdapterFactory,
+      createRepository: dependencies.createTaskChangeRepository ?? createTaskCommanderRepositories,
     }),
   );
 

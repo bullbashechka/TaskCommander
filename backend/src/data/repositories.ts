@@ -400,11 +400,17 @@ function mapSavedFilter(row: DatabaseTable<'saved_filter'>): SavedFilter {
 }
 
 function mapDraft(row: DatabaseTable<'operation_draft'>): BulkOperationDraft {
+  const filterSnapshot =
+    row.filter_snapshot === null
+      ? { filters: [] }
+      : z.object({ filters: z.unknown() }).strict().parse(row.filter_snapshot);
   return bulkOperationDraftSchema.parse({
     id: row.id,
     ownerId: row.owner_id,
     revision: row.revision,
     status: row.status,
+    filters: filterSnapshot.filters,
+    sort: row.sort_snapshot ?? { fieldId: 'deadline', direction: 'asc' },
     selectedTaskIds: row.selected_task_ids,
     changes: row.changes,
     createdAt: row.created_at,
@@ -615,18 +621,17 @@ export class TaskCommanderRepositories {
     }
   }
 
-  public async getCurrentDraft(context: DataAccessContext): Promise<BulkOperationDraft> {
+  public async getCurrentDraft(context: DataAccessContext): Promise<BulkOperationDraft | null> {
     requireDataAccessContext(context);
-    const row = await requireData(
-      this.client
-        .from('operation_draft')
-        .select('*')
-        .eq('portal_id', context.portalId)
-        .eq('owner_id', context.actorId)
-        .gt('expires_at', new Date().toISOString())
-        .maybeSingle(),
-    );
-    return mapDraft(row);
+    const { data, error } = await this.client
+      .from('operation_draft')
+      .select('*')
+      .eq('portal_id', context.portalId)
+      .eq('owner_id', context.actorId)
+      .gt('expires_at', new Date().toISOString())
+      .maybeSingle();
+    if (error) throw toDataAccessError(error);
+    return data ? mapDraft(data) : null;
   }
 
   public async saveDraft(
