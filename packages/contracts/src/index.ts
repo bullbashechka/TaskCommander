@@ -7,3 +7,4 @@ export * from './identity';
 export * from './operations';
 export * from './primitives';
 export * from './task-change';
+export * from './task-search';

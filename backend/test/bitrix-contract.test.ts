@@ -27,6 +27,17 @@ describe('Bitrix adapter schemas', () => {
     ).toMatchObject({ page: 1, pageSize: 50 });
   });
 
+  it('rejects a task search page range outside safe integer arithmetic', () => {
+    expect(
+      taskSearchRequestSchema.safeParse({
+        filters: [],
+        sort: { fieldId: 'deadline', direction: 'asc' },
+        page: Number.MAX_SAFE_INTEGER,
+        pageSize: 2,
+      }).success,
+    ).toBe(false);
+  });
+
   it('rejects an unknown upstream failure kind', () => {
     expect(
       bitrixFailureSchema.safeParse({ kind: 'raw_bitrix_error', diagnosticCode: 'ERROR_CORE' })

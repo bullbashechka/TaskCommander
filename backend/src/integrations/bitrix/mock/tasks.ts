@@ -278,11 +278,19 @@ function matchesCollection(
   const expected = filter.values ?? [];
   if (filter.operator === 'includes') return expected.some((item) => actual.includes(item));
   if (filter.operator === 'not_includes') return expected.every((item) => !actual.includes(item));
+  const capability = fieldCapabilities.find((field) => field.id === filter.fieldId);
+  const isMultiple = capability?.isMultiple ?? Array.isArray(value);
+  const collectionsEqual =
+    actual.length === expected.length &&
+    actual.every((item) => expected.includes(item)) &&
+    expected.every((item) => actual.includes(item));
   if (filter.operator === 'equals') {
-    return actual.length === expected.length && actual.every((item) => expected.includes(item));
+    if (!isMultiple) return actual.length === 1 && expected.includes(actual[0] ?? '');
+    return collectionsEqual;
   }
 
-  return !(actual.length === expected.length && actual.every((item) => expected.includes(item)));
+  if (!isMultiple) return actual.length !== 1 || !expected.includes(actual[0] ?? '');
+  return !collectionsEqual;
 }
 
 function matchesBoolean(
@@ -313,31 +321,66 @@ function matchesFilter(task: MockTask, filter: TaskFilter): boolean {
 function compareValues(
   left: string | number | boolean | null | string[],
   right: string | number | boolean | null | string[],
+  fieldId: string,
 ): number {
-  if (left === null || right === null) {
-    if (left === right) return 0;
-    return left === null ? 1 : -1;
+  if (left === null || right === null) return 0;
+
+  const capability = fieldCapabilities.find((field) => field.id === fieldId);
+  if (capability?.kind === 'date_time' && typeof left === 'string' && typeof right === 'string') {
+    return Date.parse(left) - Date.parse(right);
   }
+
+  if (typeof left === 'number' && typeof right === 'number') return left - right;
 
   const leftValue = Array.isArray(left) ? left.join('\u0000') : String(left);
   const rightValue = Array.isArray(right) ? right.join('\u0000') : String(right);
   return leftValue.localeCompare(rightValue, 'ru', { numeric: true, sensitivity: 'base' });
 }
 
-function toSummary(task: MockTask): TaskSearchPage['items'][number] {
+function compareTaskIds(left: string, right: string): number {
+  const leftId = BigInt(left);
+  const rightId = BigInt(right);
+  if (leftId < rightId) return -1;
+  if (leftId > rightId) return 1;
+  return 0;
+}
+
+function createTaskUrl(taskId: string, userId: string): string {
+  return `https://portal.bitrix24.ru/company/personal/user/${userId}/tasks/task/view/${taskId}/`;
+}
+
+async function toSummary(
+  task: MockTask,
+  userId: string,
+): Promise<TaskSearchPage['items'][number]> {
   if (task.status === 'completed') {
     throw new Error('Completed tasks cannot be returned as mutable task summaries.');
   }
 
+  const taskUrl = createTaskUrl(task.id, userId);
+  const values = Object.fromEntries(
+    Object.entries(task.values).map(([fieldId, value]) => [fieldId, cloneValue(value)]),
+  );
+  const snapshotWithoutVersion = {
+    taskId: task.id,
+    title: task.title,
+    taskUrl,
+    status: task.status,
+    values,
+    editableFieldIds: getEditableFieldIds(task, userId, Object.keys(values)),
+    deadlineManagedBySubtasks: task.deadlineManagedBySubtasks,
+  };
+
   return {
     id: task.id,
     title: task.title,
-    taskUrl: `https://portal.bitrix24.ru/company/personal/user/1/tasks/task/view/${task.id}/`,
+    taskUrl,
     parentId: task.parentId,
     status: task.status,
     responsibleId: String(getFieldValue(task, 'responsible_id')),
     deadline: typeof task.values.deadline === 'string' ? task.values.deadline : null,
     priority: task.values.priority === 'high' ? 'high' : 'normal',
+    relevantVersion: await createRelevantVersion(snapshotWithoutVersion),
   };
 }
 
@@ -409,7 +452,7 @@ async function createChangeSnapshot(
   const snapshotWithoutVersion = {
     taskId: task.id,
     title: task.title,
-    taskUrl: `https://portal.bitrix24.ru/company/personal/user/1/tasks/task/view/${task.id}/`,
+    taskUrl: createTaskUrl(task.id, state.currentUserId),
     status: task.status,
     values,
     editableFieldIds: getEditableFieldIds(task, state.currentUserId, fieldIds),
@@ -466,15 +509,19 @@ function filterAndSortTasks(state: MockPortalState, request: TaskSearchRequest):
   }
 
   matching.sort((left, right) => {
-    const compared = compareValues(
-      getFieldValue(left, request.sort.fieldId),
-      getFieldValue(right, request.sort.fieldId),
-    );
+    const leftValue = getFieldValue(left, request.sort.fieldId);
+    const rightValue = getFieldValue(right, request.sort.fieldId);
+    if (leftValue === null || rightValue === null) {
+      if (leftValue !== rightValue) return leftValue === null ? 1 : -1;
+      return compareTaskIds(left.id, right.id);
+    }
+
+    const compared = compareValues(leftValue, rightValue, request.sort.fieldId);
     if (compared !== 0) {
       return request.sort.direction === 'asc' ? compared : -compared;
     }
 
-    return Number(left.id) - Number(right.id);
+    return compareTaskIds(left.id, right.id);
   });
 
   return matching;
@@ -497,7 +544,11 @@ export function createMockTasks(
       const request = taskSearchRequestSchema.parse(input);
       const matching = filterAndSortTasks(state, request);
       const start = (request.page - 1) * request.pageSize;
-      const items = matching.slice(start, start + request.pageSize).map(toSummary);
+      const items = await Promise.all(
+        matching
+          .slice(start, start + request.pageSize)
+          .map((task) => toSummary(task, state.currentUserId)),
+      );
       const page: TaskSearchPage = {
         items,
         total: matching.length,

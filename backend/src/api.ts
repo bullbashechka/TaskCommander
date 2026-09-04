@@ -5,6 +5,8 @@ import {
   createSessionRequestSchema,
   effectiveAccessResponseSchema,
   sessionResponseSchema,
+  taskSearchApiRequestSchema,
+  taskSearchApiResponseSchema,
 } from '@task-commander/contracts';
 
 import {
@@ -35,8 +37,9 @@ import {
   type EffectiveAccessSettingsReader,
 } from './data/access';
 import { createApiErrorResponse, ApiHttpError } from './http/errors';
-import type { BitrixAdapter } from './integrations/bitrix/contract';
+import type { BitrixAdapter, BitrixFailure } from './integrations/bitrix/contract';
 import { createBitrixAdapter } from './integrations/bitrix/factory';
+import { taskSearchPageSchema } from './integrations/bitrix/schemas';
 import { parseJsonBody } from './http/validation';
 import {
   applySecurityHeaders,
@@ -97,6 +100,23 @@ function toCurrentIdentityApiError(error: CurrentIdentityError): ApiHttpError {
       return new ApiHttpError(401, 'UNAUTHENTICATED');
     case 'unavailable':
       return new ApiHttpError(503, 'ACCESS_VERIFICATION_UNAVAILABLE');
+  }
+}
+
+function toBitrixSearchApiError(failure: BitrixFailure): ApiHttpError {
+  switch (failure.kind) {
+    case 'not_authenticated':
+      return new ApiHttpError(401, 'UNAUTHENTICATED');
+    case 'permission_denied':
+    case 'not_found_or_forbidden':
+      return new ApiHttpError(403, 'FORBIDDEN');
+    case 'rate_limited':
+      return new ApiHttpError(429, 'RATE_LIMITED');
+    case 'temporary_failure':
+    case 'permanent_failure':
+    case 'invalid_external_response':
+    case 'unsupported_capability':
+      return new ApiHttpError(503, 'UPSTREAM_UNAVAILABLE');
   }
 }
 
@@ -165,6 +185,12 @@ export function createApi(dependencies: ApiDependencies = {}) {
   });
 
   api.use('/api/access', async (context, next) => {
+    context.header('cache-control', 'no-store');
+    context.header('vary', 'Cookie');
+    await next();
+  });
+
+  api.use('/api/tasks/*', async (context, next) => {
     context.header('cache-control', 'no-store');
     context.header('vary', 'Cookie');
     await next();
@@ -250,6 +276,56 @@ export function createApi(dependencies: ApiDependencies = {}) {
       throw error;
     }
     return context.json(effectiveAccessResponseSchema.parse(getEffectiveAccessResponse(access)));
+  });
+
+  api.post('/api/tasks/search', async (context) => {
+    const principal = await readCurrentPrincipal(
+      context.env,
+      context.req.header('cookie') ?? null,
+      context.get('correlationId'),
+    );
+
+    try {
+      const access = await readEffectiveAccess(context.env, principal);
+      requirePermission(access, 'app_access');
+    } catch (error) {
+      if (error instanceof EffectiveAccessError) throw toApiHttpError(error);
+      throw error;
+    }
+
+    const request = await parseJsonBody(context.req.raw, taskSearchApiRequestSchema);
+
+    let rawPage: unknown;
+    try {
+      const adapter = bitrixAdapterFactory(context.env, { currentUserId: principal.userId });
+      const result = await adapter.tasks.search(request);
+      if (!result.ok) throw toBitrixSearchApiError(result.failure);
+      rawPage = result.value;
+    } catch (error) {
+      if (error instanceof ApiHttpError) throw error;
+      throw new ApiHttpError(503, 'UPSTREAM_UNAVAILABLE');
+    }
+
+    const page = taskSearchPageSchema.safeParse(rawPage);
+    if (!page.success) throw new ApiHttpError(503, 'UPSTREAM_UNAVAILABLE');
+
+    const pageStart = (request.page - 1) * request.pageSize;
+    const returnedEnd = pageStart + page.data.items.length;
+    const expectedHasNextPage = returnedEnd < page.data.total;
+    const invalidPagination =
+      (page.data.items.length > 0 && returnedEnd > page.data.total) ||
+      (pageStart < page.data.total && page.data.items.length === 0) ||
+      (expectedHasNextPage && page.data.items.length !== request.pageSize) ||
+      page.data.hasNextPage !== expectedHasNextPage;
+    if (invalidPagination) throw new ApiHttpError(503, 'UPSTREAM_UNAVAILABLE');
+
+    return context.json(
+      taskSearchApiResponseSchema.parse({
+        ...page.data,
+        page: request.page,
+        pageSize: request.pageSize,
+      }),
+    );
   });
 
   api.post('/api/_runtime/probe', async (context) => {

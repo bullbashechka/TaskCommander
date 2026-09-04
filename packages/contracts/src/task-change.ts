@@ -36,7 +36,7 @@ const textFilterSchema = z
     kind: z.literal('text'),
     fieldId: fieldIdSchema,
     operator: z.enum(['contains', 'not_contains', 'equals', 'not_equals', 'is_set', 'is_not_set']),
-    values: z.array(z.string().max(4096)).max(50).optional(),
+    values: z.array(z.string().trim().min(1).max(4096)).max(50).optional(),
   })
   .strict();
 
@@ -45,7 +45,7 @@ const dateFilterSchema = z
     kind: z.literal('date_time'),
     fieldId: fieldIdSchema,
     operator: z.enum(['equals', 'before', 'after', 'between', 'is_set', 'is_not_set']),
-    values: z.array(isoDateTimeSchema).min(1).max(2).optional(),
+    values: z.array(isoDateTimeSchema).min(1).max(50).optional(),
   })
   .strict();
 
@@ -62,7 +62,7 @@ const numberFilterSchema = z
       'is_set',
       'is_not_set',
     ]),
-    values: z.array(z.number()).min(1).max(2).optional(),
+    values: z.array(z.number()).min(1).max(50).optional(),
   })
   .strict();
 
@@ -102,15 +102,54 @@ const booleanFilterSchema = z
   })
   .strict();
 
-export const taskFilterSchema = z.discriminatedUnion('kind', [
-  textFilterSchema,
-  dateFilterSchema,
-  numberFilterSchema,
-  createListFilterSchema('list'),
-  createListFilterSchema('tags'),
-  userFilterSchema,
-  booleanFilterSchema,
-]);
+export const taskFilterSchema = z
+  .discriminatedUnion('kind', [
+    textFilterSchema,
+    dateFilterSchema,
+    numberFilterSchema,
+    createListFilterSchema('list'),
+    createListFilterSchema('tags'),
+    userFilterSchema,
+    booleanFilterSchema,
+  ])
+  .superRefine((filter, context) => {
+    if (filter.kind === 'boolean') return;
+
+    const valuesCount = filter.values?.length ?? 0;
+    if (filter.operator === 'is_set' || filter.operator === 'is_not_set') {
+      if (filter.values !== undefined) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['values'],
+          message: 'Presence filters must not include values.',
+        });
+      }
+      return;
+    }
+
+    const isSingleBoundaryOperator =
+      filter.operator === 'before' ||
+      filter.operator === 'after' ||
+      filter.operator === 'greater_than' ||
+      filter.operator === 'less_than';
+    const expectedCount = filter.operator === 'between' ? 2 : isSingleBoundaryOperator ? 1 : null;
+    if (expectedCount !== null && valuesCount !== expectedCount) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['values'],
+        message:
+          `This operator requires exactly ${expectedCount} ` +
+          `value${expectedCount === 1 ? '' : 's'}.`,
+      });
+    }
+    if (expectedCount === null && valuesCount === 0) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['values'],
+        message: 'This operator requires at least one value.',
+      });
+    }
+  });
 
 export type TaskFilter = z.infer<typeof taskFilterSchema>;
 
