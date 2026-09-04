@@ -1,6 +1,7 @@
 const channelName = 'task-commander:access';
 const accessInvalidatedMessageType = 'access-invalidated';
 const securityContextInvalidatedMessageType = 'security-context-invalidated';
+const securityContextInvalidatedEvent = 'task-commander:security-context-invalidated';
 const synchronizationSourceId = (() => {
   try {
     return globalThis.crypto.randomUUID();
@@ -34,6 +35,9 @@ export function notifyAccessInvalidated(): void {
 }
 
 export function notifySecurityContextInvalidated(): void {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event(securityContextInvalidatedEvent));
+  }
   notify(securityContextInvalidatedMessageType);
 }
 
@@ -70,5 +74,14 @@ export function listenForAccessInvalidation(onInvalidate: () => void): () => voi
 }
 
 export function listenForSecurityContextInvalidation(onInvalidate: () => void): () => void {
-  return listenFor(securityContextInvalidatedMessageType, onInvalidate);
+  if (typeof window !== 'undefined') {
+    window.addEventListener(securityContextInvalidatedEvent, onInvalidate);
+  }
+  const unsubscribe = listenFor(securityContextInvalidatedMessageType, onInvalidate);
+  return () => {
+    if (typeof window !== 'undefined') {
+      window.removeEventListener(securityContextInvalidatedEvent, onInvalidate);
+    }
+    unsubscribe();
+  };
 }

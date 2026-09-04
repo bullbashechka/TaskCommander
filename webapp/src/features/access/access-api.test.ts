@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { fetchCommand, fetchFieldSetMembers, fetchPreflight } from './access-api';
+import { fetchCapabilities, fetchCommand, fetchFieldSetMembers, fetchPreflight } from './access-api';
 
 const timestamp = '2026-08-13T10:00:00.000Z';
 const fingerprint = 'a'.repeat(64);
@@ -105,5 +105,54 @@ describe('access management API parsing', () => {
       fetchFieldSetMembers({ fieldSetId: emptyScope.fieldSetId, version: 1, targetUserId: '42' }),
     ).resolves.toEqual(['title', 'deadline']);
     expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not expose an upstream error message to the access interface', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              error: {
+                message: 'upstream token=secret-value',
+                correlationId: 'TC-123e4567-e89b-42d3-a456-426614174000',
+              },
+            }),
+            { status: 503, headers: { 'content-type': 'application/json' } },
+          ),
+        ),
+      ),
+    );
+
+    await expect(fetchCapabilities()).rejects.toMatchObject({
+      message: 'Не удалось безопасно получить данные доступа.',
+      eventId: 'TC-123e4567-e89b-42d3-a456-426614174000',
+    });
+  });
+
+  it('does not expose an invalid upstream correlation ID', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({ error: { correlationId: 'token=secret-value' } }),
+            { status: 503, headers: { 'content-type': 'application/json' } },
+          ),
+        ),
+      ),
+    );
+
+    await expect(fetchCapabilities()).rejects.toMatchObject({ eventId: undefined });
+  });
+
+  it('normalizes a rejected fetch into a safe Russian transport error', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('Failed to fetch token=secret'))));
+
+    await expect(fetchCapabilities()).rejects.toMatchObject({
+      message: 'Не удалось подключиться к серверу. Повторите попытку позже.',
+      status: 0,
+    });
   });
 });

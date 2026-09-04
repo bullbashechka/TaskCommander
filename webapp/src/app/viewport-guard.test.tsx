@@ -24,4 +24,21 @@ describe('ViewportGuard', () => {
     expect(screen.getByRole('heading', { name: 'Нужен экран большего размера' })).not.toBeNull();
     expect(screen.queryByText('Приложение')).toBeNull();
   });
+
+  it('does not treat a fine pointer as a substitute for the minimum desktop width', () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: query === '(any-pointer: fine)',
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }));
+
+    render(
+      <ViewportGuard>
+        <p>Приложение</p>
+      </ViewportGuard>,
+    );
+
+    expect(screen.getByRole('heading', { name: 'Нужен экран большего размера' })).not.toBeNull();
+    expect(screen.queryByText('Приложение')).toBeNull();
+  });
 });

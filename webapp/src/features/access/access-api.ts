@@ -7,9 +7,12 @@ import {
   accessEmployeeSearchResponseSchema,
   accessFieldSetMembersResponseSchema,
   accessManagementPreflightSchema,
+  correlationIdSchema,
   permissionSchema,
   type Permission,
 } from '@task-commander/contracts';
+
+import { notifySecurityContextInvalidated } from '@/app/access-sync';
 
 import type {
   AccessCapabilities,
@@ -24,6 +27,7 @@ import type {
 } from './access-types';
 
 const basePath = '/api/access-management';
+let terminalSecurityInvalidationPending = false;
 
 export class AccessApiError extends Error {
   constructor(
@@ -36,23 +40,40 @@ export class AccessApiError extends Error {
 }
 
 async function request(path: string, init?: RequestInit): Promise<unknown> {
-  const response = await fetch(`${basePath}${path}`, {
-    ...init,
-    headers: { accept: 'application/json', 'content-type': 'application/json', ...init?.headers },
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${basePath}${path}`, {
+      ...init,
+      headers: { accept: 'application/json', 'content-type': 'application/json', ...init?.headers },
+    });
+  } catch {
+    throw new AccessApiError('Не удалось подключиться к серверу. Повторите попытку позже.', 0);
+  }
   const payload: unknown = await response.json().catch(() => null);
   if (!response.ok) {
     const record = isRecord(payload) ? payload : {};
     const error = isRecord(record.error) ? record.error : record;
+    const code = typeof error.code === 'string' ? error.code : undefined;
+    if (
+      !terminalSecurityInvalidationPending &&
+      (response.status === 401 || code === 'ACCESS_REVOKED')
+    ) {
+      terminalSecurityInvalidationPending = true;
+      notifySecurityContextInvalidated();
+    }
+    const eventId = correlationIdSchema.safeParse(error.correlationId ?? error.eventId);
     throw new AccessApiError(
-      typeof error.message === 'string' ? error.message : 'Не удалось получить данные доступа.',
+      'Не удалось безопасно получить данные доступа.',
       response.status,
-      typeof (error.correlationId ?? error.eventId) === 'string'
-        ? String(error.correlationId ?? error.eventId)
-        : undefined,
+      eventId.success ? eventId.data : undefined,
     );
   }
+  terminalSecurityInvalidationPending = false;
   return payload;
+}
+
+export function accessErrorMessage(error: unknown, fallback: string): string {
+  return error instanceof AccessApiError ? error.message : fallback;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

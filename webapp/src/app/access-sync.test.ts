@@ -40,14 +40,14 @@ describe('security context synchronization', () => {
 
     const ownMessage = sender?.postMessage.mock.calls[0]?.[0];
     listener?.onmessage?.(new MessageEvent('message', { data: ownMessage }));
-    expect(invalidate).not.toHaveBeenCalled();
+    expect(invalidate).toHaveBeenCalledOnce();
 
     listener?.onmessage?.(
       new MessageEvent('message', {
         data: { sourceId: 'another-tab', type: 'security-context-invalidated' },
       }),
     );
-    expect(invalidate).toHaveBeenCalledOnce();
+    expect(invalidate).toHaveBeenCalledTimes(2);
 
     stop();
     expect(listener?.close).toHaveBeenCalledOnce();

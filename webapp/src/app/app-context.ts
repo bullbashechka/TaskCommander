@@ -1,3 +1,5 @@
+import { createContext, useContext } from 'react';
+
 import type {
   EffectiveAccessResponse,
   Permission,
@@ -13,6 +15,14 @@ export type AppAccessSnapshot = Readonly<{
   generation: number;
   canMutate: boolean;
 }>;
+
+const AppAccessContext = createContext<AppAccessSnapshot | null>(null);
+
+export const AppAccessProvider = AppAccessContext.Provider;
+
+export function useAppAccess(): AppAccessSnapshot | null {
+  return useContext(AppAccessContext);
+}
 
 export type HomeSectionState<T> =
   | Readonly<{ status: 'not_available' }>

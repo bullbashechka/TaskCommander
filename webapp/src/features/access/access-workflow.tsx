@@ -6,11 +6,13 @@ import { Link, useNavigate } from '@tanstack/react-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { notifyAccessInvalidated } from '@/app/access-sync';
+import { useAppAccess } from '@/app/app-context';
 import { Icons } from '@/components/ui/icons';
 import { Modal } from '@/components/ui/modal';
 
 import {
   AccessApiError,
+  accessErrorMessage,
   createCommand,
   createPreflight,
   confirmPreflight,
@@ -102,7 +104,7 @@ function WorkflowHeader({ title, description }: { title: string; description: st
         <strong>{title}</strong>
       </nav>
       <header className="workflow-heading">
-        <h1>{title}</h1>
+        <h1 tabIndex={-1}>{title}</h1>
         <p>{description}</p>
       </header>
     </>
@@ -135,6 +137,8 @@ function WorkflowState({
 }
 
 export function AccessConfigurePage({ subjectIds }: { subjectIds: string[] }) {
+  const app = useAppAccess();
+  const canMutate = app?.canMutate === true && app.accessManagement === 'allowed';
   const navigate = useNavigate({ from: '/access/configure' });
   const capabilities = useQuery({
     queryKey: ['access-management', 'capabilities'],
@@ -222,7 +226,7 @@ export function AccessConfigurePage({ subjectIds }: { subjectIds: string[] }) {
         setSubmitError('Опишите другую причину минимум в 10 символах.');
         return;
       }
-      if (submitting) return;
+      if (!canMutate || submitting) return;
       setSubmitting(true);
       try {
         const draft: AccessDraft = {
@@ -247,7 +251,7 @@ export function AccessConfigurePage({ subjectIds }: { subjectIds: string[] }) {
           );
           return;
         }
-        setSubmitError(error instanceof Error ? error.message : 'Не удалось проверить настройки.');
+        setSubmitError(accessErrorMessage(error, 'Не удалось проверить настройки.'));
       } finally {
         setSubmitting(false);
       }
@@ -720,7 +724,7 @@ export function AccessConfigurePage({ subjectIds }: { subjectIds: string[] }) {
               <Link className="button-secondary" to="/access">
                 Отмена
               </Link>
-              <Button className="button-primary" disabled={submitting} type="submit">
+              <Button className="button-primary" disabled={!canMutate || submitting} type="submit">
                 {submitting ? 'Проверяем…' : 'Проверить настройки'}
               </Button>
             </footer>
@@ -732,6 +736,8 @@ export function AccessConfigurePage({ subjectIds }: { subjectIds: string[] }) {
 }
 
 export function AccessReviewPage({ preflightId }: { preflightId: string }) {
+  const app = useAppAccess();
+  const canMutate = app?.canMutate === true && app.accessManagement === 'allowed';
   const navigate = useNavigate({ from: '/access/review' });
   const queryClient = useQueryClient();
   const [acknowledged, setAcknowledged] = useState(false);
@@ -899,7 +905,8 @@ export function AccessReviewPage({ preflightId }: { preflightId: string }) {
             <div className="inline-state inline-state-error" role="alert">
               <Icons.info />
               <span>
-                {command.error.message} Если запрос мог быть отправлен, проверьте{' '}
+                {accessErrorMessage(command.error, 'Не удалось получить результат команды.')} Если
+                запрос мог быть отправлен, проверьте{' '}
                 <Link params={{ commandId }} to="/access/commands/$commandId">
                   статус этой же команды
                 </Link>{' '}
@@ -913,7 +920,12 @@ export function AccessReviewPage({ preflightId }: { preflightId: string }) {
             </Link>
             <Button
               className="button-primary"
-              disabled={command.isPending || preflightExpired || preflight.data.summary.ready === 0}
+              disabled={
+                !canMutate ||
+                command.isPending ||
+                preflightExpired ||
+                preflight.data.summary.ready === 0
+              }
               onClick={() =>
                 preflight.data.confirmation.required ? setConfirmationOpen(true) : command.mutate()
               }
@@ -961,8 +973,8 @@ export function AccessReviewPage({ preflightId }: { preflightId: string }) {
               <div className="inline-state inline-state-error" role="alert">
                 <Icons.info />
                 <span>
-                  {command.error.message} Используйте тот же идентификатор команды для безопасного
-                  повтора.
+                  {accessErrorMessage(command.error, 'Не удалось получить результат команды.')}{' '}
+                  Используйте тот же идентификатор команды для безопасного повтора.
                 </span>
               </div>
             )}
@@ -983,8 +995,10 @@ export function AccessReviewPage({ preflightId }: { preflightId: string }) {
               </Button>
               <Button
                 className="button-primary"
-                disabled={!acknowledged || command.isPending}
-                onClick={() => command.mutate()}
+                disabled={!canMutate || !acknowledged || command.isPending}
+                onClick={() => {
+                  if (canMutate) command.mutate();
+                }}
               >
                 {command.isPending ? 'Запускаем…' : 'Подтвердить и применить'}
               </Button>

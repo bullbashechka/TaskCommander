@@ -17,11 +17,13 @@ import {
   type SetStateAction,
 } from 'react';
 
+import { useAppAccess } from '@/app/app-context';
 import { Icons } from '@/components/ui/icons';
 import { Modal } from '@/components/ui/modal';
 
 import {
   AccessApiError,
+  accessErrorMessage,
   createDepartmentSnapshot,
   fetchCapabilities,
   fetchDepartments,
@@ -325,6 +327,8 @@ function AttentionRail({ users, isAdmin }: { users: AccessUser[]; isAdmin: boole
 }
 
 function DepartmentPicker({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const app = useAppAccess();
+  const canMutate = app?.canMutate === true && app.accessManagement === 'allowed';
   const navigate = useNavigate({ from: '/access' });
   const [departmentId, setDepartmentId] = useState('');
   const departments = useQuery({
@@ -395,7 +399,12 @@ function DepartmentPicker({ open, onClose }: { open: boolean; onClose: () => voi
       {snapshot.isError && (
         <div className="inline-state inline-state-error" role="alert">
           <Icons.info />
-          <span>{snapshot.error.message}</span>
+          <span>
+            {accessErrorMessage(
+              snapshot.error,
+              'Не удалось зафиксировать состав подразделения.',
+            )}
+          </span>
         </div>
       )}
       <footer className="dialog-actions">
@@ -418,8 +427,10 @@ function DepartmentPicker({ open, onClose }: { open: boolean; onClose: () => voi
         ) : (
           <Button
             className="button-primary"
-            disabled={!departmentId || snapshot.isPending}
-            onClick={() => snapshot.mutate()}
+            disabled={!canMutate || !departmentId || snapshot.isPending}
+            onClick={() => {
+              if (canMutate) snapshot.mutate();
+            }}
           >
             {snapshot.isPending ? 'Фиксируем состав…' : 'Продолжить'}
           </Button>
@@ -430,6 +441,8 @@ function DepartmentPicker({ open, onClose }: { open: boolean; onClose: () => voi
 }
 
 export function AccessPage() {
+  const app = useAppAccess();
+  const canMutate = app?.canMutate === true && app.accessManagement === 'allowed';
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState<StatusFilter>('all');
   const [selected, setSelected] = useState<RowSelectionState>({});
@@ -516,7 +529,7 @@ export function AccessPage() {
 
       <section className="access-hero">
         <div className="hero-copy">
-          <h1>Управление доступом</h1>
+          <h1 tabIndex={-1}>Управление доступом</h1>
           <p>Права сотрудников Task Commander — в одном рабочем пространстве.</p>
           <div className="bitrix-check">
             <Icons.refresh />
@@ -543,11 +556,16 @@ export function AccessPage() {
         <aside className="new-access-card">
           <h2>Новый доступ</h2>
           <p>Сотруднику или подразделению</p>
-          <Button className="button-primary" onClick={() => searchRef.current?.focus()}>
+          <Button
+            className="button-primary"
+            disabled={!canMutate}
+            onClick={() => searchRef.current?.focus()}
+          >
             Настроить
           </Button>
           <button
             className="button-link"
+            disabled={!canMutate}
             onClick={() => setDepartmentPickerOpen(true)}
             type="button"
           >

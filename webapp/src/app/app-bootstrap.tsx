@@ -204,7 +204,6 @@ export function AppBootstrap({
       await createLocalDevSession();
       notifySecurityContextInvalidated();
       setLocalLoginStatus('refreshing');
-      await refreshSecurityContext();
     } catch (error) {
       localLoginInFlight.current = false;
       setLocalLoginError(error);
@@ -215,8 +214,7 @@ export function AppBootstrap({
   useEffect(() => {
     const onOnline = () => {
       setOnline(true);
-      setOfflineBlocked(false);
-      void refresh();
+      void refreshSecurityContext();
     };
     const onOffline = () => setOnline(false);
     const onVisibilityChange = () => {
@@ -230,9 +228,12 @@ export function AppBootstrap({
       window.removeEventListener('offline', onOffline);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [refresh]);
+  }, [refresh, refreshSecurityContext]);
 
-  useEffect(() => listenForAccessInvalidation(() => void refresh()), [refresh]);
+  useEffect(
+    () => listenForAccessInvalidation(() => void refreshSecurityContext()),
+    [refreshSecurityContext],
+  );
 
   useEffect(
     () => listenForSecurityContextInvalidation(() => void refreshSecurityContext()),
@@ -304,6 +305,17 @@ export function AppBootstrap({
     queryClient.getMutationCache().clear();
     queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== 'app' });
   }, [access.error, queryClient]);
+
+  const hasTerminalManageAccessFailure =
+    manageAccess.error instanceof AppApiError &&
+    (manageAccess.error.kind === 'session_required' || manageAccess.error.code === 'ACCESS_REVOKED');
+
+  useEffect(() => {
+    if (!hasTerminalManageAccessFailure) return;
+    void queryClient.cancelQueries();
+    queryClient.getMutationCache().clear();
+    queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== 'app' });
+  }, [hasTerminalManageAccessFailure, queryClient]);
 
   if (!isEmbeddedProductionContext()) {
     return (
@@ -414,6 +426,26 @@ export function AppBootstrap({
             Повторить проверку
           </button>
         }
+      />
+    );
+  }
+
+  if (hasTerminalManageAccessFailure && manageAccess.error instanceof AppApiError) {
+    const { title, description, eventId } = errorState(manageAccess.error);
+    return (
+      <AppState
+        action={
+          <button
+            className="button-primary"
+            onClick={() => void refreshSecurityContext()}
+            type="button"
+          >
+            Повторить проверку
+          </button>
+        }
+        description={description}
+        eventId={eventId}
+        title={title}
       />
     );
   }

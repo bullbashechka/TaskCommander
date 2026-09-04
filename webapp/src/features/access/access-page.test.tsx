@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { router } from '@/app/router';
-import type { AppAccessSnapshot } from '@/app/app-context';
+import { AppAccessProvider, type AppAccessSnapshot } from '@/app/app-context';
 
 const app: AppAccessSnapshot = {
   principal: {
@@ -87,11 +87,13 @@ function response(value: unknown) {
   );
 }
 
-async function renderAccessPage() {
+async function renderAccessPage(snapshot: AppAccessSnapshot = app) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={queryClient}>
-      <RouterProvider context={{ queryClient, app }} router={router} />
+      <AppAccessProvider value={snapshot}>
+        <RouterProvider context={{ queryClient, app: snapshot }} router={router} />
+      </AppAccessProvider>
     </QueryClientProvider>,
   );
   await router.navigate({ to: '/access' });
@@ -146,5 +148,12 @@ describe('access selection screen', () => {
 
     expect(await screen.findByRole('dialog', { name: 'Добавить подразделение' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Отмена' })).toBeEnabled();
+  });
+
+  it('disables access-management mutations while the connection is unavailable', async () => {
+    await renderAccessPage({ ...app, canMutate: false });
+
+    expect(screen.getByRole('button', { name: 'Настроить' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Добавить подразделение' })).toBeDisabled();
   });
 });

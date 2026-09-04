@@ -4,7 +4,7 @@ import { StrictMode, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 
 import { AppBootstrap } from '@/app/app-bootstrap';
-import type { AppAccessSnapshot } from '@/app/app-context';
+import { AppAccessProvider, type AppAccessSnapshot } from '@/app/app-context';
 import { router } from '@/app/router';
 import { ViewportGuard } from '@/app/viewport-guard';
 import '@/styles.css';
@@ -19,7 +19,11 @@ function RoutedApplication({ snapshot }: { snapshot: AppAccessSnapshot }) {
   useEffect(() => {
     void router.invalidate();
   }, [snapshot.accessManagement, snapshot.generation, snapshot.access.permissions]);
-  return <RouterProvider context={{ queryClient, app: snapshot }} router={router} />;
+  return (
+    <AppAccessProvider value={snapshot}>
+      <RouterProvider context={{ queryClient, app: snapshot }} router={router} />
+    </AppAccessProvider>
+  );
 }
 
 const rootElement = document.getElementById('root');
