@@ -409,6 +409,10 @@ begin
     or p_safe_snapshot->>'draftId'<>p_draft_id::text
     or p_safe_snapshot->>'draftRevision'<>p_draft_revision::text
     or (p_safe_snapshot->>'checkedAt')::timestamptz is distinct from p_checked_at
+    or (p_is_bitrix_admin and p_safe_snapshot->'actorAccessVersion'
+      is distinct from 'null'::jsonb)
+    or (not p_is_bitrix_admin and p_safe_snapshot->>'actorAccessVersion'
+      <> p_access_version::text)
     or p_checked_at<=now()-interval '15 minutes'
     or p_checked_at>now()+interval '1 minute' then
     raise exception 'TC_RESTORE_LAUNCH_CONFLICT' using errcode='40001';
@@ -450,6 +454,7 @@ begin
   v_initial_count:=jsonb_array_length(p_safe_snapshot->'entries');
   if v_initial_count<>cardinality(v_draft.selected_task_ids)
     or v_initial_count<>v_executable+v_conflicts+v_excluded+v_unchanged
+    or (p_safe_snapshot->>'canProceed'='true') is distinct from (v_executable>0)
     or (v_executable>0) is distinct from (p_token is not null)
     or (p_token is not null and (octet_length(decode(p_nonce,'base64'))<>12
       or octet_length(decode(p_ciphertext,'base64')) not between 1 and 16777216))
