@@ -719,6 +719,46 @@ export class TaskCommanderRepositories {
     return { draft: mapDraft(row), preflightSnapshot: row.preflight_snapshot };
   }
 
+  public async confirmTaskPreflight(
+    context: DataAccessContext,
+    input: {
+      draftId: string;
+      draftRevision: number;
+      checkedAt: string;
+      preflightSnapshot: Json;
+      snapshotFingerprint: string;
+    },
+  ): Promise<unknown> {
+    requireDataAccessContext(context);
+    const confirmRpc = this.client.rpc.bind(this.client) as unknown as (
+      functionName: 'confirm_task_preflight',
+      args: {
+        p_portal_id: string;
+        p_owner_id: string;
+        p_draft_id: string;
+        p_draft_revision: number;
+        p_checked_at: string;
+        p_expected_access_version: number | null;
+        p_is_bitrix_admin: boolean;
+        p_preflight_snapshot: Json;
+        p_snapshot_fingerprint: string;
+      },
+    ) => PromiseLike<{ data: Json | null; error: unknown | null }>;
+    return requireData(
+      confirmRpc('confirm_task_preflight', {
+        p_portal_id: context.portalId,
+        p_owner_id: context.actorId,
+        p_draft_id: input.draftId,
+        p_draft_revision: input.draftRevision,
+        p_checked_at: input.checkedAt,
+        p_expected_access_version: context.accessVersion,
+        p_is_bitrix_admin: context.isBitrixAdmin,
+        p_preflight_snapshot: input.preflightSnapshot,
+        p_snapshot_fingerprint: input.snapshotFingerprint,
+      }),
+    );
+  }
+
   public async createOperation(
     context: DataAccessContext,
     input: CreateOperationInput,

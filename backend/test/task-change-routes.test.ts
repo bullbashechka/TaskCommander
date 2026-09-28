@@ -5,6 +5,7 @@ import {
   bulkOperationDraftSchema,
   taskChangeCatalogResponseSchema,
   preflightPreviewSchema,
+  taskPreflightConfirmationSchema,
   type BulkOperationDraft,
 } from '@task-commander/contracts';
 
@@ -105,12 +106,21 @@ async function setup(input?: {
         preflightSnapshot: preflight.preflightSnapshot,
       };
     });
+  const confirmTaskPreflight = vi
+    .fn<TaskChangeRepository['confirmTaskPreflight']>()
+    .mockImplementation(async (_context, confirmation) => ({
+      draftId: confirmation.draftId,
+      draftRevision: confirmation.draftRevision,
+      token: '223e4567-e89b-42d3-a456-426614174000',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    }));
   const repository: TaskChangeRepository = {
     ensurePrincipalIdentity: vi.fn(),
     getCurrentDraft,
     getCurrentDraftForPreflight,
     saveDraft,
     saveTaskPreflight,
+    confirmTaskPreflight,
   };
   const adapterFactory = vi.fn((_env: unknown, adapterInput: { currentUserId: string }) => {
     const adapter = createMockBitrixAdapter({ currentUserId: adapterInput.currentUserId });
@@ -173,6 +183,7 @@ async function setup(input?: {
     getCurrentDraftForPreflight,
     saveDraft,
     saveTaskPreflight,
+    confirmTaskPreflight,
   };
 }
 
@@ -542,5 +553,88 @@ describe('task change routes', () => {
 
     expect(response.status).toBe(409);
     expect(replay.saveTaskPreflight).not.toHaveBeenCalled();
+  });
+
+  it('confirms only the stored owner snapshot and passes its fingerprint to persistence', async () => {
+    const first = await setup({ currentDraft });
+    const firstResponse = await first.api.request(
+      'https://example.test/api/tasks/preflight',
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ draftId: currentDraft.id, expectedRevision: 3 }),
+      },
+      environment,
+    );
+    const preview = preflightPreviewSchema.parse(await firstResponse.json());
+    const saved = await setup({
+      currentDraft: { ...currentDraft, revision: 4, status: 'awaiting_confirmation' },
+      currentPreflightSnapshot: preview as unknown as Json,
+    });
+    const response = await saved.api.request(
+      'https://example.test/api/tasks/preflight/confirm',
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          draftId: currentDraft.id,
+          draftRevision: 4,
+          checkedAt: preview.checkedAt,
+        }),
+      },
+      environment,
+    );
+
+    expect(response.status).toBe(200);
+    expect(taskPreflightConfirmationSchema.parse(await response.json()).draftRevision).toBe(4);
+    expect(saved.confirmTaskPreflight).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        preflightSnapshot: preview,
+        snapshotFingerprint: expect.stringMatching(/^[0-9a-f]{64}$/),
+      }),
+    );
+
+    const stale = await saved.api.request(
+      'https://example.test/api/tasks/preflight/confirm',
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          draftId: currentDraft.id,
+          draftRevision: 4,
+          checkedAt: '2026-09-01T00:00:00Z',
+        }),
+      },
+      environment,
+    );
+    expect(stale.status).toBe(409);
+    expect(saved.confirmTaskPreflight).toHaveBeenCalledTimes(1);
+  });
+
+  it('rate limits confirmation before reading a draft or issuing a token', async () => {
+    const { api, getCurrentDraftForPreflight, confirmTaskPreflight } = await setup({
+      currentDraft,
+    });
+    vi.mocked(environment.ACCESS_FANOUT_RATE_LIMITER.limit).mockResolvedValueOnce({
+      success: false,
+    });
+    const response = await api.request(
+      'https://example.test/api/tasks/preflight/confirm',
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          draftId: currentDraft.id,
+          draftRevision: 4,
+          checkedAt: new Date().toISOString(),
+        }),
+      },
+      environment,
+    );
+
+    expect(response.status).toBe(429);
+    expect(getCurrentDraftForPreflight).not.toHaveBeenCalled();
+    expect(confirmTaskPreflight).not.toHaveBeenCalled();
   });
 });

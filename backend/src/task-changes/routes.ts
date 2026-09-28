@@ -3,10 +3,12 @@ import { Hono } from 'hono';
 import {
   bulkOperationDraftAvailabilitySchema,
   bulkOperationDraftSchema,
+  confirmTaskPreflightRequestSchema,
   preflightPreviewSchema,
   saveBulkOperationDraftRequestSchema,
   taskChangeCatalogResponseSchema,
   taskPreflightRequestSchema,
+  taskPreflightConfirmationSchema,
   type BulkOperationDraft,
   type PreflightPreview,
 } from '@task-commander/contracts';
@@ -68,6 +70,16 @@ export type TaskChangeRepository = Readonly<{
       preflightSnapshot: Json;
     },
   ): Promise<{ draft: BulkOperationDraft; preflightSnapshot: Json }>;
+  confirmTaskPreflight(
+    context: DataAccessContext,
+    input: {
+      draftId: string;
+      draftRevision: number;
+      checkedAt: string;
+      preflightSnapshot: Json;
+      snapshotFingerprint: string;
+    },
+  ): Promise<unknown>;
 }>;
 
 export type TaskChangeRouteDependencies = Readonly<{
@@ -378,6 +390,57 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
         throw new ApiHttpError(503, 'UPSTREAM_UNAVAILABLE');
       }
       return context.json(stored);
+    } catch (error) {
+      if (error instanceof ApiHttpError) throw error;
+      throwDataApiError(error);
+    }
+  });
+
+  routes.post('/preflight/confirm', async (context) => {
+    const { access, dataContext } = await authorizePreflight(context);
+    if (!dataContext.isBitrixAdmin && access.accessVersion === null) {
+      throw new ApiHttpError(503, 'UPSTREAM_UNAVAILABLE');
+    }
+    const input = await parseJsonBody(context.req.raw, confirmTaskPreflightRequestSchema, 4_096);
+    const repository = dependencies.createRepository(context.env);
+    try {
+      const current = await repository.getCurrentDraftForPreflight(dataContext);
+      if (
+        !current ||
+        current.draft.id !== input.draftId ||
+        current.draft.revision !== input.draftRevision ||
+        current.draft.status !== 'awaiting_confirmation'
+      ) {
+        throw new ApiHttpError(409, 'CONFLICT');
+      }
+      const parsed = preflightPreviewSchema.safeParse(current.preflightSnapshot);
+      if (
+        !parsed.success ||
+        parsed.data.checkedAt !== input.checkedAt ||
+        parsed.data.draftRevision !== input.draftRevision ||
+        parsed.data.actorAccessVersion !== access.accessVersion ||
+        !parsed.data.canProceed ||
+        !previewMatchesDraft(parsed.data, {
+          ...current.draft,
+          revision: input.draftRevision - 1,
+        })
+      ) {
+        throw new ApiHttpError(409, 'CONFLICT');
+      }
+      const confirmed = await repository.confirmTaskPreflight(dataContext, {
+        ...input,
+        preflightSnapshot: asJson(parsed.data),
+        snapshotFingerprint: Array.from(
+          new Uint8Array(
+            await crypto.subtle.digest(
+              'SHA-256',
+              new TextEncoder().encode(JSON.stringify(parsed.data)),
+            ),
+          ),
+          (byte) => byte.toString(16).padStart(2, '0'),
+        ).join(''),
+      });
+      return context.json(taskPreflightConfirmationSchema.parse(confirmed));
     } catch (error) {
       if (error instanceof ApiHttpError) throw error;
       throwDataApiError(error);

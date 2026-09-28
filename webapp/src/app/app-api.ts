@@ -2,6 +2,7 @@ import {
   apiErrorResponseSchema,
   bulkOperationDraftAvailabilitySchema,
   bulkOperationDraftSchema,
+  confirmTaskPreflightRequestSchema,
   preflightPreviewSchema,
   correlationIdSchema,
   effectiveAccessResponseSchema,
@@ -11,6 +12,7 @@ import {
   saveBulkOperationDraftRequestSchema,
   taskChangeCatalogResponseSchema,
   taskPreflightRequestSchema,
+  taskPreflightConfirmationSchema,
   taskFilterCatalogResponseSchema,
   taskFilterUserSearchResponseSchema,
   taskSearchApiRequestSchema,
@@ -20,7 +22,9 @@ import {
   type ApiErrorCode,
   type BulkOperationDraft,
   type BulkOperationDraftAvailability,
+  type ConfirmTaskPreflightRequest,
   type PreflightPreview,
+  type TaskPreflightConfirmation,
   type EffectiveAccessResponse,
   type SavedTaskFilter,
   type SessionPrincipal,
@@ -106,7 +110,10 @@ function parseRetryAfter(value: string | null): number | undefined {
   return undefined;
 }
 
-function composeAbortSignal(signal: AbortSignal | undefined): {
+function composeAbortSignal(
+  signal: AbortSignal | undefined,
+  timeoutMs = requestTimeoutMs,
+): {
   signal: AbortSignal;
   didTimeout: () => boolean;
   dispose: () => void;
@@ -118,7 +125,7 @@ function composeAbortSignal(signal: AbortSignal | undefined): {
   const timeout = window.setTimeout(() => {
     timedOut = true;
     controller.abort();
-  }, requestTimeoutMs);
+  }, timeoutMs);
   return {
     signal: controller.signal,
     didTimeout: () => timedOut,
@@ -134,8 +141,9 @@ async function request<T>(
   parseSuccess: (payload: unknown, response: Response) => T,
   signal?: AbortSignal,
   init?: RequestInit,
+  timeoutMs?: number,
 ): Promise<T> {
-  const abort = composeAbortSignal(signal);
+  const abort = composeAbortSignal(signal, timeoutMs);
   try {
     const headers = new Headers(init?.headers);
     if (!headers.has('accept')) headers.set('accept', 'application/json');
@@ -194,6 +202,7 @@ async function requestJson<T>(
   schema: SafeParser<T>,
   signal?: AbortSignal,
   init?: RequestInit,
+  timeoutMs?: number,
 ): Promise<T> {
   return request(
     path,
@@ -213,6 +222,7 @@ async function requestJson<T>(
     },
     signal,
     init,
+    timeoutMs,
   );
 }
 
@@ -334,7 +344,25 @@ export function createTaskPreflight(
   signal?: AbortSignal,
 ): Promise<PreflightPreview> {
   const parsed = taskPreflightRequestSchema.parse(input);
-  return requestJson('/api/tasks/preflight', preflightPreviewSchema, signal, {
+  return requestJson(
+    '/api/tasks/preflight',
+    preflightPreviewSchema,
+    signal,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify(parsed),
+    },
+    120_000,
+  );
+}
+
+export function confirmTaskPreflight(
+  input: ConfirmTaskPreflightRequest,
+  signal?: AbortSignal,
+): Promise<TaskPreflightConfirmation> {
+  const parsed = confirmTaskPreflightRequestSchema.parse(input);
+  return requestJson('/api/tasks/preflight/confirm', taskPreflightConfirmationSchema, signal, {
     method: 'POST',
     headers: jsonHeaders,
     body: JSON.stringify(parsed),

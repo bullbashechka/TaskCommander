@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 
 import type {
   BulkOperationDraft,
+  PreflightPreview,
   TaskChangeAction,
   TaskChangeCatalogResponse,
   TaskChangeField,
@@ -14,7 +15,9 @@ import type {
 import { bulkChangeAccessFingerprint, canStartBulkChange } from '@/app/access-policy';
 import {
   AppApiError,
+  createTaskPreflight,
   fetchTaskChangeCatalog,
+  getBulkOperationDraft,
   saveBulkOperationDraft,
   searchTaskFilterUsers,
 } from '@/app/app-api';
@@ -30,6 +33,7 @@ import {
   parseBulkChangeDrafts,
   type BulkChangeDraft,
 } from './bulk-change-model';
+import { PreflightPreviewScreen } from './preflight-preview';
 
 type Props = {
   selectedTaskIds: readonly string[];
@@ -409,14 +413,35 @@ export function BulkChangeEditor({
   const [formErrors, setFormErrors] = useState<Readonly<Record<string, string>>>({});
   const [notice, setNotice] = useState('');
   const [savedAt, setSavedAt] = useState('');
-  const [revision, setRevision] = useState(initialRevision);
+  const revisionRef = useRef(initialRevision);
+  const [preview, setPreview] = useState<PreflightPreview | null>(null);
+  const [preflightPending, setPreflightPending] = useState(false);
+  const preflightInFlight = useRef(false);
+  const [preflightError, setPreflightError] = useState('');
+  const preflightGeneration = useRef(0);
+  const pendingSave = useRef<{
+    request: Parameters<typeof saveBulkOperationDraft>[0];
+    editVersion: number;
+  } | null>(null);
+  const pendingReplay = useRef<{ draft: BulkOperationDraft; editVersion: number } | null>(null);
+  const previousAccessFingerprint = useRef<string | null>(null);
   const initializedDraftId = useRef<string | null>(null);
   const previousCatalog = useRef<TaskChangeCatalogResponse | null>(null);
   const addSelectRef = useRef<HTMLSelectElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const returnFocusToHeading = useRef(false);
   const editVersion = useRef(0);
   const submittedEditVersion = useRef<number | null>(null);
+  const submittedIdentity = useRef<string | null>(null);
   const accessFingerprint = app ? bulkChangeAccessFingerprint(app) : 'isolated';
+  const accessIdentity = app
+    ? `${app.generation}:${app.principal.portalId}:${app.principal.userId}:${accessFingerprint}`
+    : 'isolated';
+  const activeIdentity = useRef(accessIdentity);
+  if (activeIdentity.current !== accessIdentity) {
+    activeIdentity.current = accessIdentity;
+    preflightGeneration.current += 1;
+  }
   const canMutate = app ? canStartBulkChange(app) : true;
   const catalog = useQuery({
     queryKey: ['task-change-catalog', app?.generation ?? 0, accessFingerprint],
@@ -428,7 +453,8 @@ export function BulkChangeEditor({
     mutationFn: (input: Parameters<typeof saveBulkOperationDraft>[0]) =>
       saveBulkOperationDraft(input),
     onSuccess: (draft) => {
-      setRevision(draft.revision);
+      if (submittedIdentity.current !== activeIdentity.current) return;
+      revisionRef.current = draft.revision;
       setSavedAt(
         submittedEditVersion.current === editVersion.current ? new Date().toISOString() : '',
       );
@@ -446,7 +472,7 @@ export function BulkChangeEditor({
   const form = useForm({
     defaultValues: { changes: [] as BulkChangeDraft[] },
     onSubmit: async ({ value }) => {
-      if (!catalog.data) return;
+      if (!catalog.data || preflightInFlight.current || saveMutation.isPending) return;
       const parsed = parseBulkChangeDrafts(value.changes, catalog.data);
       if (!parsed.success) {
         setFormErrors(parsed.errors);
@@ -455,8 +481,9 @@ export function BulkChangeEditor({
       setFormErrors({});
       setNotice('');
       submittedEditVersion.current = editVersion.current;
+      submittedIdentity.current = accessIdentity;
       await saveMutation.mutateAsync({
-        expectedRevision: revision,
+        expectedRevision: revisionRef.current,
         replaceExpired,
         selectedTaskIds: [...selectedTaskIds],
         filters,
@@ -467,8 +494,204 @@ export function BulkChangeEditor({
   });
 
   useEffect(() => {
-    if (catalog.isSuccess) headingRef.current?.focus();
-  }, [catalog.isSuccess]);
+    if (previousAccessFingerprint.current === null) {
+      previousAccessFingerprint.current = accessIdentity;
+    } else if (previousAccessFingerprint.current !== accessIdentity) {
+      previousAccessFingerprint.current = accessIdentity;
+      preflightGeneration.current += 1;
+      pendingSave.current = null;
+      pendingReplay.current = null;
+      setPreview(null);
+      setSavedAt('');
+      setPreflightPending(false);
+      preflightInFlight.current = false;
+      setNotice('');
+      setPreflightError('Права изменились. Сохраните черновик и повторите проверку.');
+    }
+  }, [accessIdentity]);
+
+  function reconcileRevision(draft: BulkOperationDraft) {
+    revisionRef.current = draft.revision;
+    queryClient.setQueryData(['bulk-operation-draft', app?.generation ?? 0, accessFingerprint], {
+      draft,
+    });
+    onSaved(draft);
+  }
+
+  function sameDraftContents(
+    draft: BulkOperationDraft,
+    expected: { selectedTaskIds: string[]; changes: BulkOperationDraft['changes'] },
+  ) {
+    return (
+      JSON.stringify(draft.selectedTaskIds) === JSON.stringify(expected.selectedTaskIds) &&
+      JSON.stringify(draft.filters) === JSON.stringify(filters) &&
+      JSON.stringify(draft.sort) === JSON.stringify(sort) &&
+      JSON.stringify(draft.changes) === JSON.stringify(expected.changes)
+    );
+  }
+
+  async function checkChanges() {
+    if (!catalog.data || saveMutation.isPending || preflightInFlight.current) return;
+    const parsed = parseBulkChangeDrafts(form.store.state.values.changes, catalog.data);
+    if (!parsed.success) {
+      setFormErrors(parsed.errors);
+      return;
+    }
+    setFormErrors({});
+    setPreflightError('');
+    preflightInFlight.current = true;
+    setPreflightPending(true);
+    const currentGeneration = ++preflightGeneration.current;
+    const currentEditVersion = editVersion.current;
+    submittedEditVersion.current = currentEditVersion;
+    submittedIdentity.current = accessIdentity;
+    let savedDraft: BulkOperationDraft | null = null;
+    try {
+      const uncertainSave = pendingSave.current;
+      if (uncertainSave) {
+        let current = (await getBulkOperationDraft()).draft;
+        if (
+          !current ||
+          current.revision !== uncertainSave.request.expectedRevision + 1 ||
+          current.status !== 'preparing' ||
+          !sameDraftContents(current, uncertainSave.request)
+        ) {
+          try {
+            current = await saveBulkOperationDraft(uncertainSave.request);
+          } catch (error) {
+            if (!(error instanceof AppApiError) || error.status !== 409) throw error;
+            current = (await getBulkOperationDraft()).draft;
+          }
+        }
+        if (
+          !current ||
+          current.revision !== uncertainSave.request.expectedRevision + 1 ||
+          current.status !== 'preparing' ||
+          !sameDraftContents(current, uncertainSave.request)
+        ) {
+          setPreflightError('Черновик изменён в другой вкладке. Загрузите актуальную версию.');
+          return;
+        }
+        if (currentGeneration !== preflightGeneration.current) return;
+        reconcileRevision(current);
+        pendingSave.current = null;
+        if (uncertainSave.editVersion === currentEditVersion) savedDraft = current;
+      }
+      const replay = pendingReplay.current;
+      if (replay && replay.editVersion !== currentEditVersion) {
+        const current = (await getBulkOperationDraft()).draft;
+        if (
+          !current ||
+          current.id !== replay.draft.id ||
+          !sameDraftContents(current, replay.draft) ||
+          !(
+            (current.revision === replay.draft.revision && current.status === 'preparing') ||
+            (current.revision === replay.draft.revision + 1 &&
+              current.status === 'awaiting_confirmation')
+          )
+        ) {
+          setPreflightError('Черновик изменён в другой вкладке. Загрузите актуальную версию.');
+          return;
+        }
+        if (currentGeneration !== preflightGeneration.current) return;
+        reconcileRevision(current);
+        pendingReplay.current = null;
+      }
+      if (pendingReplay.current?.editVersion === currentEditVersion) {
+        savedDraft = pendingReplay.current.draft;
+      } else if (!savedDraft) {
+        const expectedRevision = revisionRef.current;
+        const request = {
+          expectedRevision,
+          replaceExpired,
+          selectedTaskIds: [...selectedTaskIds],
+          filters,
+          sort,
+          changes: parsed.commands,
+        };
+        try {
+          savedDraft = await saveMutation.mutateAsync(request);
+        } catch (error) {
+          if (
+            !(error instanceof AppApiError) ||
+            (error.kind !== 'temporary' && error.kind !== 'offline')
+          )
+            throw error;
+          if (currentGeneration !== preflightGeneration.current) return;
+          pendingSave.current = { request, editVersion: currentEditVersion };
+          const current = (await getBulkOperationDraft()).draft;
+          if (currentGeneration !== preflightGeneration.current) return;
+          if (
+            !current ||
+            current.revision !== expectedRevision + 1 ||
+            current.status !== 'preparing' ||
+            !sameDraftContents(current, request)
+          )
+            throw error;
+          savedDraft = current;
+          pendingSave.current = null;
+          reconcileRevision(current);
+        }
+      }
+      if (!savedDraft) return;
+      if (currentGeneration !== preflightGeneration.current) return;
+      if (currentEditVersion !== editVersion.current) {
+        setPreflightError('Настройки изменились во время сохранения. Повторите проверку.');
+        return;
+      }
+      let result: PreflightPreview;
+      try {
+        result = await createTaskPreflight({
+          draftId: savedDraft.id,
+          expectedRevision: savedDraft.revision,
+        });
+      } catch (error) {
+        if (
+          !(error instanceof AppApiError) ||
+          (error.kind !== 'temporary' && error.kind !== 'offline')
+        )
+          throw error;
+        if (currentGeneration !== preflightGeneration.current) return;
+        pendingReplay.current = { draft: savedDraft, editVersion: currentEditVersion };
+        result = await createTaskPreflight({
+          draftId: savedDraft.id,
+          expectedRevision: savedDraft.revision,
+        });
+      }
+      if (currentGeneration !== preflightGeneration.current) return;
+      pendingReplay.current = null;
+      reconcileRevision({
+        ...savedDraft,
+        revision: result.draftRevision,
+        status: 'awaiting_confirmation',
+      });
+      if (currentEditVersion !== editVersion.current) {
+        setPreflightError('Настройки изменились во время проверки. Повторите проверку.');
+        return;
+      }
+      setPreview(result);
+    } catch (error) {
+      if (currentGeneration === preflightGeneration.current) {
+        setPreflightError(
+          error instanceof AppApiError && error.status === 409
+            ? 'Черновик или права изменились. Загрузите актуальную версию перед повторной проверкой.'
+            : 'Не удалось проверить задачи. Повторите действие.',
+        );
+      }
+    } finally {
+      if (currentGeneration === preflightGeneration.current) {
+        preflightInFlight.current = false;
+        setPreflightPending(false);
+      }
+    }
+  }
+
+  useEffect(() => {
+    if (catalog.isSuccess && (!preview || returnFocusToHeading.current)) {
+      headingRef.current?.focus();
+      returnFocusToHeading.current = false;
+    }
+  }, [catalog.isSuccess, preview]);
 
   useEffect(() => {
     if (!catalog.data || !initialDraft || initializedDraftId.current === initialDraft.id) return;
@@ -586,6 +809,21 @@ export function BulkChangeEditor({
     );
   }
 
+  if (preview) {
+    return (
+      <PreflightPreviewScreen
+        catalog={catalog.data}
+        onBack={() => {
+          preflightGeneration.current += 1;
+          returnFocusToHeading.current = true;
+          setPreview(null);
+          setPreflightError('');
+        }}
+        preview={preview}
+      />
+    );
+  }
+
   return (
     <form
       className="bulk-change-page"
@@ -621,6 +859,11 @@ export function BulkChangeEditor({
       {saveMutation.isError ? (
         <p className="task-inline-error" role="alert">
           {editorError(saveMutation.error)}
+        </p>
+      ) : null}
+      {preflightError ? (
+        <p className="task-inline-error" role="alert">
+          {preflightError}
         </p>
       ) : null}
       <form.Field name="changes" mode="array">
@@ -848,18 +1091,18 @@ export function BulkChangeEditor({
                 </button>
                 <button
                   className="button-secondary"
-                  disabled={drafts.length === 0 || saveMutation.isPending}
+                  disabled={drafts.length === 0 || saveMutation.isPending || preflightPending}
                   type="submit"
                 >
                   {saveMutation.isPending ? 'Сохранение…' : 'Сохранить черновик'}
                 </button>
                 <button
                   className="button-primary"
-                  disabled
-                  title="Расчёт и предварительная проверка реализуются в задачах 018–019"
+                  disabled={drafts.length === 0 || saveMutation.isPending || preflightPending}
+                  onClick={() => void checkChanges()}
                   type="button"
                 >
-                  Проверить изменения
+                  {preflightPending ? 'Проверка…' : 'Проверить изменения'}
                 </button>
               </footer>
             </>

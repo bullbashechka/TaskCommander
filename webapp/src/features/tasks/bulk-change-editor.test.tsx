@@ -2,11 +2,13 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { TaskChangeCatalogResponse } from '@task-commander/contracts';
+import type { PreflightPreview, TaskChangeCatalogResponse } from '@task-commander/contracts';
 
 import {
   AppApiError,
+  createTaskPreflight,
   fetchTaskChangeCatalog,
+  getBulkOperationDraft,
   saveBulkOperationDraft,
   searchTaskFilterUsers,
 } from '@/app/app-api';
@@ -17,6 +19,8 @@ import { BulkChangeEditor } from './bulk-change-editor';
 vi.mock('@/app/app-api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/app/app-api')>()),
   fetchTaskChangeCatalog: vi.fn(),
+  createTaskPreflight: vi.fn(),
+  getBulkOperationDraft: vi.fn(),
   saveBulkOperationDraft: vi.fn(),
   searchTaskFilterUsers: vi.fn(),
 }));
@@ -78,6 +82,55 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function previewResult(sourceDraftRevision: number): PreflightPreview {
+  return {
+    draftId: '123e4567-e89b-42d3-a456-426614174000',
+    draftRevision: sourceDraftRevision + 1,
+    sourceDraftRevision,
+    actorAccessVersion: null,
+    checkedAt: new Date().toISOString(),
+    canProceed: true,
+    entries: [
+      {
+        taskId: '42',
+        title: 'Задача 42',
+        taskUrl: null,
+        disposition: 'eligible',
+        changedFieldIds: ['title'],
+        reasonCode: null,
+        reasonMessage: null,
+        relevantVersion: 'v1',
+        currentValues: { title: 'Старое' },
+        targetValues: { title: 'Новое' },
+      },
+      {
+        taskId: '43',
+        title: null,
+        taskUrl: null,
+        disposition: 'excluded_by_preflight',
+        changedFieldIds: [],
+        reasonCode: 'TASK_UNAVAILABLE',
+        reasonMessage: 'Задача недоступна.',
+        relevantVersion: null,
+        currentValues: null,
+        targetValues: null,
+      },
+    ],
+    summary: {
+      selected: 2,
+      eligible: 1,
+      excluded: 1,
+      unchanged: 0,
+      successful: 0,
+      failed: 0,
+      unconfirmed: 0,
+      conflicted: 0,
+      partiallyApplied: 0,
+      notProcessed: 0,
+    },
+  };
+}
+
 function accessSnapshot(fieldIds: string[]): AppAccessSnapshot {
   return {
     principal: {
@@ -110,17 +163,23 @@ function renderEditor(options?: { app?: AppAccessSnapshot; onBack?: () => void }
       sort={{ fieldId: 'deadline', direction: 'asc' }}
     />
   );
-  const view = render(
+  const wrap = (app?: AppAccessSnapshot) => (
     <QueryClientProvider client={queryClient}>
-      {options?.app ? <AppAccessProvider value={options.app}>{editor}</AppAccessProvider> : editor}
-    </QueryClientProvider>,
+      {app ? <AppAccessProvider value={app}>{editor}</AppAccessProvider> : editor}
+    </QueryClientProvider>
   );
-  return { ...view, queryClient };
+  const view = render(wrap(options?.app));
+  return {
+    ...view,
+    queryClient,
+    updateAccess: (app: AppAccessSnapshot) => view.rerender(wrap(app)),
+  };
 }
 
 describe('bulk change editor', () => {
   beforeEach(() => {
     vi.mocked(fetchTaskChangeCatalog).mockResolvedValue(catalog);
+    vi.mocked(getBulkOperationDraft).mockResolvedValue({ draft: null });
     vi.mocked(searchTaskFilterUsers).mockResolvedValue({ items: [], nextCursor: null });
     vi.mocked(saveBulkOperationDraft).mockResolvedValue({
       id: '123e4567-e89b-42d3-a456-426614174000',
@@ -180,6 +239,181 @@ describe('bulk change editor', () => {
       }),
     );
     expect(await screen.findByText('Черновик сохранён на 24 часа.')).toBeInTheDocument();
+  });
+
+  it('discards a late preflight response after the editor changes', async () => {
+    const pending = deferred<PreflightPreview>();
+    vi.mocked(createTaskPreflight).mockReturnValue(pending.promise);
+    renderEditor();
+    await screen.findByRole('heading', { name: 'Настройка изменений' });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Добавить поле' }), {
+      target: { value: 'title' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Добавить' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Значение' }), {
+      target: { value: 'Новое название' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить изменения' }));
+    await waitFor(() =>
+      expect(createTaskPreflight).toHaveBeenCalledWith({
+        draftId: '123e4567-e89b-42d3-a456-426614174000',
+        expectedRevision: 1,
+      }),
+    );
+    const saveButton = screen.getByRole('button', { name: 'Сохранить черновик' });
+    expect(saveButton).toBeDisabled();
+    fireEvent.submit(saveButton.closest('form')!);
+    expect(saveBulkOperationDraft).toHaveBeenCalledTimes(1);
+    fireEvent.change(screen.getByRole('textbox', { name: 'Значение' }), {
+      target: { value: 'Ещё одно название' },
+    });
+    await act(async () => {
+      pending.resolve(previewResult(1));
+      await pending.promise;
+    });
+    expect(screen.getByRole('heading', { name: 'Настройка изменений' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Предварительный просмотр' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить изменения' }));
+    await waitFor(() =>
+      expect(saveBulkOperationDraft).toHaveBeenLastCalledWith(
+        expect.objectContaining({ expectedRevision: 2 }),
+      ),
+    );
+  });
+
+  it('uses the preflight revision after returning from preview to edit again', async () => {
+    vi.mocked(saveBulkOperationDraft).mockImplementation(async (request) => ({
+      id: '123e4567-e89b-42d3-a456-426614174000',
+      ownerId: '10',
+      revision: request.expectedRevision + 1,
+      status: 'preparing',
+      filters: request.filters,
+      sort: request.sort,
+      selectedTaskIds: request.selectedTaskIds,
+      changes: request.changes,
+      createdAt: '2026-09-04T10:00:00Z',
+      updatedAt: '2026-09-04T10:00:00Z',
+      expiresAt: '2026-09-05T10:00:00Z',
+    }));
+    vi.mocked(createTaskPreflight)
+      .mockResolvedValueOnce(previewResult(1))
+      .mockResolvedValueOnce(previewResult(3));
+    renderEditor();
+    await screen.findByRole('heading', { name: 'Настройка изменений' });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Добавить поле' }), {
+      target: { value: 'title' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Добавить' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Значение' }), {
+      target: { value: 'Новое' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить изменения' }));
+    expect(await screen.findByRole('heading', { name: 'Предварительный просмотр' })).toHaveFocus();
+    fireEvent.click(screen.getByRole('button', { name: 'Вернуться к настройке' }));
+    expect(await screen.findByRole('heading', { name: 'Настройка изменений' })).toHaveFocus();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Значение' }), {
+      target: { value: 'Другое' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить изменения' }));
+    await waitFor(() =>
+      expect(saveBulkOperationDraft).toHaveBeenLastCalledWith(
+        expect.objectContaining({ expectedRevision: 2 }),
+      ),
+    );
+  });
+
+  it('replays an uncertain preflight without saving the draft again', async () => {
+    vi.mocked(createTaskPreflight)
+      .mockRejectedValueOnce(new AppApiError('Timeout', 'temporary'))
+      .mockRejectedValueOnce(new AppApiError('Timeout', 'temporary'))
+      .mockResolvedValueOnce(previewResult(1));
+    renderEditor();
+    await screen.findByRole('heading', { name: 'Настройка изменений' });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Добавить поле' }), {
+      target: { value: 'title' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Добавить' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Значение' }), {
+      target: { value: 'Новое' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить изменения' }));
+    await waitFor(() => expect(createTaskPreflight).toHaveBeenCalledTimes(2));
+    await screen.findByText('Не удалось проверить задачи. Повторите действие.');
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить изменения' }));
+    await screen.findByRole('heading', { name: 'Предварительный просмотр' });
+    expect(saveBulkOperationDraft).toHaveBeenCalledTimes(1);
+    expect(createTaskPreflight).toHaveBeenCalledTimes(3);
+    expect(createTaskPreflight).toHaveBeenNthCalledWith(3, {
+      draftId: '123e4567-e89b-42d3-a456-426614174000',
+      expectedRevision: 1,
+    });
+  });
+
+  it('recovers an uncertain save after its result appears on the server', async () => {
+    vi.mocked(saveBulkOperationDraft).mockRejectedValueOnce(
+      new AppApiError('Timeout', 'temporary'),
+    );
+    vi.mocked(getBulkOperationDraft)
+      .mockResolvedValueOnce({ draft: null })
+      .mockResolvedValueOnce({
+        draft: {
+          id: '123e4567-e89b-42d3-a456-426614174000',
+          ownerId: '10',
+          revision: 1,
+          status: 'preparing',
+          filters: [],
+          sort: { fieldId: 'deadline', direction: 'asc' },
+          selectedTaskIds: ['42', '43'],
+          changes: [{ fieldId: 'title', kind: 'text', action: 'set', value: 'Новое' }],
+          createdAt: '2026-09-04T10:00:00Z',
+          updatedAt: '2026-09-04T10:00:00Z',
+          expiresAt: '2026-09-05T10:00:00Z',
+        },
+      });
+    vi.mocked(createTaskPreflight).mockResolvedValue(previewResult(1));
+    renderEditor();
+    await screen.findByRole('heading', { name: 'Настройка изменений' });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Добавить поле' }), {
+      target: { value: 'title' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Добавить' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Значение' }), {
+      target: { value: 'Новое' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить изменения' }));
+    await screen.findByText('Не удалось проверить задачи. Повторите действие.');
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить изменения' }));
+    await screen.findByRole('heading', { name: 'Предварительный просмотр' });
+    expect(saveBulkOperationDraft).toHaveBeenCalledTimes(1);
+    expect(getBulkOperationDraft).toHaveBeenCalledTimes(2);
+    expect(createTaskPreflight).toHaveBeenCalledWith({
+      draftId: '123e4567-e89b-42d3-a456-426614174000',
+      expectedRevision: 1,
+    });
+  });
+
+  it('ignores a late preflight response after the session generation changes', async () => {
+    const pending = deferred<PreflightPreview>();
+    vi.mocked(createTaskPreflight).mockReturnValue(pending.promise);
+    const app = accessSnapshot(['title']);
+    const editor = renderEditor({ app });
+    await screen.findByRole('heading', { name: 'Настройка изменений' });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Добавить поле' }), {
+      target: { value: 'title' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Добавить' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Значение' }), {
+      target: { value: 'Новое' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить изменения' }));
+    await waitFor(() => expect(createTaskPreflight).toHaveBeenCalledTimes(1));
+    editor.updateAccess({ ...app, generation: 2 });
+    await act(async () => {
+      pending.resolve(previewResult(1));
+      await pending.promise;
+    });
+    expect(screen.queryByRole('heading', { name: 'Предварительный просмотр' })).toBeNull();
+    expect(screen.getByText(/Права изменились/)).toBeInTheDocument();
   });
 
   it('does not expose completed status or forbidden actions', async () => {

@@ -2518,6 +2518,48 @@ button:disabled {
   font-size: 12px;
 }
 
+.preflight-preview {
+  display: grid;
+  gap: 1rem;
+}
+
+.preflight-entry-list {
+  max-height: 55vh;
+  overflow: auto;
+}
+
+.preflight-entry-list table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.preflight-entry-list th,
+.preflight-entry-list td {
+  border-bottom: 1px solid var(--border);
+  padding: 0.625rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.preflight-entry-list thead {
+  background: var(--background);
+  position: sticky;
+  top: 0;
+}
+
+.preflight-values {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.preflight-values > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.75rem;
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 1080px) {
   .task-filter-layout {
     grid-template-columns: minmax(0, 1fr);
