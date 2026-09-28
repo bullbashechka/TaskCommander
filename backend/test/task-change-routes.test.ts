@@ -16,7 +16,7 @@ import { resolveEffectiveAccess } from '../src/data/access';
 import { DataAccessError } from '../src/data/errors';
 import type { Json } from '../src/data/database.types';
 import { createMockBitrixAdapter } from '../src/integrations/bitrix/mock';
-import { encryptExecutionPlan } from '../src/task-changes/execution-plan';
+import { encryptExecutionPlan, encryptPreviousValues } from '../src/task-changes/execution-plan';
 import type { TaskChangeRepository } from '../src/task-changes/routes';
 import { createVerifiedTestPrincipal } from './verified-session-test-helper';
 
@@ -42,6 +42,7 @@ async function setup(input?: {
     | 'change_allowed_fields'
     | 'view_own_reports'
     | 'retry_operations'
+    | 'restore_operations'
   )[];
   allowedFieldIds?: string[];
   saveError?: DataAccessError;
@@ -136,6 +137,11 @@ async function setup(input?: {
     getOwnedOperationProgress: vi.fn(),
     getLatestOwnedOperationProgress: vi.fn().mockResolvedValue(null),
     readRetrySource: vi.fn(),
+    readRestoreSource: vi.fn(),
+    saveRestoreDraft: vi.fn(),
+    readPrivateRestoreDraft: vi.fn(),
+    saveRestorePreflight: vi.fn(),
+    launchConfirmedRestorePreflight: vi.fn(),
     listTaskResults: vi.fn(),
     saveRetryDraft: vi.fn(),
     getRetryDraftRecovery: vi.fn().mockResolvedValue(null),
@@ -228,6 +234,85 @@ const currentDraft: BulkOperationDraft = {
 };
 
 describe('task change routes', () => {
+  it('returns only field-scoped restore choices and never exposes protected ciphertext', async () => {
+    const saved = await setup({
+      permissions: ['app_access', 'run_bulk_operations', 'change_allowed_fields',
+        'view_own_reports', 'restore_operations'],
+      allowedFieldIds: ['title'],
+    });
+    vi.mocked(saved.repository.readRestoreSource).mockResolvedValue({
+      operationId: '323e4567-e89b-42d3-a456-426614174025',
+      ownerId: '10', stateVersion: 3,
+      tasks: ['title', 'tags'].map((fieldId, index) => ({
+        taskId: String(42 + index), title: `Task ${index}`, taskUrl: null,
+        appliedFieldIds: [fieldId], ciphertext: 'private-ciphertext', nonce: 'private-nonce',
+        keyVersion: 'v1', payloadVersion: 1, beforeVersion: 'mock:1', afterVersion: 'mock:2',
+      })),
+    });
+    const response = await saved.api.request(
+      'https://example.test/api/tasks/operations/323e4567-e89b-42d3-a456-426614174025/restore-source',
+      { headers }, environment,
+    );
+    expect(response.status).toBe(200);
+    const body = await response.text();
+    expect(body).not.toContain('private-ciphertext');
+    expect(body).not.toContain('afterVersion');
+    expect(JSON.parse(body).tasks).toEqual([{ taskId: '42', title: 'Task 0',
+      taskUrl: null, appliedFieldIds: ['title'] }]);
+  });
+
+  it('prepares a restore with encrypted targets and rejects fields outside the fresh scope', async () => {
+    const sourceId = '323e4567-e89b-42d3-a456-426614174025';
+    const protectedValues = await encryptPreviousValues({
+      keyBase64: environment.OPERATION_PLAN_KEY_V1,
+      portalId: 'portal-1', ownerId: '10', operationId: sourceId,
+      taskId: '42', beforeVersion: 'mock:1', values: { title: null },
+    });
+    const source = { operationId: sourceId, ownerId: '10', stateVersion: 3,
+      tasks: [{ taskId: '42', title: 'Task', taskUrl: null, appliedFieldIds: ['title'],
+        ...protectedValues, beforeVersion: 'mock:1', afterVersion: 'mock:2' }] };
+    const saved = await setup({
+      permissions: ['app_access', 'run_bulk_operations', 'change_allowed_fields',
+        'view_own_reports', 'restore_operations'], allowedFieldIds: ['title'],
+    });
+    vi.mocked(saved.repository.readRestoreSource).mockResolvedValue(source);
+    vi.mocked(saved.repository.saveRestoreDraft).mockImplementation(async (_context, input) =>
+      bulkOperationDraftSchema.parse({
+        id: input.draftId, ownerId: '10', revision: 1, status: 'preparing',
+        filters: [], sort: { fieldId: 'deadline', direction: 'asc' },
+        selectedTaskIds: input.selectedTaskIds, changes: input.changes,
+        restoreSourceOperationId: input.sourceOperationId,
+        restoreSourceStateVersion: input.sourceStateVersion, restoreIntents: input.intents,
+        createdAt: '2026-09-28T09:00:00Z', updatedAt: '2026-09-28T09:00:00Z',
+        expiresAt: '2026-09-29T09:00:00Z',
+      }),
+    );
+    const response = await saved.api.request(
+      `https://example.test/api/tasks/operations/${sourceId}/restore-draft`,
+      { method: 'POST', headers, body: JSON.stringify({ selectedTaskIds: ['42'] }) },
+      environment,
+    );
+    expect(response.status).toBe(200);
+    expect(await response.text()).not.toContain('targetValues');
+    expect(saved.repository.saveRestoreDraft).toHaveBeenCalledWith(expect.anything(),
+      expect.objectContaining({
+        intents: [{ taskId: '42', fieldIds: ['title'], afterVersion: 'mock:2' }],
+        changes: [{ fieldId: 'title', kind: 'text', action: 'clear' }],
+        encryptedIntents: expect.objectContaining({ ciphertext: expect.any(String) }),
+      }));
+    const denied = await setup({
+      permissions: ['app_access', 'run_bulk_operations', 'change_allowed_fields',
+        'view_own_reports', 'restore_operations'], allowedFieldIds: ['tags'],
+    });
+    vi.mocked(denied.repository.readRestoreSource).mockResolvedValue(source);
+    const forbidden = await denied.api.request(
+      `https://example.test/api/tasks/operations/${sourceId}/restore-draft`,
+      { method: 'POST', headers, body: JSON.stringify({ selectedTaskIds: ['42'] }) },
+      environment,
+    );
+    expect(forbidden.status).toBe(403);
+    expect(denied.repository.saveRestoreDraft).not.toHaveBeenCalled();
+  });
   it('recovers a retry draft by revision after retry permission is revoked without exposing values', async () => {
     const saved = await setup();
     const descriptor = { draftId: currentDraft.id, revision: currentDraft.revision };

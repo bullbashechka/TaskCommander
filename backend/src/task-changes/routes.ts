@@ -5,6 +5,8 @@ import {
   bulkOperationDraftAvailabilitySchema,
   bulkOperationDraftSchema,
   bulkChangeCommandSchema,
+  restoreSourceAvailabilitySchema,
+  prepareRestoreDraftRequestSchema,
   retryDraftRecoveryAvailabilitySchema,
   retryDraftRecoverySchema,
   confirmTaskPreflightRequestSchema,
@@ -28,6 +30,7 @@ import {
   type RetryTaskIntent,
   type TaskChangeValue,
   type BulkChangeCommand,
+  type RestoreTaskIntentMetadata,
 } from '@task-commander/contracts';
 
 import type { VerifiedSessionPrincipal } from '../auth/session-service';
@@ -58,7 +61,10 @@ import {
   requireValidBulkChanges,
 } from './catalog';
 import { buildTaskPreflight, TaskPreflightError } from './preflight';
-import { decryptExecutionPlan, encryptExecutionPlan } from './execution-plan';
+import {
+  decryptExecutionPlan, encryptExecutionPlan, decryptPreviousValues,
+  encryptPrivateRestoreData, decryptPrivateRestoreData, type RestoreTaskIntent,
+} from './execution-plan';
 import { dispatchOperationLaunch } from './dispatch';
 
 export type TaskChangeRepository = Readonly<{
@@ -134,6 +140,35 @@ export type TaskChangeRepository = Readonly<{
       intents: RetryTaskIntent[];
     },
   ): Promise<BulkOperationDraft>;
+  readRestoreSource(context: DataAccessContext, operationId: string): Promise<{
+    operationId: string; ownerId: string; stateVersion: number;
+    tasks: Array<{
+      taskId: string; title: string | null; taskUrl: string | null;
+      appliedFieldIds: string[]; ciphertext: string; nonce: string;
+      keyVersion: string; payloadVersion: number; beforeVersion: string; afterVersion: string;
+    }>;
+  }>;
+  saveRestoreDraft(context: DataAccessContext, input: {
+    draftId: string; sourceOperationId: string; sourceStateVersion: number;
+    selectedTaskIds: string[]; changes: Json; intents: RestoreTaskIntentMetadata[];
+    encryptedIntents: { ciphertext: string; nonce: string };
+  }): Promise<BulkOperationDraft>;
+  readPrivateRestoreDraft(context: DataAccessContext, draftId: string): Promise<{
+    intentCiphertext: string; intentNonce: string; previewCiphertext: string | null;
+    previewNonce: string | null; previewRevision: number | null;
+    previewFingerprint: string | null; keyVersion: string;
+  }>;
+  saveRestorePreflight(context: DataAccessContext, input: {
+    draftId: string; expectedRevision: number; safeSnapshot: Json;
+    encryptedPreview: { ciphertext: string; nonce: string }; fullFingerprint: string;
+  }): Promise<BulkOperationDraft>;
+  launchConfirmedRestorePreflight(context: DataAccessContext, input: {
+    displayName: string; draftId: string; draftRevision: number; checkedAt: string;
+    token: string | null; safeSnapshot: Json; safeFingerprint: string;
+    fullFingerprint: string;
+    encryptedPlan: { ciphertext: string; nonce: string; keyVersion: string } | null;
+    correlationId: string;
+  }): Promise<{ disposition: string; operation: BulkOperation }>;
   getRetryDraftRecovery(
     context: DataAccessContext,
   ): Promise<{ draftId: string; revision: number } | null>;
@@ -308,6 +343,36 @@ function fieldsWithinScope(access: EffectiveAccess, fieldIds: readonly string[])
   return scope.kind === 'all' || fieldIds.every((fieldId) => scope.fieldIds.includes(fieldId));
 }
 
+async function snapshotFingerprint(value: unknown): Promise<string> {
+  return Array.from(
+    new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(value)))),
+    (byte) => byte.toString(16).padStart(2, '0'),
+  ).join('');
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    return `{${Object.entries(value).sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+function safeRestorePreview(preview: PreflightPreview): PreflightPreview {
+  return preflightPreviewSchema.parse({
+    ...preview,
+    entries: preview.entries.map((entry) => ({
+      ...entry,
+      currentValues: null,
+      targetValues: null,
+      ...(entry.disposition === 'eligible' || entry.disposition === 'no_change'
+        ? { valuesOmitted: true }
+        : {}),
+    })),
+  });
+}
+
 function previewMatchesDraft(preview: PreflightPreview, draft: BulkOperationDraft): boolean {
   const fieldIds = draft.changes.map((change) => change.fieldId);
   return (
@@ -316,12 +381,15 @@ function previewMatchesDraft(preview: PreflightPreview, draft: BulkOperationDraf
     preview.draftRevision === draft.revision + 1 &&
     preview.entries.length === draft.selectedTaskIds.length &&
     preview.entries.every((entry, index) => {
-      const expectedFieldIds = draft.retryIntents
+      const expectedFieldIds = draft.restoreIntents
+        ? draft.restoreIntents[index]?.fieldIds ?? []
+        : draft.retryIntents
         ? Object.keys(draft.retryIntents[index]?.targetValues ?? {})
         : fieldIds;
       if (entry.taskId !== draft.selectedTaskIds[index]) return false;
       if (entry.changedFieldIds.some((fieldId) => !expectedFieldIds.includes(fieldId)))
         return false;
+      if (entry.valuesOmitted && draft.restoreIntents) return true;
       if (entry.currentValues === null || entry.targetValues === null) {
         return entry.currentValues === null && entry.targetValues === null;
       }
@@ -361,6 +429,78 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
         throw new ApiHttpError(409, 'CONFLICT');
       throwDataApiError(error);
     }
+  }
+
+  async function requireRestoreSourceCurrent(
+    repository: TaskChangeRepository,
+    dataContext: DataAccessContext,
+    access: EffectiveAccess,
+    draft: BulkOperationDraft,
+  ) {
+    if (!draft.restoreSourceOperationId) return null;
+    if (!draft.restoreSourceStateVersion || !draft.restoreIntents ||
+      !access.permissions.includes('restore_operations') ||
+      !fieldsWithinScope(access, draft.restoreIntents.flatMap((intent) => intent.fieldIds))) {
+      throw new ApiHttpError(409, 'CONFLICT');
+    }
+    try {
+      return await repository.readPrivateRestoreDraft(dataContext, draft.id);
+    } catch (error) {
+      if (error instanceof DataAccessError &&
+        (error.code === 'UNAVAILABLE_RECORD' || error.code === 'CONFLICT')) {
+        throw new ApiHttpError(409, 'CONFLICT');
+      }
+      throwDataApiError(error);
+    }
+  }
+
+  async function readRestoreIntents(
+    env: RuntimeEnvironment, principal: VerifiedSessionPrincipal,
+    draft: BulkOperationDraft,
+    privateDraft: NonNullable<Awaited<ReturnType<typeof requireRestoreSourceCurrent>>>,
+  ): Promise<RestoreTaskIntent[]> {
+    const result = await decryptPrivateRestoreData({
+      keyBase64: env.OPERATION_PLAN_KEY_V1, portalId: principal.portalId,
+      ownerId: principal.userId, draftId: draft.id,
+      sourceOperationId: draft.restoreSourceOperationId!,
+      sourceStateVersion: draft.restoreSourceStateVersion!, revision: 1,
+      purpose: 'intents', ciphertext: privateDraft.intentCiphertext,
+      nonce: privateDraft.intentNonce, keyVersion: privateDraft.keyVersion,
+    });
+    if (!Array.isArray(result) || result.length !== draft.selectedTaskIds.length ||
+      result.some((intent, index) => intent.taskId !== draft.selectedTaskIds[index] ||
+        !sameSet(intent.fieldIds, draft.restoreIntents?.[index]?.fieldIds ?? []) ||
+        intent.afterVersion !== draft.restoreIntents?.[index]?.afterVersion ||
+        !sameSet(Object.keys(intent.targetValues), intent.fieldIds))) {
+      throw new ApiHttpError(409, 'CONFLICT');
+    }
+    return result;
+  }
+
+  async function readRestorePreview(
+    env: RuntimeEnvironment, principal: VerifiedSessionPrincipal,
+    draft: BulkOperationDraft,
+    privateDraft: NonNullable<Awaited<ReturnType<typeof requireRestoreSourceCurrent>>>,
+    safeSnapshot: Json | null,
+  ): Promise<PreflightPreview> {
+    if (!privateDraft.previewCiphertext || !privateDraft.previewNonce ||
+      privateDraft.previewRevision !== draft.revision || !privateDraft.previewFingerprint) {
+      throw new ApiHttpError(409, 'CONFLICT');
+    }
+    const value = await decryptPrivateRestoreData({
+      keyBase64: env.OPERATION_PLAN_KEY_V1, portalId: principal.portalId,
+      ownerId: principal.userId, draftId: draft.id,
+      sourceOperationId: draft.restoreSourceOperationId!,
+      sourceStateVersion: draft.restoreSourceStateVersion!, revision: draft.revision,
+      purpose: 'preview', ciphertext: privateDraft.previewCiphertext,
+      nonce: privateDraft.previewNonce, keyVersion: privateDraft.keyVersion,
+    });
+    if (Array.isArray(value) ||
+      await snapshotFingerprint(value) !== privateDraft.previewFingerprint ||
+      canonicalJson(safeRestorePreview(value)) !== canonicalJson(safeSnapshot)) {
+      throw new ApiHttpError(409, 'CONFLICT');
+    }
+    return value;
   }
 
   async function authorize(context: {
@@ -467,6 +607,8 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
       const draft = await repository.getCurrentDraft(dataContext);
       if (draft?.retrySourceOperationId)
         await requireRetrySourceCurrent(repository, dataContext, access, draft);
+      if (draft?.restoreSourceOperationId)
+        await requireRestoreSourceCurrent(repository, dataContext, access, draft);
       return context.json(bulkOperationDraftAvailabilitySchema.parse({ draft }));
     } catch (error) {
       if (error instanceof ApiHttpError) throw error;
@@ -565,6 +707,9 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
       authorization.access,
       current.draft,
     );
+    const restorePrivate = await requireRestoreSourceCurrent(
+      repository, authorization.dataContext, authorization.access, current.draft,
+    );
     if (current.draft.revision === input.expectedRevision + 1) {
       const existing = preflightPreviewSchema.safeParse(current.preflightSnapshot);
       if (
@@ -594,7 +739,8 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
     const catalog = createTaskChangeCatalog(capabilities, authorization.access.fieldScope);
     try {
       requireValidTaskSearchDefinition(current.draft, createTaskFilterCatalog(capabilities));
-      if (!current.draft.retryIntents) requireValidBulkChanges(current.draft.changes, catalog);
+      if (!current.draft.retryIntents && !current.draft.restoreIntents)
+        requireValidBulkChanges(current.draft.changes, catalog);
     } catch (error) {
       if (
         error instanceof InvalidTaskChangeDefinitionError ||
@@ -606,6 +752,9 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
     }
 
     let preview: PreflightPreview;
+    const restoreIntents = restorePrivate
+      ? await readRestoreIntents(context.env, authorization.principal, current.draft, restorePrivate)
+      : undefined;
     try {
       preview = await buildTaskPreflight({
         adapter,
@@ -616,6 +765,7 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
           context.env.BITRIX_PORTAL_ORIGIN,
           context.env.APP_ENV === 'local',
         ),
+        restoreIntents,
       });
     } catch (error) {
       if (error instanceof TaskPreflightError) throwPreflightApiError(error);
@@ -631,12 +781,31 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
       throw new ApiHttpError(409, 'CONFLICT');
     }
     await requireRetrySourceCurrent(repository, renewed.dataContext, renewed.access, current.draft);
+    if (restorePrivate)
+      await requireRestoreSourceCurrent(repository, renewed.dataContext, renewed.access, current.draft);
     try {
-      const saved = await repository.saveTaskPreflight(renewed.dataContext, {
-        draftId: input.draftId,
-        expectedRevision: input.expectedRevision,
-        preflightSnapshot: asJson(preview),
-      });
+      const safePreview = restorePrivate ? safeRestorePreview(preview) : preview;
+      const saved = restorePrivate
+        ? {
+            draft: await repository.saveRestorePreflight(renewed.dataContext, {
+              draftId: input.draftId, expectedRevision: input.expectedRevision,
+              safeSnapshot: asJson(safePreview),
+              encryptedPreview: await encryptPrivateRestoreData({
+                keyBase64: context.env.OPERATION_PLAN_KEY_V1,
+                portalId: authorization.principal.portalId,
+                ownerId: authorization.principal.userId, draftId: current.draft.id,
+                sourceOperationId: current.draft.restoreSourceOperationId!,
+                sourceStateVersion: current.draft.restoreSourceStateVersion!,
+                revision: current.draft.revision + 1, purpose: 'preview', value: preview,
+              }),
+              fullFingerprint: await snapshotFingerprint(preview),
+            }),
+            preflightSnapshot: asJson(safePreview),
+          }
+        : await repository.saveTaskPreflight(renewed.dataContext, {
+            draftId: input.draftId, expectedRevision: input.expectedRevision,
+            preflightSnapshot: asJson(preview),
+          });
       const stored = preflightPreviewSchema.parse(saved.preflightSnapshot);
       if (
         stored.draftRevision !== saved.draft.revision ||
@@ -653,7 +822,7 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
   });
 
   routes.post('/preflight/confirm', async (context) => {
-    const { access, dataContext } = await authorizePreflight(context);
+    const { principal, access, dataContext } = await authorizePreflight(context);
     if (!dataContext.isBitrixAdmin && access.accessVersion === null) {
       throw new ApiHttpError(503, 'UPSTREAM_UNAVAILABLE');
     }
@@ -670,6 +839,7 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
         throw new ApiHttpError(409, 'CONFLICT');
       }
       await requireRetrySourceCurrent(repository, dataContext, access, current.draft);
+      const restorePrivate = await requireRestoreSourceCurrent(repository, dataContext, access, current.draft);
       const parsed = preflightPreviewSchema.safeParse(current.preflightSnapshot);
       if (
         !parsed.success ||
@@ -684,6 +854,9 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
       ) {
         throw new ApiHttpError(409, 'CONFLICT');
       }
+      if (restorePrivate)
+        await readRestorePreview(context.env, principal,
+          current.draft, restorePrivate, current.preflightSnapshot);
       const confirmed = await repository.confirmTaskPreflight(dataContext, {
         ...input,
         preflightSnapshot: asJson(parsed.data),
@@ -751,6 +924,7 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
         throw new ApiHttpError(409, 'CONFLICT');
       }
       await requireRetrySourceCurrent(repository, dataContext, access, current.draft);
+      const restorePrivate = await requireRestoreSourceCurrent(repository, dataContext, access, current.draft);
       const parsed = preflightPreviewSchema.safeParse(current.preflightSnapshot);
       if (
         !parsed.success ||
@@ -762,6 +936,13 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
       ) {
         throw new ApiHttpError(409, 'CONFLICT');
       }
+      const fullPreview = restorePrivate
+        ? await readRestorePreview(context.env, principal, current.draft, restorePrivate,
+          current.preflightSnapshot)
+        : parsed.data;
+      const restoreIntents = restorePrivate
+        ? await readRestoreIntents(context.env, principal, current.draft, restorePrivate)
+        : undefined;
       const fingerprint = Array.from(
         new Uint8Array(
           await crypto.subtle.digest(
@@ -781,21 +962,25 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
               ownerId: principal.userId,
               token: input.token,
               draft: current.draft,
-              preview: parsed.data,
+              preview: fullPreview,
+              restoreIntents,
             });
       const latestAccess = await dependencies.readEffectiveAccess(context.env, principal);
       if (!sameAccess(access, latestAccess)) throw new ApiHttpError(409, 'CONFLICT');
-      const launched = await repository.launchConfirmedTaskPreflight(dataContext, {
-        displayName: principal.displayName,
-        draftId: input.draftId,
-        draftRevision: input.draftRevision,
-        checkedAt: input.checkedAt,
-        token: input.token,
-        preflightSnapshot: asJson(parsed.data),
-        snapshotFingerprint: fingerprint,
-        encryptedPlan,
-        correlationId: context.get('correlationId'),
-      });
+      const launchInput = {
+        displayName: principal.displayName, draftId: input.draftId,
+        draftRevision: input.draftRevision, checkedAt: input.checkedAt,
+        token: input.token, encryptedPlan, correlationId: context.get('correlationId'),
+      };
+      const launched = restorePrivate
+        ? await repository.launchConfirmedRestorePreflight(dataContext, {
+            ...launchInput, safeSnapshot: asJson(parsed.data), safeFingerprint: fingerprint,
+            fullFingerprint: restorePrivate.previewFingerprint!,
+          })
+        : await repository.launchConfirmedTaskPreflight(dataContext, {
+            ...launchInput, preflightSnapshot: asJson(parsed.data),
+            snapshotFingerprint: fingerprint,
+          });
       if (launched.operation.status === 'launching') {
         try {
           await dispatchOperationLaunch({
@@ -914,6 +1099,97 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
         selectedTaskIds: intents.map((intent) => intent.taskId),
         changes: asJson(changes),
         intents,
+      });
+      return context.json(bulkOperationDraftSchema.parse(saved));
+    } catch (error) {
+      if (error instanceof ApiHttpError) throw error;
+      throwDataApiError(error);
+    }
+  });
+
+  routes.get('/operations/:operationId/restore-source', async (context) => {
+    const { access, dataContext } = await authorizePreflight(context);
+    if (!access.permissions.includes('restore_operations'))
+      throw new ApiHttpError(403, 'FORBIDDEN');
+    const operationId = context.req.param('operationId');
+    if (!operationIdSchema.safeParse(operationId).success) throw new ApiHttpError(404, 'NOT_FOUND');
+    try {
+      const source = await dependencies.createRepository(context.env)
+        .readRestoreSource(dataContext, operationId);
+      return context.json(restoreSourceAvailabilitySchema.parse({
+        sourceOperationId: source.operationId,
+        sourceStateVersion: source.stateVersion,
+        tasks: source.tasks.filter((task) => fieldsWithinScope(access, task.appliedFieldIds))
+          .map((task) => ({ taskId: task.taskId, title: task.title,
+            taskUrl: task.taskUrl, appliedFieldIds: task.appliedFieldIds })),
+      }));
+    } catch (error) {
+      throwDataApiError(error);
+    }
+  });
+
+  routes.post('/operations/:operationId/restore-draft', async (context) => {
+    const { principal, access, dataContext } = await authorizePreflight(context);
+    if (!access.permissions.includes('restore_operations'))
+      throw new ApiHttpError(403, 'FORBIDDEN');
+    const operationId = context.req.param('operationId');
+    if (!operationIdSchema.safeParse(operationId).success) throw new ApiHttpError(404, 'NOT_FOUND');
+    const request = await parseJsonBody(context.req.raw, prepareRestoreDraftRequestSchema, 40_000);
+    const repository = dependencies.createRepository(context.env);
+    try {
+      const source = await repository.readRestoreSource(dataContext, operationId);
+      const byId = new Map(source.tasks.map((task) => [task.taskId, task]));
+      const selected = request.selectedTaskIds.map((taskId) => byId.get(taskId));
+      if (selected.some((task) => !task)) throw new ApiHttpError(409, 'CONFLICT');
+      const tasks = selected.filter((task): task is NonNullable<typeof task> => !!task);
+      if (!fieldsWithinScope(access, tasks.flatMap((task) => task.appliedFieldIds)))
+        throw new ApiHttpError(403, 'FORBIDDEN');
+      const capabilities = await loadCapabilities(createAdapter(context.env, principal.userId, principal.portalId));
+      const catalog = createTaskChangeCatalog(capabilities, access.fieldScope);
+      const kinds = new Map(catalog.fields.map((field) => [field.id, field.kind]));
+      const fields = [...new Set(tasks.flatMap((task) => task.appliedFieldIds))].sort();
+      if (fields.length > 64 || fields.some((fieldId) => !kinds.has(fieldId)))
+        throw new ApiHttpError(409, 'CONFLICT');
+      const intents: RestoreTaskIntent[] = [];
+      for (const task of tasks) {
+        if (task.payloadVersion !== 1 || !/^mock:[1-9][0-9]*$/.test(task.afterVersion))
+          throw new ApiHttpError(409, 'CONFLICT');
+        const previous = await decryptPreviousValues({
+          keyBase64: context.env.OPERATION_PLAN_KEY_V1,
+          portalId: principal.portalId, ownerId: source.ownerId,
+          operationId, taskId: task.taskId, beforeVersion: task.beforeVersion,
+          ciphertext: task.ciphertext, nonce: task.nonce, keyVersion: task.keyVersion,
+        });
+        const targetValues: Record<string, TaskChangeValue> = {};
+        for (const fieldId of task.appliedFieldIds) {
+          if (!Object.hasOwn(previous, fieldId)) throw new ApiHttpError(409, 'CONFLICT');
+          targetValues[fieldId] = previous[fieldId]!;
+        }
+        intents.push({ taskId: task.taskId, fieldIds: task.appliedFieldIds,
+          afterVersion: task.afterVersion, targetValues });
+      }
+      const latest = await repository.readRestoreSource(dataContext, operationId);
+      const renewed = await authorize(context);
+      if (latest.stateVersion !== source.stateVersion || !sameAccess(access, renewed.access))
+        throw new ApiHttpError(409, 'CONFLICT');
+      if (principal.isBitrixAdmin)
+        await repository.ensurePrincipalIdentity(renewed.dataContext, principal.displayName);
+      const draftId = crypto.randomUUID();
+      const encryptedIntents = await encryptPrivateRestoreData({
+        keyBase64: context.env.OPERATION_PLAN_KEY_V1,
+        portalId: principal.portalId, ownerId: principal.userId,
+        draftId, sourceOperationId: operationId,
+        sourceStateVersion: source.stateVersion, revision: 1,
+        purpose: 'intents', value: intents,
+      });
+      const changes = fields.map((fieldId) => bulkChangeCommandSchema.parse({
+        fieldId, kind: kinds.get(fieldId), action: 'clear',
+      }));
+      const saved = await repository.saveRestoreDraft(renewed.dataContext, {
+        draftId, sourceOperationId: operationId, sourceStateVersion: source.stateVersion,
+        selectedTaskIds: tasks.map((task) => task.taskId), changes: asJson(changes),
+        intents: intents.map(({ taskId, fieldIds, afterVersion }) =>
+          ({ taskId, fieldIds, afterVersion })), encryptedIntents,
       });
       return context.json(bulkOperationDraftSchema.parse(saved));
     } catch (error) {

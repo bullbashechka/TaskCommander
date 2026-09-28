@@ -26,6 +26,7 @@ import {
   type TaskChangeCalculation,
 } from './calculation';
 import { InvalidTaskChangeDefinitionError, requireValidBulkChanges } from './catalog';
+import type { RestoreTaskIntent } from './execution-plan';
 
 const taskReadConcurrency = 8;
 const directoryConcurrency = 4;
@@ -55,6 +56,7 @@ export interface BuildTaskPreflightInput {
   actorAccessVersion: number | null;
   trustedPortalOrigins: readonly string[];
   now?: () => Date;
+  restoreIntents?: RestoreTaskIntent[];
 }
 
 function absoluteRetryCommands(
@@ -505,14 +507,18 @@ function calculatedEntry(
 export async function buildTaskPreflight(
   input: BuildTaskPreflightInput,
 ): Promise<PreflightPreview> {
+  const restoreByTask = new Map(input.restoreIntents?.map((intent) => [intent.taskId, intent]) ?? []);
   const retryByTask = new Map(
     input.draft.retryIntents?.map((intent) => [intent.taskId, intent]) ?? [],
   );
-  const fieldIds = input.draft.retryIntents
+  const fieldIds = input.restoreIntents
+    ? [...new Set(input.restoreIntents.flatMap((intent) => intent.fieldIds))]
+    : input.draft.retryIntents
     ? [...new Set(input.draft.retryIntents.flatMap((intent) => Object.keys(intent.targetValues)))]
     : input.draft.changes.map((command) => command.fieldId);
   const fieldsForTask = (taskId: string) =>
-    retryByTask.get(taskId) ? Object.keys(retryByTask.get(taskId)?.targetValues ?? {}) : fieldIds;
+    restoreByTask.get(taskId)?.fieldIds ??
+    (retryByTask.get(taskId) ? Object.keys(retryByTask.get(taskId)?.targetValues ?? {}) : fieldIds);
   const readFieldsForTask = (taskId: string) => {
     const fields = [...fieldsForTask(taskId)];
     if (fields.includes('start_date') || fields.includes('deadline')) {
@@ -545,12 +551,25 @@ export async function buildTaskPreflight(
   );
   const calendar = await loadCalendar(
     input.adapter,
-    input.draft.retryIntents ? [] : input.draft.changes,
+    input.draft.retryIntents || input.restoreIntents ? [] : input.draft.changes,
     calculableSnapshots,
   );
   const preliminary = reads.map((result): PreliminaryResult => {
     if (result.kind !== 'snapshot') return result;
     const snapshot = result.snapshot;
+    const restoreIntent = restoreByTask.get(snapshot.taskId);
+    if (restoreIntent &&
+      (snapshot.mutationVersion === undefined ||
+        `mock:${snapshot.mutationVersion}` !== restoreIntent.afterVersion)) {
+      return { kind: 'entry', entry: {
+        taskId: snapshot.taskId, title: snapshot.title, taskUrl: snapshot.taskUrl,
+        disposition: 'conflict', changedFieldIds: [],
+        reasonCode: 'RESTORE_VERSION_CHANGED',
+        reasonMessage: 'После исходного изменения задача была изменена.',
+        relevantVersion: snapshot.relevantVersion,
+        currentValues: null, targetValues: null,
+      } };
+    }
     if (snapshot.isTemplate || snapshot.isRecurrenceRule) {
       return {
         kind: 'entry',
@@ -595,7 +614,9 @@ export async function buildTaskPreflight(
         snapshot,
         calculation: calculateTaskChanges({
           snapshot,
-          commands: intent ? absoluteRetryCommands(intent, input.catalog) : input.draft.changes,
+          commands: restoreIntent
+            ? absoluteRetryCommands(restoreIntent, input.catalog)
+            : intent ? absoluteRetryCommands(intent, input.catalog) : input.draft.changes,
           catalog: input.catalog,
           calendar,
         }),
@@ -605,7 +626,7 @@ export async function buildTaskPreflight(
         return { kind: 'entry', entry: calculationFailureEntry(snapshot, error) };
       }
       if (
-        input.draft.retryIntents &&
+        (input.draft.retryIntents || input.restoreIntents) &&
         (error instanceof z.ZodError ||
           error instanceof InvalidTaskChangeDefinitionError ||
           (error instanceof Error && error.message === 'Retry field is no longer available.'))
@@ -647,6 +668,7 @@ export async function buildTaskPreflight(
   const eligible = entries.filter((entry) => entry.disposition === 'eligible').length;
   const excluded = entries.filter((entry) => entry.disposition === 'excluded_by_preflight').length;
   const unchanged = entries.filter((entry) => entry.disposition === 'no_change').length;
+  const conflicted = entries.filter((entry) => entry.disposition === 'conflict').length;
   const preview = preflightPreviewSchema.parse({
     draftId: input.draft.id,
     sourceDraftRevision: input.draft.revision,
@@ -663,7 +685,7 @@ export async function buildTaskPreflight(
       successful: 0,
       failed: 0,
       unconfirmed: 0,
-      conflicted: 0,
+      conflicted,
       partiallyApplied: 0,
       notProcessed: 0,
     },

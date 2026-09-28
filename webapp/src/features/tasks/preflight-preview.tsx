@@ -30,12 +30,14 @@ export function PreflightPreviewScreen({
   onBack,
   onOperationLaunched,
   canRetryLaunch = false,
+  mode = 'change',
 }: {
   preview: PreflightPreview;
   catalog: TaskChangeCatalogResponse;
   onBack(): void;
   onOperationLaunched?(operation: BulkOperation): void;
   canRetryLaunch?: boolean;
+  mode?: 'change' | 'restore';
 }) {
   const [acknowledged, setAcknowledged] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
@@ -245,7 +247,7 @@ export function PreflightPreviewScreen({
         <h2>Результат проверки</h2>
         <p>
           Допущено: {preview.summary.eligible}. Исключено: {preview.summary.excluded}. Изменения не
-          требуются: {preview.summary.unchanged}.
+          требуются: {preview.summary.unchanged}. Конфликты: {preview.summary.conflicted}.
         </p>
         {preview.summary.excluded > 0 ? (
           <p role="status">Исключённые задачи не будут изменены.</p>
@@ -280,7 +282,9 @@ export function PreflightPreviewScreen({
                     ? 'Допущена'
                     : entry.disposition === 'no_change'
                       ? 'Изменения не требуются'
-                      : `Исключена проверкой: ${entry.reasonMessage ?? 'Причина недоступна'}`}
+                      : entry.disposition === 'conflict'
+                        ? `Конфликт: ${entry.reasonMessage ?? 'Версия задачи изменилась'}`
+                        : `Исключена проверкой: ${entry.reasonMessage ?? 'Причина недоступна'}`}
                 </td>
                 <td>
                   {entry.currentValues && entry.targetValues ? (
@@ -293,7 +297,7 @@ export function PreflightPreviewScreen({
                         </div>
                       ))}
                     </div>
-                  ) : null}
+                  ) : entry.valuesOmitted ? 'Значения защищены и не отображаются' : null}
                 </td>
               </tr>
             ))}
@@ -334,7 +338,9 @@ export function PreflightPreviewScreen({
               onChange={(event) => setAcknowledged(event.target.checked)}
               type="checkbox"
             />
-            Я проверил изменения и осознанно подтверждаю подготовку операции
+            {mode === 'restore'
+              ? 'Я проверил задачи и осознанно подтверждаю восстановление предыдущих значений'
+              : 'Я проверил изменения и осознанно подтверждаю подготовку операции'}
           </label>
         ) : null}
         {!preview.canProceed && !operation && !zeroConflict && (fresh || zeroAttempted) ? (
@@ -397,12 +403,12 @@ export function PreflightPreviewScreen({
         ) : null}
       </footer>
       <Modal
-        description={`Допущено ${preview.summary.eligible} задач. Исключено ${preview.summary.excluded}. Проверка действительна ещё не более ${remainingMinutes} мин. После подтверждения начнётся запуск операции.`}
+        description={`Допущено ${preview.summary.eligible} задач. Исключено ${preview.summary.excluded}. Конфликты: ${preview.summary.conflicted}. Проверка действительна ещё не более ${remainingMinutes} мин. После подтверждения начнётся запуск операции.`}
         onClose={() => {
           if (!pending) setModalOpen(false);
         }}
         open={modalOpen}
-        title="Подтвердить запуск изменения"
+        title={mode === 'restore' ? 'Подтвердить восстановление' : 'Подтвердить запуск изменения'}
       >
         <div className="dialog-actions">
           <button

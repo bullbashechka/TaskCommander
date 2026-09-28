@@ -3,7 +3,8 @@ import { describe, expect, it } from 'vitest';
 import { type BulkOperationDraft } from '@task-commander/contracts';
 
 import { createMockBitrixAdapter } from '../src/integrations/bitrix/mock';
-import { mockFixtureIds } from '../src/integrations/bitrix/mock/fixtures';
+import { createMockTaskFixtures, mockFixtureIds } from '../src/integrations/bitrix/mock/fixtures';
+import type { MockTaskPersistence } from '../src/integrations/bitrix/mock/persistence';
 import { createMockScenario } from '../src/integrations/bitrix/mock/scenario';
 import { createTaskChangeCatalog } from '../src/task-changes/catalog';
 import { buildTaskPreflight } from '../src/task-changes/preflight';
@@ -32,6 +33,35 @@ async function setup(changes: BulkOperationDraft['changes'], selectedTaskIds = [
 }
 
 describe('task preflight orchestration', () => {
+  it('uses the full task version for restore conflict before considering unchanged values', async () => {
+    const task = createMockTaskFixtures().find((item) => item.id === mockFixtureIds.visibleTask)!;
+    const persistence: MockTaskPersistence = {
+      read: async () => ({ task, mutationVersion: 2 }),
+      list: async () => [{ task, mutationVersion: 2 }],
+      mutate: async () => null,
+      apply: async () => ({ kind: 'invalid' }),
+    };
+    const adapter = createMockBitrixAdapter({ currentUserId: '10', taskPersistence: persistence });
+    const capabilities = await adapter.tasks.getFieldCapabilities();
+    if (!capabilities.ok) throw new Error('Missing capabilities.');
+    const catalog = createTaskChangeCatalog(capabilities.value, { kind: 'all' });
+    const { draft } = await setup([{ fieldId: 'title', kind: 'text', action: 'clear' }]);
+    const base = {
+      adapter, catalog, draft, actorAccessVersion: 1, trustedPortalOrigins: portalOrigins,
+    };
+    const targetValues = { title: task.title };
+    const stale = await buildTaskPreflight({ ...base, restoreIntents: [{
+      taskId: task.id, fieldIds: ['title'], afterVersion: 'mock:1', targetValues,
+    }] });
+    expect(stale.entries[0]).toMatchObject({ disposition: 'conflict',
+      reasonCode: 'RESTORE_VERSION_CHANGED', currentValues: null, targetValues: null });
+    expect(stale.summary).toMatchObject({ eligible: 0, conflicted: 1 });
+    const current = await buildTaskPreflight({ ...base, restoreIntents: [{
+      taskId: task.id, fieldIds: ['title'], afterVersion: 'mock:2', targetValues,
+    }] });
+    expect(current.entries[0]?.disposition).toBe('no_change');
+    expect(current.summary).toMatchObject({ eligible: 0, conflicted: 0, unchanged: 1 });
+  });
   it('checks absolute retry targets independently for every task', async () => {
     const { adapter, catalog, draft } = await setup(
       [{ fieldId: 'title', kind: 'text', action: 'set', value: 'Original relative metadata' }],

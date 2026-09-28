@@ -4,6 +4,8 @@ import {
   bulkOperationDraftSchema,
   retryDraftRecoveryAvailabilitySchema,
   retryDraftRecoverySchema,
+  restoreSourceAvailabilitySchema,
+  prepareRestoreDraftRequestSchema,
   bulkOperationSchema,
   operationProgressSchema,
   operationProgressResultsPageSchema,
@@ -442,6 +444,40 @@ export function prepareRetryOperationDraft(
     bulkOperationDraftSchema,
     signal,
     { method: 'POST', headers: jsonHeaders, body: '{}' },
+  );
+}
+
+export function getRestoreSource(
+  operationId: string,
+  signal?: AbortSignal,
+): Promise<{
+  sourceOperationId: string;
+  sourceStateVersion: number;
+  tasks: {
+    taskId: string;
+    title: string | null;
+    taskUrl: string | null;
+    appliedFieldIds: string[];
+  }[];
+}> {
+  return requestJson(
+    `/api/tasks/operations/${encodeURIComponent(operationId)}/restore-source`,
+    restoreSourceAvailabilitySchema,
+    signal,
+  );
+}
+
+export function prepareRestoreOperationDraft(
+  operationId: string,
+  selectedTaskIds: string[],
+  signal?: AbortSignal,
+): Promise<BulkOperationDraft> {
+  const parsed = prepareRestoreDraftRequestSchema.parse({ selectedTaskIds });
+  return requestJson(
+    `/api/tasks/operations/${encodeURIComponent(operationId)}/restore-draft`,
+    bulkOperationDraftSchema,
+    signal,
+    { method: 'POST', headers: jsonHeaders, body: JSON.stringify(parsed) },
   );
 }
 

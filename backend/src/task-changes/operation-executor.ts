@@ -157,10 +157,11 @@ export async function executeOperationMessage(input: {
     input.adapter ??
     createBitrixAdapter(env, { currentUserId: ownerId, portalId: message.portalId });
   const intentByTask = new Map(plan.retryIntents?.map((intent) => [intent.taskId, intent]) ?? []);
+  const restoreByTask = new Map(plan.restoreIntents?.map((intent) => [intent.taskId, intent]) ?? []);
   const requiredFieldsForTask = (taskId: string) =>
-    intentByTask.has(taskId)
+    restoreByTask.get(taskId)?.fieldIds ?? (intentByTask.has(taskId)
       ? Object.keys(intentByTask.get(taskId)?.targetValues ?? {})
-      : plan.changes.map((change) => change.fieldId);
+      : plan.changes.map((change) => change.fieldId));
   const requiredFields = [...new Set(plan.selectedTaskIds.flatMap(requiredFieldsForTask))];
   const capabilities = await adapter.tasks.getFieldCapabilities();
   if (!capabilities.ok) {
@@ -184,6 +185,8 @@ export async function executeOperationMessage(input: {
     actor.value.id !== ownerId ||
     !actor.value.isActive ||
     !accessIsCurrent(stored, accessVersion, requiredFields) ||
+    (plan.restoreIntents != null && accessVersion !== null &&
+      !stored.access?.permissions.includes('restore_operations')) ||
     (accessVersion === null && !actor.value.isAdmin)
   ) {
     await interruptBeforeStart('Доступ инициатора изменился.');
@@ -286,14 +289,15 @@ export async function executeOperationMessage(input: {
     async function record(
       entry: PreflightTaskEntry,
       claim: TaskClaim,
-      outcome: 'success' | 'partially_applied' | 'error' | 'unconfirmed' | 'conflict',
+      outcome: 'success' | 'partially_applied' | 'error' | 'unconfirmed' | 'conflict' | 'restored' | 'restore_error',
       snapshot: TaskChangeSnapshot | null,
       reasonCode: string | null,
       afterVersion?: string,
     ): Promise<void> {
       assertLease();
       const appliedFieldIds =
-        outcome === 'success' || outcome === 'partially_applied' ? claim.applied_field_ids : [];
+        outcome === 'success' || outcome === 'partially_applied' || outcome === 'restored'
+          ? claim.applied_field_ids : [];
       await settleActiveClaim();
       await consumer.record({
         portalId: message.portalId,
@@ -307,7 +311,7 @@ export async function executeOperationMessage(input: {
         requestedFieldIds: requiredFieldsForTask(entry.taskId),
         appliedFieldIds,
         failedFieldIds:
-          outcome === 'success'
+          outcome === 'success' || outcome === 'restored'
             ? []
             : outcome === 'partially_applied'
               ? entry.changedFieldIds.filter(
@@ -319,7 +323,8 @@ export async function executeOperationMessage(input: {
           ? 'Задача не была изменена или результат изменения не подтверждён.'
           : null,
         correlationId: `TC-${crypto.randomUUID()}`,
-        canRetry: outcome === 'error' || outcome === 'conflict' || outcome === 'partially_applied',
+        canRetry: outcome === 'error' || outcome === 'restore_error' ||
+          outcome === 'conflict' || outcome === 'partially_applied',
         ...(afterVersion ? { afterVersion } : {}),
       });
       progressDeadlineAt = Date.now() + 300_000;
@@ -374,6 +379,8 @@ export async function executeOperationMessage(input: {
       }
       if (
         !accessIsCurrent(currentExecution, accessVersion, taskRequiredFields) ||
+        (restoreByTask.size > 0 && accessVersion !== null &&
+          !currentExecution.access?.permissions.includes('restore_operations')) ||
         !currentActor.ok ||
         !currentActor.value.isActive ||
         currentActor.value.id !== ownerId ||
@@ -436,13 +443,16 @@ export async function executeOperationMessage(input: {
         await record(
           entry,
           claim,
-          claim.phase === 'prepared' ? 'error' : 'unconfirmed',
+          claim.phase === 'prepared'
+            ? (restoreByTask.has(entry.taskId) ? 'restore_error' : 'error')
+            : 'unconfirmed',
           null,
           claim.phase === 'prepared' ? 'TASK_UNAVAILABLE' : 'UPSTREAM_OUTCOME_UNKNOWN',
         );
         continue;
       }
       const snapshot = read.value;
+      const restoreIntent = restoreByTask.get(entry.taskId);
       if (claimResponse.disposition === 'reconcile') {
         const confirmed =
           claim.phase === 'applied' &&
@@ -454,7 +464,7 @@ export async function executeOperationMessage(input: {
           await record(
             entry,
             claim,
-            confirmed,
+            restoreIntent && confirmed === 'success' ? 'restored' : confirmed,
             snapshot,
             confirmed === 'partially_applied' ? 'PARTIALLY_APPLIED' : null,
             `mock:${claim.after_mutation_version}`,
@@ -466,6 +476,8 @@ export async function executeOperationMessage(input: {
       }
       if (
         snapshot.relevantVersion !== entry.relevantVersion ||
+        (restoreIntent && (snapshot.mutationVersion === undefined ||
+          `mock:${snapshot.mutationVersion}` !== restoreIntent.afterVersion)) ||
         snapshot.status === 'completed' ||
         snapshot.isTemplate ||
         snapshot.isRecurrenceRule ||
@@ -499,7 +511,7 @@ export async function executeOperationMessage(input: {
             );
             throw new RetryableOperationError('Target user revalidation temporarily unavailable.');
           }
-          await record(entry, claim, 'error', snapshot, 'RELATED_USER_UNAVAILABLE');
+          await record(entry, claim, restoreIntent ? 'restore_error' : 'error', snapshot, 'RELATED_USER_UNAVAILABLE');
           continue;
         }
         if (
@@ -528,7 +540,7 @@ export async function executeOperationMessage(input: {
               'Target project revalidation temporarily unavailable.',
             );
           }
-          await record(entry, claim, 'error', snapshot, 'RELATED_PROJECT_UNAVAILABLE');
+          await record(entry, claim, restoreIntent ? 'restore_error' : 'error', snapshot, 'RELATED_PROJECT_UNAVAILABLE');
           continue;
         }
         if (projects.value.length !== 1 || projects.value[0]?.state !== 'available') {
@@ -545,7 +557,8 @@ export async function executeOperationMessage(input: {
         taskId: entry.taskId,
         beforeVersion,
         values: Object.fromEntries(
-          entry.changedFieldIds.map((fieldId) => [fieldId, snapshot.values[fieldId]]),
+          entry.changedFieldIds.map((fieldId) => [fieldId,
+            Object.hasOwn(snapshot.values, fieldId) ? snapshot.values[fieldId] : null]),
         ),
       });
       assertLease();
@@ -624,7 +637,7 @@ export async function executeOperationMessage(input: {
           await record(
             entry,
             afterClaim,
-            confirmed,
+            restoreIntent && confirmed === 'success' ? 'restored' : confirmed,
             read.value,
             confirmed === 'partially_applied' ? 'PARTIALLY_APPLIED' : null,
             `mock:${afterClaim.after_mutation_version}`,
@@ -650,7 +663,7 @@ export async function executeOperationMessage(input: {
           applied.failure.kind === 'not_found_or_forbidden' ||
           applied.failure.kind === 'unsupported_capability')
       ) {
-        await record(entry, afterClaim, 'error', snapshot, 'TASK_WRITE_REJECTED');
+        await record(entry, afterClaim, restoreIntent ? 'restore_error' : 'error', snapshot, 'TASK_WRITE_REJECTED');
       } else {
         await record(entry, afterClaim, 'unconfirmed', snapshot, 'UPSTREAM_OUTCOME_UNKNOWN');
       }

@@ -17,6 +17,7 @@ import {
   type TaskOutcome,
   type TaskOutcomeRefinement,
   type RetryTaskIntent,
+  type RestoreTaskIntentMetadata,
   type UserAccess,
   type OperationAuditReasonCode,
 } from '@task-commander/contracts';
@@ -417,6 +418,9 @@ function mapDraft(row: DatabaseTable<'operation_draft'>): BulkOperationDraft {
     retry_source_operation_id?: string | null;
     retry_source_state_version?: number | null;
     retry_intents?: Json | null;
+    restore_source_operation_id?: string | null;
+    restore_source_state_version?: number | null;
+    restore_intents?: Json | null;
   };
   const filterSnapshot =
     row.filter_snapshot === null
@@ -434,6 +438,9 @@ function mapDraft(row: DatabaseTable<'operation_draft'>): BulkOperationDraft {
     retrySourceOperationId: retry.retry_source_operation_id ?? null,
     retrySourceStateVersion: retry.retry_source_state_version ?? null,
     retryIntents: retry.retry_intents ?? null,
+    restoreSourceOperationId: retry.restore_source_operation_id ?? null,
+    restoreSourceStateVersion: retry.restore_source_state_version ?? null,
+    restoreIntents: retry.restore_intents ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     expiresAt: row.expires_at,
@@ -759,6 +766,134 @@ export class TaskCommanderRepositories {
       }),
     );
     return mapDraft(row as unknown as OperationDraftRow);
+  }
+
+  public async readRestoreSource(context: DataAccessContext, operationId: string): Promise<{
+    operationId: string;
+    ownerId: string;
+    stateVersion: number;
+    tasks: Array<{
+      taskId: string; title: string | null; taskUrl: string | null;
+      appliedFieldIds: string[]; ciphertext: string; nonce: string;
+      keyVersion: string; payloadVersion: number; beforeVersion: string; afterVersion: string;
+    }>;
+  }> {
+    requireRepositoryPermission(context, 'restore_operations');
+    getReportVisibility(context);
+    const rpc = this.client.rpc.bind(this.client) as unknown as (
+      name: 'read_restore_source', args: Record<string, unknown>,
+    ) => PromiseLike<{ data: Json | null; error: unknown | null }>;
+    const value = await requireData(rpc('read_restore_source', {
+      p_portal_id: context.portalId, p_actor_id: context.actorId,
+      p_source_id: operationId, p_access_version: context.accessVersion,
+      p_is_bitrix_admin: context.isBitrixAdmin,
+    }));
+    return z.object({
+      operationId: z.string().uuid(), ownerId: bitrixIdSchema,
+      stateVersion: z.number().int().positive(),
+      tasks: z.array(z.object({
+        taskId: bitrixIdSchema, title: z.string().nullable(), taskUrl: z.string().nullable(),
+        appliedFieldIds: z.array(z.string()).min(1), ciphertext: z.string(), nonce: z.string(),
+        keyVersion: z.string(), payloadVersion: z.number().int().positive(),
+        beforeVersion: z.string(), afterVersion: z.string(),
+      }).strict()).max(1000),
+    }).strict().parse(value);
+  }
+
+  public async saveRestoreDraft(context: DataAccessContext, input: {
+    draftId: string; sourceOperationId: string; sourceStateVersion: number;
+    selectedTaskIds: string[]; changes: Json; intents: RestoreTaskIntentMetadata[];
+    encryptedIntents: { ciphertext: string; nonce: string };
+  }): Promise<BulkOperationDraft> {
+    requireRepositoryPermission(context, 'restore_operations');
+    const rpc = this.client.rpc.bind(this.client) as unknown as (
+      name: 'save_restore_operation_draft', args: Record<string, unknown>,
+    ) => PromiseLike<{ data: Json | null; error: unknown | null }>;
+    const row = await requireData(rpc('save_restore_operation_draft', {
+      p_portal_id: context.portalId, p_owner_id: context.actorId,
+      p_draft_id: input.draftId, p_source_id: input.sourceOperationId,
+      p_source_state_version: input.sourceStateVersion,
+      p_access_version: context.accessVersion, p_is_bitrix_admin: context.isBitrixAdmin,
+      p_selected_task_ids: input.selectedTaskIds, p_changes: input.changes,
+      p_intents: input.intents as Json,
+      p_ciphertext: input.encryptedIntents.ciphertext,
+      p_nonce: input.encryptedIntents.nonce,
+    }));
+    return mapDraft(row as unknown as OperationDraftRow);
+  }
+
+  public async readPrivateRestoreDraft(context: DataAccessContext, draftId: string): Promise<{
+    intentCiphertext: string; intentNonce: string; previewCiphertext: string | null;
+    previewNonce: string | null; previewRevision: number | null;
+    previewFingerprint: string | null; keyVersion: string;
+  }> {
+    requireRepositoryPermission(context, 'restore_operations');
+    const rpc = this.client.rpc.bind(this.client) as unknown as (
+      name: 'read_private_restore_draft', args: Record<string, unknown>,
+    ) => PromiseLike<{ data: Json | null; error: unknown | null }>;
+    const value = await requireData(rpc('read_private_restore_draft', {
+      p_portal_id: context.portalId, p_owner_id: context.actorId,
+      p_draft_id: draftId, p_access_version: context.accessVersion,
+      p_is_bitrix_admin: context.isBitrixAdmin,
+    }));
+    return z.object({
+      intentCiphertext: z.string(), intentNonce: z.string(),
+      previewCiphertext: z.string().nullable(), previewNonce: z.string().nullable(),
+      previewRevision: z.number().int().positive().nullable(),
+      previewFingerprint: z.string().nullable(), keyVersion: z.string(),
+    }).strict().parse(value);
+  }
+
+  public async saveRestorePreflight(context: DataAccessContext, input: {
+    draftId: string; expectedRevision: number; safeSnapshot: Json;
+    encryptedPreview: { ciphertext: string; nonce: string };
+    fullFingerprint: string;
+  }): Promise<BulkOperationDraft> {
+    requireRepositoryPermission(context, 'restore_operations');
+    const rpc = this.client.rpc.bind(this.client) as unknown as (
+      name: 'save_restore_preflight', args: Record<string, unknown>,
+    ) => PromiseLike<{ data: Json | null; error: unknown | null }>;
+    const row = await requireData(rpc('save_restore_preflight', {
+      p_portal_id: context.portalId, p_owner_id: context.actorId,
+      p_draft_id: input.draftId, p_expected_revision: input.expectedRevision,
+      p_access_version: context.accessVersion, p_is_bitrix_admin: context.isBitrixAdmin,
+      p_safe_snapshot: input.safeSnapshot,
+      p_ciphertext: input.encryptedPreview.ciphertext,
+      p_nonce: input.encryptedPreview.nonce, p_fingerprint: input.fullFingerprint,
+    }));
+    return mapDraft(row as unknown as OperationDraftRow);
+  }
+
+  public async launchConfirmedRestorePreflight(context: DataAccessContext, input: {
+    displayName: string; draftId: string; draftRevision: number; checkedAt: string;
+    token: string | null; safeSnapshot: Json; safeFingerprint: string;
+    fullFingerprint: string;
+    encryptedPlan: { ciphertext: string; nonce: string; keyVersion: string } | null;
+    correlationId: string;
+  }): Promise<CreatedOperation> {
+    requireRepositoryPermission(context, 'restore_operations');
+    const rpc = this.client.rpc.bind(this.client) as unknown as (
+      name: 'launch_confirmed_restore_preflight', args: Record<string, unknown>,
+    ) => PromiseLike<{ data: Json | null; error: unknown | null }>;
+    const value = await requireData(rpc('launch_confirmed_restore_preflight', {
+      p_portal_id: context.portalId, p_owner_id: context.actorId,
+      p_display_name: input.displayName, p_draft_id: input.draftId,
+      p_draft_revision: input.draftRevision, p_checked_at: input.checkedAt,
+      p_token: input.token, p_access_version: context.accessVersion,
+      p_is_bitrix_admin: context.isBitrixAdmin,
+      p_safe_snapshot: input.safeSnapshot,
+      p_snapshot_fingerprint: input.safeFingerprint,
+      p_full_fingerprint: input.fullFingerprint,
+      p_ciphertext: input.encryptedPlan?.ciphertext ?? null,
+      p_nonce: input.encryptedPlan?.nonce ?? null,
+      p_key_version: input.encryptedPlan?.keyVersion ?? null,
+      p_correlation_id: input.correlationId,
+    }));
+    const result = parseOperationCommand(value);
+    if (!result.operation || !['created','existing'].includes(result.disposition)) {
+      throw toOperationCommandError(result.reasonCode);
+    }
+    return { disposition: result.disposition as 'created' | 'existing', operation: result.operation };
   }
 
   public async getRetryDraftRecovery(

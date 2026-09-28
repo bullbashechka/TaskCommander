@@ -6,9 +6,38 @@ import {
   decryptExecutionPlan,
   encryptExecutionPlan,
   encryptPreviousValues,
+  decryptPreviousValues,
+  encryptPrivateRestoreData,
+  decryptPrivateRestoreData,
 } from '../src/task-changes/execution-plan';
 
 describe('private operation execution plan', () => {
+  it('preserves empty and falsy restore values and binds both encrypted payloads to their owners', async () => {
+    const keyBase64 = btoa(String.fromCharCode(...new Uint8Array(32).fill(27)));
+    const sourceIdentity = {
+      keyBase64, portalId: 'portal-1', ownerId: '8001',
+      operationId: '20000000-0000-4000-8000-000000000025', taskId: '42',
+      beforeVersion: 'mock:4',
+    };
+    const values = { title: '', tags: [], description: null, priority: 0, isImportant: false };
+    const protectedValues = await encryptPreviousValues({ ...sourceIdentity, values });
+    expect(await decryptPreviousValues({ ...sourceIdentity, ...protectedValues })).toEqual(values);
+    await expect(decryptPreviousValues({ ...sourceIdentity, ownerId: '8002', ...protectedValues }))
+      .rejects.toThrow();
+    const draftIdentity = {
+      keyBase64, portalId: 'portal-1', ownerId: '8002',
+      draftId: '10000000-0000-4000-8000-000000000025',
+      sourceOperationId: sourceIdentity.operationId, sourceStateVersion: 3,
+      revision: 1, purpose: 'intents' as const,
+    };
+    const intents = [{ taskId: '42', fieldIds: Object.keys(values), afterVersion: 'mock:5',
+      targetValues: values }];
+    const encrypted = await encryptPrivateRestoreData({ ...draftIdentity, value: intents });
+    expect(encrypted.ciphertext).not.toContain('description');
+    expect(await decryptPrivateRestoreData({ ...draftIdentity, ...encrypted })).toEqual(intents);
+    await expect(decryptPrivateRestoreData({ ...draftIdentity, ownerId: '8001', ...encrypted }))
+      .rejects.toThrow();
+  });
   it('keeps distinct per-task absolute retry targets inside the encrypted plan', async () => {
     const keyBase64 = btoa(String.fromCharCode(...new Uint8Array(32).fill(31)));
     const draft = {

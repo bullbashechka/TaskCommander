@@ -407,6 +407,17 @@ export function OperationProgressPage({ operationId }: { operationId?: string })
       summary.notProcessed >
       0,
   );
+  const canPrepareRestore = Boolean(
+    app &&
+    canStartBulkChange(app) &&
+    app.access.permissions.includes('restore_operations') &&
+    (operation.initiatorId === app.principal.userId
+      ? app.access.permissions.includes('view_own_reports')
+      : app.access.permissions.includes('view_all_reports')) &&
+    terminal.has(operation.status) &&
+    operation.status !== 'launch_failed' &&
+    summary.successful + summary.partiallyApplied > 0,
+  );
   return (
     <div className="page-content">
       <nav aria-label="Хлебные крошки" className="breadcrumbs">
@@ -499,6 +510,12 @@ export function OperationProgressPage({ operationId }: { operationId?: string })
             params={{ operationId: operation.id }}
           >
             Повторить отдельные задачи
+          </Link>
+        ) : null}
+        {canPrepareRestore ? (
+          <Link className="button-secondary" to="/operations/$operationId/restore"
+            params={{ operationId: operation.id }}>
+            Восстановить предыдущие значения
           </Link>
         ) : null}
       </Card>
