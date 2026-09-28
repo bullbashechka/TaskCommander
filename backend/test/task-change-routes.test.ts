@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   bulkOperationDraftAvailabilitySchema,
   bulkOperationDraftSchema,
+  bulkOperationSchema,
   taskChangeCatalogResponseSchema,
   preflightPreviewSchema,
   taskPreflightConfirmationSchema,
@@ -21,6 +22,7 @@ const environment = {
   APP_ENV: 'local',
   APP_ORIGIN: 'https://example.test',
   BITRIX_PORTAL_ORIGIN: 'https://portal.bitrix24.ru',
+  OPERATION_PLAN_KEY_V1: btoa('k'.repeat(32)),
   ACCESS_FANOUT_RATE_LIMITER: { limit: vi.fn().mockResolvedValue({ success: true }) },
 };
 
@@ -32,7 +34,13 @@ const headers = {
 };
 
 async function setup(input?: {
-  permissions?: ('app_access' | 'run_bulk_operations' | 'change_allowed_fields')[];
+  permissions?: (
+    | 'app_access'
+    | 'run_bulk_operations'
+    | 'change_allowed_fields'
+    | 'view_own_reports'
+    | 'retry_operations'
+  )[];
   allowedFieldIds?: string[];
   saveError?: DataAccessError;
   includeForbiddenCapabilities?: boolean;
@@ -121,6 +129,12 @@ async function setup(input?: {
     saveDraft,
     saveTaskPreflight,
     confirmTaskPreflight,
+    findOperationByLaunchKey: vi.fn().mockResolvedValue(null),
+    readConfirmedOperationReceipt: vi.fn(),
+    launchConfirmedTaskPreflight: vi.fn(),
+    claimOperationLaunchDispatch: vi.fn().mockResolvedValue(null),
+    completeOperationLaunchDispatch: vi.fn(),
+    retryConfirmedOperationLaunch: vi.fn(),
   };
   const adapterFactory = vi.fn((_env: unknown, adapterInput: { currentUserId: string }) => {
     const adapter = createMockBitrixAdapter({ currentUserId: adapterInput.currentUserId });
@@ -178,6 +192,7 @@ async function setup(input?: {
   });
   return {
     api,
+    repository,
     adapterFactory,
     getCurrentDraft,
     getCurrentDraftForPreflight,
@@ -636,5 +651,248 @@ describe('task change routes', () => {
     expect(response.status).toBe(429);
     expect(getCurrentDraftForPreflight).not.toHaveBeenCalled();
     expect(confirmTaskPreflight).not.toHaveBeenCalled();
+  });
+
+  it('launches the saved snapshot once and replays an owner-scoped operation without a draft', async () => {
+    const first = await setup({ currentDraft });
+    const firstResponse = await first.api.request(
+      'https://example.test/api/tasks/preflight',
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ draftId: currentDraft.id, expectedRevision: 3 }),
+      },
+      environment,
+    );
+    const preview = preflightPreviewSchema.parse(await firstResponse.json());
+    const saved = await setup({
+      currentDraft: { ...currentDraft, revision: 4, status: 'awaiting_confirmation' },
+      currentPreflightSnapshot: preview as unknown as Json,
+    });
+    const operation = bulkOperationSchema.parse({
+      id: '323e4567-e89b-42d3-a456-426614174000',
+      type: 'bulk_change',
+      status: 'launching',
+      stateVersion: 1,
+      launchAttempt: 1,
+      initiatorId: '10',
+      sourceOperationId: null,
+      createdAt: new Date().toISOString(),
+      startedAt: null,
+      completedAt: null,
+      cancelRequestedAt: null,
+      interruptionRequestedAt: null,
+      interruptionReasonCode: null,
+      summary: {
+        selected: preview.summary.selected,
+        eligible: preview.summary.eligible,
+        excluded: preview.summary.excluded,
+        unchanged: preview.summary.unchanged,
+        successful: 0,
+        failed: 0,
+        unconfirmed: 0,
+        conflicted: 0,
+        partiallyApplied: 0,
+        notProcessed: 0,
+      },
+    });
+    vi.mocked(saved.repository.launchConfirmedTaskPreflight).mockResolvedValue({
+      disposition: 'created',
+      operation,
+    });
+    vi.mocked(saved.repository.readConfirmedOperationReceipt).mockResolvedValue(operation);
+    const body = JSON.stringify({
+      draftId: currentDraft.id,
+      draftRevision: 4,
+      checkedAt: preview.checkedAt,
+      token: '223e4567-e89b-42d3-a456-426614174000',
+    });
+    const response = await saved.api.request(
+      'https://example.test/api/tasks/preflight/launch',
+      {
+        method: 'POST',
+        headers,
+        body,
+      },
+      environment,
+    );
+    expect(response.status).toBe(200);
+    expect(saved.repository.launchConfirmedTaskPreflight).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        token: '223e4567-e89b-42d3-a456-426614174000',
+        preflightSnapshot: preview,
+        encryptedPlan: expect.objectContaining({ keyVersion: 'v1' }),
+      }),
+    );
+    vi.mocked(saved.repository.findOperationByLaunchKey).mockResolvedValue(operation);
+    vi.mocked(saved.repository.getCurrentDraftForPreflight).mockClear();
+    const replay = await saved.api.request(
+      'https://example.test/api/tasks/preflight/launch',
+      {
+        method: 'POST',
+        headers,
+        body,
+      },
+      environment,
+    );
+    expect(replay.status).toBe(200);
+    expect(((await replay.json()) as { id: string }).id).toBe(operation.id);
+    expect(saved.repository.getCurrentDraftForPreflight).not.toHaveBeenCalled();
+    expect(saved.repository.launchConfirmedTaskPreflight).toHaveBeenCalledTimes(1);
+  });
+
+  it('requires retry permission and returns an owner receipt after republishing the same operation', async () => {
+    const forbidden = await setup();
+    const operationId = '323e4567-e89b-42d3-a456-426614174000';
+    const url = `https://example.test/api/tasks/operations/${operationId}/retry-launch`;
+    const denied = await forbidden.api.request(
+      url,
+      { method: 'POST', headers, body: '{}' },
+      environment,
+    );
+    expect(denied.status).toBe(403);
+    expect(forbidden.repository.retryConfirmedOperationLaunch).not.toHaveBeenCalled();
+
+    const authorized = await setup({
+      permissions: [
+        'app_access',
+        'run_bulk_operations',
+        'change_allowed_fields',
+        'view_own_reports',
+        'retry_operations',
+      ],
+    });
+    const operation = bulkOperationSchema.parse({
+      id: operationId,
+      type: 'bulk_change',
+      status: 'launching',
+      stateVersion: 3,
+      launchAttempt: 2,
+      initiatorId: '10',
+      sourceOperationId: null,
+      createdAt: new Date().toISOString(),
+      startedAt: null,
+      completedAt: null,
+      cancelRequestedAt: null,
+      interruptionRequestedAt: null,
+      interruptionReasonCode: null,
+      summary: {
+        selected: 1,
+        eligible: 1,
+        excluded: 0,
+        unchanged: 0,
+        successful: 0,
+        failed: 0,
+        unconfirmed: 0,
+        conflicted: 0,
+        partiallyApplied: 0,
+        notProcessed: 0,
+      },
+    });
+    vi.mocked(authorized.repository.retryConfirmedOperationLaunch).mockResolvedValue({
+      disposition: 'applied',
+      operation,
+    });
+    vi.mocked(authorized.repository.readConfirmedOperationReceipt).mockResolvedValue(operation);
+    vi.mocked(authorized.repository.claimOperationLaunchDispatch).mockResolvedValue({
+      operation_id: operationId,
+      portal_id: 'portal-1',
+      launch_attempt: 2,
+      message_id: '423e4567-e89b-42d3-a456-426614174000',
+      status: 'sending',
+      created_at: new Date().toISOString(),
+      dispatched_at: null,
+      claim_id: '523e4567-e89b-42d3-a456-426614174000',
+    });
+    const send = vi.fn().mockResolvedValue(undefined);
+    const published = await authorized.api.request(
+      url,
+      { method: 'POST', headers, body: '{}' },
+      { ...environment, OPERATIONS_QUEUE: { send } as unknown as Queue },
+    );
+    expect(published.status).toBe(200);
+    expect((await published.json()) as { id: string; launchAttempt: number }).toMatchObject({
+      id: operationId,
+      launchAttempt: 2,
+    });
+    expect(authorized.repository.retryConfirmedOperationLaunch).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ operationId, launchAttempt: 2 }));
+    expect(authorized.repository.completeOperationLaunchDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ sent: true }),
+    );
+  });
+
+  it('returns launch_failed after a retry publication error', async () => {
+    const saved = await setup({
+      permissions: [
+        'app_access',
+        'run_bulk_operations',
+        'change_allowed_fields',
+        'view_own_reports',
+        'retry_operations',
+      ],
+    });
+    const operationId = '323e4567-e89b-42d3-a456-426614174000';
+    const operation = bulkOperationSchema.parse({
+      id: operationId,
+      type: 'bulk_change',
+      status: 'launching',
+      stateVersion: 3,
+      launchAttempt: 2,
+      initiatorId: '10',
+      sourceOperationId: null,
+      createdAt: new Date().toISOString(),
+      startedAt: null,
+      completedAt: null,
+      cancelRequestedAt: null,
+      interruptionRequestedAt: null,
+      interruptionReasonCode: null,
+      summary: {
+        selected: 1,
+        eligible: 1,
+        excluded: 0,
+        unchanged: 0,
+        successful: 0,
+        failed: 0,
+        unconfirmed: 0,
+        conflicted: 0,
+        partiallyApplied: 0,
+        notProcessed: 0,
+      },
+    });
+    vi.mocked(saved.repository.retryConfirmedOperationLaunch).mockResolvedValue({
+      disposition: 'applied',
+      operation,
+    });
+    vi.mocked(saved.repository.readConfirmedOperationReceipt).mockResolvedValue({
+      ...operation,
+      status: 'launch_failed',
+      completedAt: new Date().toISOString(),
+    });
+    vi.mocked(saved.repository.claimOperationLaunchDispatch).mockResolvedValue({
+      operation_id: operationId,
+      portal_id: 'portal-1',
+      launch_attempt: 2,
+      message_id: '423e4567-e89b-42d3-a456-426614174000',
+      status: 'sending',
+      created_at: new Date().toISOString(),
+      dispatched_at: null,
+      claim_id: '523e4567-e89b-42d3-a456-426614174000',
+    });
+    const send = vi.fn().mockRejectedValue(new Error('Queue unavailable'));
+    const response = await saved.api.request(
+      `https://example.test/api/tasks/operations/${operationId}/retry-launch`,
+      { method: 'POST', headers, body: '{}' },
+      { ...environment, OPERATIONS_QUEUE: { send } as unknown as Queue },
+    );
+    expect(response.status).toBe(200);
+    expect((await response.json()) as { id: string; status: string }).toMatchObject({
+      id: operationId,
+      status: 'launch_failed',
+    });
+    expect(saved.repository.completeOperationLaunchDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ sent: false }),
+    );
   });
 });

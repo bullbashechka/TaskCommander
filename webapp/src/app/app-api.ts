@@ -2,7 +2,9 @@ import {
   apiErrorResponseSchema,
   bulkOperationDraftAvailabilitySchema,
   bulkOperationDraftSchema,
+  bulkOperationSchema,
   confirmTaskPreflightRequestSchema,
+  launchTaskPreflightRequestSchema,
   preflightPreviewSchema,
   correlationIdSchema,
   effectiveAccessResponseSchema,
@@ -21,8 +23,10 @@ import {
   taskSelectAllApiResponseSchema,
   type ApiErrorCode,
   type BulkOperationDraft,
+  type BulkOperation,
   type BulkOperationDraftAvailability,
   type ConfirmTaskPreflightRequest,
+  type LaunchTaskPreflightRequest,
   type PreflightPreview,
   type TaskPreflightConfirmation,
   type EffectiveAccessResponse,
@@ -367,6 +371,34 @@ export function confirmTaskPreflight(
     headers: jsonHeaders,
     body: JSON.stringify(parsed),
   });
+}
+
+export function launchTaskPreflight(
+  input: LaunchTaskPreflightRequest,
+  signal?: AbortSignal,
+): Promise<BulkOperation> {
+  const parsed = launchTaskPreflightRequestSchema.parse(input);
+  return requestJson('/api/tasks/preflight/launch', bulkOperationSchema, signal, {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(parsed),
+  });
+}
+
+export function retryTaskOperationLaunch(
+  operationId: string,
+  signal?: AbortSignal,
+): Promise<BulkOperation> {
+  return requestJson(
+    `/api/tasks/operations/${encodeURIComponent(operationId)}/retry-launch`,
+    bulkOperationSchema,
+    signal,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: '{}',
+    },
+  );
 }
 
 export function listSavedTaskFilters(signal?: AbortSignal): Promise<SavedTaskFilter[]> {

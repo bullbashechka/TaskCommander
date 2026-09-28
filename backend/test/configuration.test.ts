@@ -77,6 +77,7 @@ describe('local identity configuration', () => {
       BITRIX_FRAME_ANCESTORS: 'https://portal.bitrix24.ru',
       BITRIX_MEDIA_ALLOWED_ORIGINS: 'https://portal.bitrix24.ru',
       INTERNAL_READINESS_TOKEN: 'test-readiness-token-000000000000000001',
+      OPERATION_PLAN_KEY_V1: btoa('k'.repeat(32)),
       SESSION_RATE_LIMITER: rateLimiter,
       PROBE_RATE_LIMITER: rateLimiter,
       ACCESS_FANOUT_RATE_LIMITER: rateLimiter,
@@ -92,6 +93,12 @@ describe('local identity configuration', () => {
       cron: 'ready',
       bitrix: 'invalid_configuration',
     });
+    expect(getRuntimeReadiness({ ...baseline, OPERATION_PLAN_KEY_V1: '' }).subsystems.runtime).toBe(
+      'invalid_configuration',
+    );
+    expect(
+      getRuntimeReadiness({ ...baseline, OPERATION_PLAN_KEY_V1: 'invalid' }).subsystems.runtime,
+    ).toBe('invalid_configuration');
     expect(
       getRuntimeReadiness({
         ...baseline,

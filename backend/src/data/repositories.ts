@@ -227,6 +227,17 @@ export interface CreatedOperation {
   operation: BulkOperation;
 }
 
+export interface OperationLaunchDispatch {
+  operation_id: string;
+  portal_id: string;
+  launch_attempt: number;
+  message_id: string;
+  status: string;
+  created_at: string;
+  dispatched_at: string | null;
+  claim_id: string | null;
+}
+
 export interface OperationCommandResult {
   disposition: 'applied' | 'already_applied';
   operation: BulkOperation;
@@ -759,6 +770,158 @@ export class TaskCommanderRepositories {
     );
   }
 
+  public async launchConfirmedTaskPreflight(
+    context: DataAccessContext,
+    input: {
+      displayName: string;
+      draftId: string;
+      draftRevision: number;
+      checkedAt: string;
+      token: string | null;
+      preflightSnapshot: Json;
+      snapshotFingerprint: string;
+      encryptedPlan: { ciphertext: string; nonce: string; keyVersion: string } | null;
+      correlationId: string;
+    },
+  ): Promise<CreatedOperation> {
+    requireRepositoryPermission(context, 'run_bulk_operations');
+    const rpc = this.client.rpc.bind(this.client) as unknown as (
+      name: 'launch_confirmed_task_preflight',
+      args: Record<string, unknown>,
+    ) => PromiseLike<{ data: Json | null; error: unknown | null }>;
+    const payload = await requireData(
+      rpc('launch_confirmed_task_preflight', {
+        p_portal_id: context.portalId,
+        p_owner_id: context.actorId,
+        p_display_name: input.displayName,
+        p_draft_id: input.draftId,
+        p_draft_revision: input.draftRevision,
+        p_checked_at: input.checkedAt,
+        p_token: input.token,
+        p_expected_access_version: context.accessVersion,
+        p_is_bitrix_admin: context.isBitrixAdmin,
+        p_preflight_snapshot: input.preflightSnapshot,
+        p_snapshot_fingerprint: input.snapshotFingerprint,
+        p_ciphertext: input.encryptedPlan?.ciphertext ?? null,
+        p_nonce: input.encryptedPlan?.nonce ?? null,
+        p_key_version: input.encryptedPlan?.keyVersion ?? null,
+        p_correlation_id: input.correlationId,
+      }),
+    );
+    const result = parseOperationCommand(payload);
+    if (!result.operation || !['created', 'existing'].includes(result.disposition)) {
+      throw toOperationCommandError(result.reasonCode);
+    }
+    return {
+      disposition: result.disposition as 'created' | 'existing',
+      operation: result.operation,
+    };
+  }
+
+  public async findOperationByLaunchKey(
+    context: DataAccessContext,
+    key: string,
+    expected: { draftId: string; draftRevision: number; checkedAt: string },
+  ): Promise<BulkOperation | null> {
+    requireRepositoryPermission(context, 'run_bulk_operations');
+    const { data, error } = await this.client
+      .from('bulk_operation')
+      .select('*')
+      .eq('portal_id', context.portalId)
+      .eq('initiator_id', context.actorId)
+      .eq('idempotency_key', key)
+      .maybeSingle();
+    if (error) throw toDataAccessError(error);
+    if (data) {
+      const metadata = data.preflight_snapshot;
+      if (
+        !metadata ||
+        typeof metadata !== 'object' ||
+        Array.isArray(metadata) ||
+        metadata.draftId !== expected.draftId ||
+        metadata.draftRevision !== expected.draftRevision ||
+        metadata.checkedAt !== expected.checkedAt
+      ) {
+        throw new DataAccessError('CONFLICT', false);
+      }
+    }
+    return data ? mapOperation(data) : null;
+  }
+
+  public async readConfirmedOperationReceipt(
+    context: DataAccessContext,
+    operationId: string,
+  ): Promise<BulkOperation> {
+    requireRepositoryPermission(context, 'run_bulk_operations');
+    const rpc = this.client.rpc.bind(this.client) as unknown as (
+      name: 'read_confirmed_operation_receipt',
+      args: Record<string, unknown>,
+    ) => PromiseLike<{ data: Json | null; error: unknown | null }>;
+    const row = await requireData(
+      rpc('read_confirmed_operation_receipt', {
+        p_portal_id: context.portalId,
+        p_owner_id: context.actorId,
+        p_operation_id: operationId,
+      }),
+    );
+    return mapOperation(row as unknown as OperationRow);
+  }
+
+  public async claimOperationLaunchDispatch(
+    portalId: string,
+    operationId: string,
+  ): Promise<OperationLaunchDispatch | null> {
+    const rpc = this.client.rpc.bind(this.client) as unknown as (
+      name: 'claim_operation_launch_dispatch',
+      args: Record<string, unknown>,
+    ) => PromiseLike<{ data: Json | null; error: unknown | null }>;
+    const { data, error } = await rpc('claim_operation_launch_dispatch', {
+      p_portal_id: portalId,
+      p_operation_id: operationId,
+    });
+    if (error) throw toDataAccessError(error);
+    return data as OperationLaunchDispatch | null;
+  }
+
+  public async listRecoverableOperationDispatches(
+    limit: number,
+  ): Promise<OperationLaunchDispatch[]> {
+    const rpc = this.client.rpc.bind(this.client) as unknown as (
+      name: 'list_recoverable_operation_dispatches',
+      args: Record<string, unknown>,
+    ) => PromiseLike<{ data: Json | null; error: unknown | null }>;
+    const data = await requireData(
+      rpc('list_recoverable_operation_dispatches', { p_limit: limit }),
+    );
+    return data as OperationLaunchDispatch[];
+  }
+
+  public async completeOperationLaunchDispatch(input: {
+    portalId: string;
+    operationId: string;
+    launchAttempt: number;
+    messageId: string;
+    claimId: string;
+    sent: boolean;
+    correlationId: string;
+  }): Promise<void> {
+    const rpc = this.client.rpc.bind(this.client) as unknown as (
+      name: 'complete_operation_launch_dispatch',
+      args: Record<string, unknown>,
+    ) => PromiseLike<{ data: Json | null; error: unknown | null }>;
+    await requireData(
+      rpc('complete_operation_launch_dispatch', {
+        p_portal_id: input.portalId,
+        p_operation_id: input.operationId,
+        p_launch_attempt: input.launchAttempt,
+        p_message_id: input.messageId,
+        p_claim_id: input.claimId,
+        p_sent: input.sent,
+        p_correlation_id: input.correlationId,
+      }),
+    );
+  }
+
   public async createOperation(
     context: DataAccessContext,
     input: CreateOperationInput,
@@ -918,6 +1081,30 @@ export class TaskCommanderRepositories {
         p_portal_id: context.portalId,
         p_operation_id: operation.id,
         p_correlation_id: input.correlationId,
+      }),
+    );
+    return this.resolveOperationCommand(payload);
+  }
+
+  public async retryConfirmedOperationLaunch(
+    context: DataAccessContext,
+    operationId: string,
+    correlationId: string,
+  ): Promise<OperationCommandResult> {
+    requireRepositoryPermission(context, 'run_bulk_operations');
+    requireRepositoryPermission(context, 'retry_operations');
+    const rpc = this.client.rpc.bind(this.client) as unknown as (
+      name: 'retry_confirmed_operation_launch',
+      args: Record<string, unknown>,
+    ) => PromiseLike<{ data: Json | null; error: unknown | null }>;
+    const payload = await requireData(
+      rpc('retry_confirmed_operation_launch', {
+        p_portal_id: context.portalId,
+        p_owner_id: context.actorId,
+        p_operation_id: operationId,
+        p_correlation_id: correlationId,
+        p_expected_access_version: context.accessVersion,
+        p_is_bitrix_admin: context.isBitrixAdmin,
       }),
     );
     return this.resolveOperationCommand(payload);

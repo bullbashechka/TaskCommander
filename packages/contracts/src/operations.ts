@@ -204,6 +204,12 @@ export const taskPreflightConfirmationSchema = z
   })
   .strict();
 
+export const launchTaskPreflightRequestSchema = confirmTaskPreflightRequestSchema
+  .extend({
+    token: z.string().uuid().nullable(),
+  })
+  .strict();
+
 export const preflightPreviewSchema = z
   .object({
     draftId: draftIdSchema,
@@ -383,6 +389,7 @@ export type SaveBulkOperationDraftRequest = z.infer<typeof saveBulkOperationDraf
 export type TaskPreflightRequest = z.infer<typeof taskPreflightRequestSchema>;
 export type ConfirmTaskPreflightRequest = z.infer<typeof confirmTaskPreflightRequestSchema>;
 export type TaskPreflightConfirmation = z.infer<typeof taskPreflightConfirmationSchema>;
+export type LaunchTaskPreflightRequest = z.infer<typeof launchTaskPreflightRequestSchema>;
 export type PreflightTaskEntry = z.infer<typeof preflightTaskEntrySchema>;
 export type PreflightPreview = z.infer<typeof preflightPreviewSchema>;
 export type BulkOperation = z.infer<typeof bulkOperationSchema>;

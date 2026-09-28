@@ -1,4 +1,5 @@
 import { dispatchPendingAccessCommands } from './access-management/dispatch';
+import { dispatchPendingOperationLaunches } from './task-changes/dispatch';
 import { runAutomaticAccessReconciliation } from './access-management/automatic-revocation';
 import { api } from './api';
 import { hasLocalRuntimeConfiguration } from './runtime/configuration';
@@ -28,6 +29,7 @@ const worker: ExportedHandler<ApiEnvironment> = {
     context.waitUntil(
       Promise.allSettled([
         dispatchPendingAccessCommands(env),
+        dispatchPendingOperationLaunches(env),
         runAutomaticAccessReconciliation(env),
       ]).then((results) => {
         for (const result of results) {

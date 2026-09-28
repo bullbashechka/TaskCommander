@@ -1,15 +1,20 @@
 import { Hono } from 'hono';
+import { z } from 'zod';
 
 import {
   bulkOperationDraftAvailabilitySchema,
   bulkOperationDraftSchema,
   confirmTaskPreflightRequestSchema,
+  launchTaskPreflightRequestSchema,
+  operationIdSchema,
+  bulkOperationSchema,
   preflightPreviewSchema,
   saveBulkOperationDraftRequestSchema,
   taskChangeCatalogResponseSchema,
   taskPreflightRequestSchema,
   taskPreflightConfirmationSchema,
   type BulkOperationDraft,
+  type BulkOperation,
   type PreflightPreview,
 } from '@task-commander/contracts';
 
@@ -41,6 +46,8 @@ import {
   requireValidBulkChanges,
 } from './catalog';
 import { buildTaskPreflight, TaskPreflightError } from './preflight';
+import { encryptExecutionPlan } from './execution-plan';
+import { dispatchOperationLaunch } from './dispatch';
 
 export type TaskChangeRepository = Readonly<{
   ensurePrincipalIdentity(context: DataAccessContext, displayName: string): Promise<void>;
@@ -80,6 +87,56 @@ export type TaskChangeRepository = Readonly<{
       snapshotFingerprint: string;
     },
   ): Promise<unknown>;
+  findOperationByLaunchKey(
+    context: DataAccessContext,
+    key: string,
+    expected: { draftId: string; draftRevision: number; checkedAt: string },
+  ): Promise<BulkOperation | null>;
+  readConfirmedOperationReceipt(
+    context: DataAccessContext,
+    operationId: string,
+  ): Promise<BulkOperation>;
+  launchConfirmedTaskPreflight(
+    context: DataAccessContext,
+    input: {
+      displayName: string;
+      draftId: string;
+      draftRevision: number;
+      checkedAt: string;
+      token: string | null;
+      preflightSnapshot: Json;
+      snapshotFingerprint: string;
+      encryptedPlan: { ciphertext: string; nonce: string; keyVersion: string } | null;
+      correlationId: string;
+    },
+  ): Promise<{ disposition: string; operation: BulkOperation }>;
+  claimOperationLaunchDispatch(
+    portalId: string,
+    operationId: string,
+  ): Promise<{
+    operation_id: string;
+    portal_id: string;
+    launch_attempt: number;
+    message_id: string;
+    status: string;
+    created_at: string;
+    dispatched_at: string | null;
+    claim_id: string | null;
+  } | null>;
+  completeOperationLaunchDispatch(input: {
+    portalId: string;
+    operationId: string;
+    launchAttempt: number;
+    messageId: string;
+    claimId: string;
+    sent: boolean;
+    correlationId: string;
+  }): Promise<void>;
+  retryConfirmedOperationLaunch(
+    context: DataAccessContext,
+    operationId: string,
+    correlationId: string,
+  ): Promise<{ disposition: string; operation: BulkOperation }>;
 }>;
 
 export type TaskChangeRouteDependencies = Readonly<{
@@ -97,6 +154,7 @@ export type TaskChangeRouteDependencies = Readonly<{
 }>;
 
 type Variables = { correlationId: string };
+const launchRetryEmptyRequestSchema = z.object({}).strict();
 
 function asJson(value: unknown): Json {
   return JSON.parse(JSON.stringify(value)) as Json;
@@ -115,7 +173,13 @@ function toAuthorizationApiError(error: EffectiveAccessError): ApiHttpError {
 
 function throwDataApiError(error: unknown): never {
   if (error instanceof DataAccessError) {
-    if (error.code === 'CONFLICT') throw new ApiHttpError(409, 'CONFLICT');
+    if (
+      error.code === 'CONFLICT' ||
+      error.code === 'ACTIVE_OPERATION' ||
+      error.code === 'INVALID_OPERATION_STATE'
+    )
+      throw new ApiHttpError(409, 'CONFLICT');
+    if (error.code === 'UNAVAILABLE_RECORD') throw new ApiHttpError(404, 'NOT_FOUND');
     if (error.code === 'RATE_LIMITED') throw new ApiHttpError(429, 'RATE_LIMITED');
     if (error.code === 'PREFLIGHT_TOO_LARGE') {
       throw new ApiHttpError(413, 'PREFLIGHT_TOO_LARGE');
@@ -441,6 +505,158 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
         ).join(''),
       });
       return context.json(taskPreflightConfirmationSchema.parse(confirmed));
+    } catch (error) {
+      if (error instanceof ApiHttpError) throw error;
+      throwDataApiError(error);
+    }
+  });
+
+  routes.post('/preflight/launch', async (context) => {
+    const { principal, access, dataContext } = await authorizePreflight(context);
+    if (!dataContext.isBitrixAdmin && access.accessVersion === null) {
+      throw new ApiHttpError(503, 'UPSTREAM_UNAVAILABLE');
+    }
+    const input = await parseJsonBody(context.req.raw, launchTaskPreflightRequestSchema, 4_096);
+    const repository = dependencies.createRepository(context.env);
+    const key =
+      input.token === null
+        ? `zero:${input.draftId}:${input.draftRevision}`
+        : `confirmation:${input.token}`;
+    try {
+      const existing = await repository.findOperationByLaunchKey(dataContext, key, {
+        draftId: input.draftId,
+        draftRevision: input.draftRevision,
+        checkedAt: input.checkedAt,
+      });
+      if (existing) {
+        if (existing.status === 'launching') {
+          try {
+            await dispatchOperationLaunch({
+              env: context.env,
+              repository,
+              portalId: principal.portalId,
+              operationId: existing.id,
+              correlationId: context.get('correlationId'),
+            });
+          } catch {
+            // The original launch remains durable even if publication fails again.
+          }
+        }
+        return context.json(
+          bulkOperationSchema.parse(
+            await repository.readConfirmedOperationReceipt(dataContext, existing.id),
+          ),
+        );
+      }
+      const current = await repository.getCurrentDraftForPreflight(dataContext);
+      if (
+        !current ||
+        current.draft.id !== input.draftId ||
+        current.draft.revision !== input.draftRevision ||
+        current.draft.status !== 'awaiting_confirmation'
+      ) {
+        throw new ApiHttpError(409, 'CONFLICT');
+      }
+      const parsed = preflightPreviewSchema.safeParse(current.preflightSnapshot);
+      if (
+        !parsed.success ||
+        parsed.data.checkedAt !== input.checkedAt ||
+        parsed.data.draftRevision !== input.draftRevision ||
+        parsed.data.actorAccessVersion !== access.accessVersion ||
+        parsed.data.canProceed !== (input.token !== null) ||
+        !previewMatchesDraft(parsed.data, { ...current.draft, revision: input.draftRevision - 1 })
+      ) {
+        throw new ApiHttpError(409, 'CONFLICT');
+      }
+      const fingerprint = Array.from(
+        new Uint8Array(
+          await crypto.subtle.digest(
+            'SHA-256',
+            new TextEncoder().encode(JSON.stringify(parsed.data)),
+          ),
+        ),
+        (byte) => byte.toString(16).padStart(2, '0'),
+      ).join('');
+      const encryptedPlan =
+        input.token === null
+          ? null
+          : await encryptExecutionPlan({
+              keyBase64: (context.env as RuntimeEnvironment & { OPERATION_PLAN_KEY_V1?: string })
+                .OPERATION_PLAN_KEY_V1,
+              portalId: principal.portalId,
+              ownerId: principal.userId,
+              token: input.token,
+              draft: current.draft,
+              preview: parsed.data,
+            });
+      const latestAccess = await dependencies.readEffectiveAccess(context.env, principal);
+      if (!sameAccess(access, latestAccess)) throw new ApiHttpError(409, 'CONFLICT');
+      const launched = await repository.launchConfirmedTaskPreflight(dataContext, {
+        displayName: principal.displayName,
+        draftId: input.draftId,
+        draftRevision: input.draftRevision,
+        checkedAt: input.checkedAt,
+        token: input.token,
+        preflightSnapshot: asJson(parsed.data),
+        snapshotFingerprint: fingerprint,
+        encryptedPlan,
+        correlationId: context.get('correlationId'),
+      });
+      if (launched.operation.status === 'launching') {
+        try {
+          await dispatchOperationLaunch({
+            env: context.env,
+            repository,
+            portalId: principal.portalId,
+            operationId: launched.operation.id,
+            correlationId: context.get('correlationId'),
+          });
+        } catch {
+          // The database outbox retains an unsent or ambiguous send for recovery.
+        }
+      }
+      return context.json(
+        bulkOperationSchema.parse(
+          await repository.readConfirmedOperationReceipt(dataContext, launched.operation.id),
+        ),
+      );
+    } catch (error) {
+      if (error instanceof ApiHttpError) throw error;
+      throwDataApiError(error);
+    }
+  });
+
+  routes.post('/operations/:operationId/retry-launch', async (context) => {
+    const { principal, access, dataContext } = await authorizePreflight(context);
+    if (!access.permissions.includes('retry_operations')) throw new ApiHttpError(403, 'FORBIDDEN');
+    const operationId = context.req.param('operationId');
+    if (!operationIdSchema.safeParse(operationId).success) throw new ApiHttpError(404, 'NOT_FOUND');
+    await parseJsonBody(context.req.raw, launchRetryEmptyRequestSchema, 128);
+    const repository = dependencies.createRepository(context.env);
+    try {
+      const retried = await repository.retryConfirmedOperationLaunch(
+        dataContext,
+        operationId,
+        context.get('correlationId'),
+      );
+      if (retried.operation.status === 'launching') {
+        try {
+          await dispatchOperationLaunch({
+            env: context.env,
+            repository,
+            portalId: principal.portalId,
+            operationId,
+            correlationId: context.get('correlationId'),
+          });
+        } catch {
+          // The persisted attempt remains inspectable and recoverable.
+        }
+      }
+      return context.json(
+        bulkOperationSchema.parse(
+          await repository.readConfirmedOperationReceipt(dataContext, operationId),
+        ),
+      );
     } catch (error) {
       if (error instanceof ApiHttpError) throw error;
       throwDataApiError(error);

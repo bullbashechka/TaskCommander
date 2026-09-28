@@ -27,6 +27,16 @@ export function hasStrongRuntimeSecret(secret: string | undefined): boolean {
   return encodeSigningSecret(secret) !== null;
 }
 
+export function hasValidOperationPlanKey(value: string | undefined): boolean {
+  if (!value || !/^[A-Za-z0-9+/]{43}=$/.test(value)) return false;
+  try {
+    const decoded = atob(value);
+    return decoded.length === 32 && btoa(decoded) === value;
+  } catch {
+    return false;
+  }
+}
+
 function haveEqualBytes(left: Uint8Array, right: Uint8Array): boolean {
   return left.byteLength === right.byteLength && left.every((byte, index) => byte === right[index]);
 }
@@ -96,6 +106,7 @@ export function getRuntimeReadiness(env: RuntimeEnvironment): HealthResponse {
     hasValidConfiguredOrigins(env.BITRIX_FRAME_ANCESTORS, allowHttp) &&
     hasValidConfiguredOrigins(env.BITRIX_MEDIA_ALLOWED_ORIGINS, allowHttp) &&
     hasStrongRuntimeSecret(env.INTERNAL_READINESS_TOKEN) &&
+    hasValidOperationPlanKey(env.OPERATION_PLAN_KEY_V1) &&
     (env.ENABLE_LOCAL_RUNTIME_PROBE !== 'true' ||
       hasStrongRuntimeSecret(env.LOCAL_RUNTIME_PROBE_TOKEN)) &&
     hasBindingMethods(env.SESSION_RATE_LIMITER, ['limit']) &&

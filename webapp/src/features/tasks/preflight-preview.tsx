@@ -2,12 +2,18 @@ import { useEffect, useRef, useState } from 'react';
 
 import type {
   PreflightPreview,
+  BulkOperation,
   TaskChangeCatalogResponse,
   TaskChangeValue,
   TaskPreflightConfirmation,
 } from '@task-commander/contracts';
 
-import { AppApiError, confirmTaskPreflight } from '@/app/app-api';
+import {
+  AppApiError,
+  confirmTaskPreflight,
+  launchTaskPreflight,
+  retryTaskOperationLaunch,
+} from '@/app/app-api';
 import { Card } from '@/components/ui/card';
 import { Modal } from '@/components/ui/modal';
 
@@ -22,19 +28,26 @@ export function PreflightPreviewScreen({
   preview,
   catalog,
   onBack,
+  canRetryLaunch = false,
 }: {
   preview: PreflightPreview;
   catalog: TaskChangeCatalogResponse;
   onBack(): void;
+  canRetryLaunch?: boolean;
 }) {
   const [acknowledged, setAcknowledged] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [pending, setPending] = useState(false);
   const [confirmation, setConfirmation] = useState<TaskPreflightConfirmation | null>(null);
+  const [operation, setOperation] = useState<BulkOperation | null>(null);
+  const [zeroAttempted, setZeroAttempted] = useState(false);
+  const [zeroConflict, setZeroConflict] = useState(false);
   const [confirmationExpiresAt, setConfirmationExpiresAt] = useState<number | null>(null);
   const [error, setError] = useState('');
   const [now, setNow] = useState(() => Date.now());
   const requestIdentity = useRef(0);
+  const launchInFlight = useRef(false);
+  const confirmationRef = useRef<TaskPreflightConfirmation | null>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const previousPreview = useRef(preview);
   if (previousPreview.current !== preview) {
@@ -50,6 +63,10 @@ export function PreflightPreviewScreen({
   useEffect(() => {
     setAcknowledged(false);
     setConfirmation(null);
+    confirmationRef.current = null;
+    setOperation(null);
+    setZeroAttempted(false);
+    setZeroConflict(false);
     setConfirmationExpiresAt(null);
     setModalOpen(false);
     setError('');
@@ -61,12 +78,13 @@ export function PreflightPreviewScreen({
   useEffect(() => {
     const timeout = window.setTimeout(
       () => {
-        requestIdentity.current += 1;
         setNow(Date.now());
         setAcknowledged(false);
-        setConfirmation(null);
         setModalOpen(false);
-        setPending(false);
+        if (!launchInFlight.current && confirmationRef.current === null) {
+          requestIdentity.current += 1;
+          setPending(false);
+        }
       },
       Math.max(0, deadline - Date.now()),
     );
@@ -82,11 +100,42 @@ export function PreflightPreviewScreen({
   );
   const fieldLabels = new Map(catalog.fields.map((field) => [field.id, field.label]));
 
+  function clearStaleConfirmation() {
+    confirmationRef.current = null;
+    setConfirmation(null);
+    setConfirmationExpiresAt(null);
+    setAcknowledged(false);
+    setError(
+      'Проверка устарела или черновик изменился. Вернитесь к настройке и проверьте задачи снова.',
+    );
+  }
+
+  async function launch(token: string | null, identity: number) {
+    launchInFlight.current = true;
+    try {
+      const result = await launchTaskPreflight({
+        draftId: preview.draftId,
+        draftRevision: preview.draftRevision,
+        checkedAt: preview.checkedAt,
+        token,
+      });
+      if (identity === requestIdentity.current) {
+        setOperation(result);
+        confirmationRef.current = null;
+        setConfirmation(null);
+        setModalOpen(false);
+      }
+    } finally {
+      launchInFlight.current = false;
+    }
+  }
+
   async function confirm() {
     if (!acknowledged || !preview.canProceed || Date.now() >= deadline || pending) return;
     const identity = ++requestIdentity.current;
     setPending(true);
     setError('');
+    let confirmed = false;
     try {
       const result = await confirmTaskPreflight({
         draftId: preview.draftId,
@@ -96,18 +145,71 @@ export function PreflightPreviewScreen({
       if (identity !== requestIdentity.current) return;
       const actualDeadline = Math.min(deadline, Date.parse(result.expiresAt));
       setConfirmationExpiresAt(actualDeadline);
-      if (Date.now() >= actualDeadline) return;
+      if (Date.now() >= actualDeadline) {
+        setAcknowledged(false);
+        setModalOpen(false);
+        setError('Проверка устарела. Вернитесь к настройке и проверьте задачи снова.');
+        return;
+      }
+      confirmationRef.current = result;
       setConfirmation(result);
+      confirmed = true;
       setModalOpen(false);
+      await launch(result.token, identity);
     } catch (failure) {
       if (identity !== requestIdentity.current) return;
-      setAcknowledged(false);
       setModalOpen(false);
+      if (failure instanceof AppApiError && failure.status === 409) {
+        clearStaleConfirmation();
+        return;
+      }
+      setAcknowledged(false);
       setError(
-        failure instanceof AppApiError && failure.status === 409
-          ? 'Проверка устарела или черновик изменился. Вернитесь к настройке и проверьте задачи снова.'
-          : 'Не удалось подтвердить проверку. Повторите действие.',
+        confirmed
+          ? 'Подтверждение сохранено, но запуск не завершён. Повторите запуск.'
+          : 'Не удалось подтвердить проверку или запустить операцию. Повторите действие.',
       );
+    } finally {
+      if (identity === requestIdentity.current) setPending(false);
+    }
+  }
+
+  async function launchWithoutChanges() {
+    if (pending || zeroConflict || (!fresh && !zeroAttempted) || preview.canProceed || operation)
+      return;
+    const identity = ++requestIdentity.current;
+    setPending(true);
+    setZeroAttempted(true);
+    setError('');
+    try {
+      await launch(null, identity);
+    } catch (failure) {
+      if (identity !== requestIdentity.current) return;
+      if (failure instanceof AppApiError && failure.status === 409) {
+        setZeroAttempted(false);
+        setZeroConflict(true);
+        setError(
+          'Проверка устарела или черновик изменился. Вернитесь к настройке и проверьте задачи снова.',
+        );
+      } else {
+        setError('Не удалось сохранить итог. Повторите действие.');
+      }
+    } finally {
+      if (identity === requestIdentity.current) setPending(false);
+    }
+  }
+
+  async function retryFailedLaunch() {
+    if (!canRetryLaunch || !operation || operation.status !== 'launch_failed' || pending) return;
+    const identity = ++requestIdentity.current;
+    setPending(true);
+    setError('');
+    try {
+      const result = await retryTaskOperationLaunch(operation.id);
+      if (identity === requestIdentity.current) setOperation(result);
+    } catch {
+      if (identity === requestIdentity.current)
+        setError('Не удалось повторить запуск. Попробуйте позже.');
     } finally {
       if (identity === requestIdentity.current) setPending(false);
     }
@@ -200,43 +302,104 @@ export function PreflightPreviewScreen({
           {error}
         </p>
       ) : null}
-      {confirmation ? (
+      {operation ? (
         <p role="status">
-          Подтверждение сохранено до {new Date(confirmation.expiresAt).toLocaleString('ru-RU')}.
-          Задачи ещё не изменены.
+          {operation.status === 'completed'
+            ? 'Изменения не выполнялись.'
+            : operation.status === 'launch_failed'
+              ? canRetryLaunch
+                ? 'Запуск не удался. Операцию можно отправить повторно.'
+                : 'Запуск не удался. Повторная отправка недоступна.'
+              : 'Операция создана. Проверяем запуск.'}
+        </p>
+      ) : confirmation ? (
+        <p role="status">
+          {fresh
+            ? `Подтверждение сохранено до ${new Date(confirmation.expiresAt).toLocaleString('ru-RU')}. Запуск можно повторить.`
+            : 'Срок подтверждения истёк. Повторный запрос проверит, была ли операция создана.'}
         </p>
       ) : null}
       <footer className="bulk-change-footer">
         <button className="button-secondary" onClick={onBack} type="button">
           Вернуться к настройке
         </button>
-        <label>
-          <input
-            checked={acknowledged}
-            disabled={!preview.canProceed || !fresh || pending || confirmation !== null}
-            onChange={(event) => setAcknowledged(event.target.checked)}
-            type="checkbox"
-          />
-          Я проверил изменения и осознанно подтверждаю подготовку операции
-        </label>
-        <button
-          className="button-primary"
-          disabled={
-            !preview.canProceed || !fresh || !acknowledged || pending || confirmation !== null
-          }
-          onClick={() => setModalOpen(true)}
-          type="button"
-        >
-          Подтвердить подготовку
-        </button>
+        {preview.canProceed ? (
+          <label>
+            <input
+              checked={acknowledged}
+              disabled={!fresh || pending || confirmation !== null || operation !== null}
+              onChange={(event) => setAcknowledged(event.target.checked)}
+              type="checkbox"
+            />
+            Я проверил изменения и осознанно подтверждаю подготовку операции
+          </label>
+        ) : null}
+        {!preview.canProceed && !operation && !zeroConflict && (fresh || zeroAttempted) ? (
+          <button
+            className="button-primary"
+            disabled={(!fresh && !zeroAttempted) || pending}
+            onClick={() => void launchWithoutChanges()}
+            type="button"
+          >
+            Сохранить итог без изменений
+          </button>
+        ) : null}
+        {confirmation && !operation ? (
+          <button
+            className="button-primary"
+            disabled={pending}
+            onClick={() => {
+              const identity = ++requestIdentity.current;
+              setPending(true);
+              setError('');
+              void launch(confirmation.token, identity)
+                .catch((failure: unknown) => {
+                  if (identity !== requestIdentity.current) return;
+                  if (failure instanceof AppApiError && failure.status === 409) {
+                    clearStaleConfirmation();
+                  } else {
+                    setError('Не удалось запустить операцию. Повторите действие.');
+                  }
+                })
+                .finally(() => {
+                  if (identity === requestIdentity.current) setPending(false);
+                });
+            }}
+            type="button"
+          >
+            Повторить запуск
+          </button>
+        ) : null}
+        {operation?.status === 'launch_failed' && canRetryLaunch ? (
+          <button
+            className="button-primary"
+            disabled={pending}
+            onClick={() => void retryFailedLaunch()}
+            type="button"
+          >
+            Повторить отправку
+          </button>
+        ) : null}
+        {preview.canProceed && !confirmation && !operation ? (
+          <button
+            className="button-primary"
+            disabled={
+              !preview.canProceed || !fresh || !acknowledged || pending || confirmation !== null
+            }
+            onClick={() => setModalOpen(true)}
+            type="button"
+          >
+            Подтвердить подготовку
+          </button>
+        ) : null}
       </footer>
       <Modal
-        description={`Допущено ${preview.summary.eligible} задач. Исключено ${preview.summary.excluded}. Проверка действительна ещё не более ${remainingMinutes} мин. Подтверждение сохранит подготовленный набор; задачи пока не изменятся.`}
+        description={`Допущено ${preview.summary.eligible} задач. Исключено ${preview.summary.excluded}. Проверка действительна ещё не более ${remainingMinutes} мин. После подтверждения начнётся запуск операции.`}
         onClose={() => {
           if (!pending) setModalOpen(false);
         }}
         open={modalOpen}
-        title="Подтвердить подготовку изменения"
+        title="Подтвердить запуск изменения"
       >
         <div className="dialog-actions">
           <button
@@ -253,7 +416,7 @@ export function PreflightPreviewScreen({
             onClick={() => void confirm()}
             type="button"
           >
-            {pending ? 'Подтверждение…' : 'Сохранить подтверждение'}
+            {pending ? 'Запуск…' : 'Подтвердить и запустить'}
           </button>
         </div>
       </Modal>

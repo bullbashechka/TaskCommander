@@ -1,6 +1,7 @@
 import { accessPermissionCatalog } from '@task-commander/contracts';
 
 import { accessCommandQueueMessageSchema } from './contracts/access-command-queue';
+import { operationQueueMessageSchema } from './contracts/operation-queue';
 import { createAccessManagementRepository, type AccessManagementRepository } from './data';
 import {
   getRequiredR2Binding,
@@ -25,6 +26,13 @@ export async function consumeRuntimeProbeBatch(
   env: Pick<RuntimeEnvironment, 'REPORTS_BUCKET'>,
 ): Promise<void> {
   for (const message of batch.messages) {
+    const operation = operationQueueMessageSchema.safeParse(message.body);
+    if (operation.success) {
+      // Task execution starts in 022. Never acknowledge a valid operation without a worker.
+      // Finite Queue retries lead to DLQ; the durable outbox republishes a still-launching attempt.
+      message.retry();
+      continue;
+    }
     if (!isRuntimeProbeMessage(message.body)) {
       console.error(
         JSON.stringify({

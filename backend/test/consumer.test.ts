@@ -10,6 +10,31 @@ describe('runtime probe consumer', () => {
     vi.restoreAllMocks();
   });
 
+  it('retries an operation envelope until the execution consumer is installed', async () => {
+    const batch = createMessageBatch(queueName, [
+      {
+        id: 'queued-operation',
+        timestamp: new Date(),
+        attempts: 1,
+        body: {
+          schemaVersion: 1,
+          messageId: '123e4567-e89b-42d3-a456-426614174001',
+          kind: 'operation.execute',
+          portalId: 'portal-1',
+          operationId: '123e4567-e89b-42d3-a456-426614174000',
+          launchAttempt: 1,
+          createdAt: '2026-09-28T00:00:00.000Z',
+        },
+      },
+    ]);
+    const context = createExecutionContext();
+    await consumer.queue!(batch, env, context);
+    await expect(getQueueResult(batch, context)).resolves.toMatchObject({
+      retryMessages: [{ msgId: 'queued-operation' }],
+      explicitAcks: [],
+    });
+  });
+
   it('acknowledges a valid probe after the local R2 round trip', async () => {
     const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
     const artifactKey = 'v1/runtime-probe/json/probe-valid.json';

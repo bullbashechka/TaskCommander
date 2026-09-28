@@ -812,6 +812,7 @@ export function BulkChangeEditor({
   if (preview) {
     return (
       <PreflightPreviewScreen
+        canRetryLaunch={app?.access.permissions.includes('retry_operations') ?? false}
         catalog={catalog.data}
         onBack={() => {
           preflightGeneration.current += 1;
