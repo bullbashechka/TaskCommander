@@ -3,6 +3,9 @@ import {
   bulkOperationDraftAvailabilitySchema,
   bulkOperationDraftSchema,
   bulkOperationSchema,
+  operationProgressSchema,
+  operationProgressResultsPageSchema,
+  currentOperationProgressSchema,
   confirmTaskPreflightRequestSchema,
   launchTaskPreflightRequestSchema,
   preflightPreviewSchema,
@@ -24,6 +27,8 @@ import {
   type ApiErrorCode,
   type BulkOperationDraft,
   type BulkOperation,
+  type OperationProgress,
+  type OperationProgressResultsPage,
   type BulkOperationDraftAvailability,
   type ConfirmTaskPreflightRequest,
   type LaunchTaskPreflightRequest,
@@ -398,6 +403,53 @@ export function retryTaskOperationLaunch(
       headers: jsonHeaders,
       body: '{}',
     },
+  );
+}
+
+export function getCurrentOperationProgress(
+  signal?: AbortSignal,
+): Promise<OperationProgress | null> {
+  return requestJson(
+    '/api/tasks/operations/current/progress',
+    currentOperationProgressSchema,
+    signal,
+  ).then((response) => response.progress);
+}
+
+export function getOperationProgress(
+  operationId: string,
+  signal?: AbortSignal,
+): Promise<OperationProgress> {
+  return requestJson(
+    `/api/tasks/operations/${encodeURIComponent(operationId)}/progress`,
+    operationProgressSchema,
+    signal,
+  );
+}
+
+export function getOperationProgressResults(
+  operationId: string,
+  cursor?: string,
+  signal?: AbortSignal,
+): Promise<OperationProgressResultsPage> {
+  const search = new URLSearchParams({ limit: '20' });
+  if (cursor) search.set('cursor', cursor);
+  return requestJson(
+    `/api/tasks/operations/${encodeURIComponent(operationId)}/results?${search}`,
+    operationProgressResultsPageSchema,
+    signal,
+  );
+}
+
+export function cancelOperation(
+  operationId: string,
+  signal?: AbortSignal,
+): Promise<OperationProgress> {
+  return requestJson(
+    `/api/tasks/operations/${encodeURIComponent(operationId)}/cancel`,
+    operationProgressSchema,
+    signal,
+    { method: 'POST', headers: jsonHeaders, body: '{}' },
   );
 }
 

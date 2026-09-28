@@ -21,6 +21,7 @@ import {
 } from '@/features/access/access-workflow';
 import { ApiStatusCard, useHealth } from '@/features/health/api-status-card';
 import { HomeDashboard } from '@/features/home/home-dashboard';
+import { OperationProgressPage } from '@/features/operations/operation-progress-page';
 import { RuntimeTable } from '@/features/status/runtime-table';
 import { TaskFiltersPage } from '@/features/tasks/task-filters-page';
 import { ru } from '@/locales/ru';
@@ -121,6 +122,11 @@ function CommandRoutePage() {
   return <AccessCommandPage commandId={commandId} />;
 }
 
+function OperationDetailRoutePage() {
+  const { operationId } = operationDetailRoute.useParams();
+  return <OperationProgressPage operationId={operationId} />;
+}
+
 const rootRoute = createRootRouteWithContext<RouterContext>()({
   notFoundComponent: () => <AppState title="Страница не найдена" description="Проверьте адрес или вернитесь на главную страницу." action={<Link className="button-primary" to="/">На главную</Link>} />,
 });
@@ -133,11 +139,12 @@ const reviewRoute = createRoute({ getParentRoute: () => protectedRoute, path: '/
 const commandRoute = createRoute({ getParentRoute: () => protectedRoute, path: '/access/commands/$commandId', beforeLoad: routeGuard('access'), component: CommandRoutePage, errorComponent: RouteErrorState });
 const repairRoute = createRoute({ getParentRoute: () => protectedRoute, path: '/access/admin-repair', beforeLoad: routeGuard('access'), component: AccessAdminRepairPage, errorComponent: RouteErrorState });
 const tasksRoute = createRoute({ getParentRoute: () => protectedRoute, path: '/tasks', beforeLoad: routeGuard('tasks'), component: TaskFiltersPage, errorComponent: RouteErrorState });
-const operationsRoute = createRoute({ getParentRoute: () => protectedRoute, path: '/operations', beforeLoad: routeGuard('operations'), component: () => <PlaceholderPage title="Операции" />, errorComponent: RouteErrorState });
+const operationsRoute = createRoute({ getParentRoute: () => protectedRoute, path: '/operations', beforeLoad: routeGuard('operations'), component: OperationProgressPage, errorComponent: RouteErrorState });
+const operationDetailRoute = createRoute({ getParentRoute: () => protectedRoute, path: '/operations/$operationId', beforeLoad: routeGuard('operations'), component: OperationDetailRoutePage, errorComponent: RouteErrorState });
 const reportsRoute = createRoute({ getParentRoute: () => protectedRoute, path: '/reports', beforeLoad: routeGuard('reports'), component: () => <PlaceholderPage title="Отчёты" />, errorComponent: RouteErrorState });
 const auditRoute = createRoute({ getParentRoute: () => protectedRoute, path: '/audit', beforeLoad: routeGuard('audit'), component: () => <PlaceholderPage title="Аудит" />, errorComponent: RouteErrorState });
 
-const routeTree = rootRoute.addChildren([statusRoute, protectedRoute.addChildren([indexRoute, accessRoute, configureRoute, reviewRoute, commandRoute, repairRoute, tasksRoute, operationsRoute, reportsRoute, auditRoute])]);
+const routeTree = rootRoute.addChildren([statusRoute, protectedRoute.addChildren([indexRoute, accessRoute, configureRoute, reviewRoute, commandRoute, repairRoute, tasksRoute, operationsRoute, operationDetailRoute, reportsRoute, auditRoute])]);
 
 export const router = createRouter({
   routeTree,

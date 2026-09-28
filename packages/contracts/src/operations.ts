@@ -353,6 +353,29 @@ export const bulkOperationSchema = z
   })
   .strict();
 
+export const operationProgressSchema = z
+  .object({
+    operation: bulkOperationSchema,
+    processed: nonNegativeIntegerSchema,
+    remaining: nonNegativeIntegerSchema,
+    percent: z.number().int().min(0).max(100),
+  })
+  .strict();
+
+export const operationProgressResultsPageSchema = z
+  .object({
+    items: z.array(taskOutcomeSchema).max(100),
+    nextCursor: z.string().min(1).max(2048).nullable(),
+  })
+  .strict();
+
+export const currentOperationProgressSchema = z
+  .object({ progress: operationProgressSchema.nullable() })
+  .strict();
+
+export type OperationProgress = z.infer<typeof operationProgressSchema>;
+export type OperationProgressResultsPage = z.infer<typeof operationProgressResultsPageSchema>;
+
 export const reportArtifactStatusSchema = z.enum([
   'pending',
   'generating',

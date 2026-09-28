@@ -131,6 +131,10 @@ async function setup(input?: {
     confirmTaskPreflight,
     findOperationByLaunchKey: vi.fn().mockResolvedValue(null),
     readConfirmedOperationReceipt: vi.fn(),
+    getOwnedOperationProgress: vi.fn(),
+    getLatestOwnedOperationProgress: vi.fn().mockResolvedValue(null),
+    listOwnedOperationProgressResults: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
+    requestOperationCancellation: vi.fn(),
     launchConfirmedTaskPreflight: vi.fn(),
     claimOperationLaunchDispatch: vi.fn().mockResolvedValue(null),
     completeOperationLaunchDispatch: vi.fn(),
@@ -894,5 +898,124 @@ describe('task change routes', () => {
     expect(saved.repository.completeOperationLaunchDispatch).toHaveBeenCalledWith(
       expect.objectContaining({ sent: false }),
     );
+  });
+  it('reads persisted owner progress and cancels without report permission', async () => {
+    const fixture = await setup({ permissions: ['app_access', 'run_bulk_operations'] });
+    const operation = bulkOperationSchema.parse({
+      id: '323e4567-e89b-42d3-a456-426614174000',
+      type: 'bulk_change',
+      status: 'running',
+      stateVersion: 4,
+      launchAttempt: 1,
+      initiatorId: '10',
+      sourceOperationId: null,
+      createdAt: new Date().toISOString(),
+      startedAt: new Date().toISOString(),
+      completedAt: null,
+      cancelRequestedAt: null,
+      interruptionRequestedAt: null,
+      interruptionReasonCode: null,
+      summary: {
+        selected: 5,
+        eligible: 3,
+        excluded: 1,
+        unchanged: 1,
+        successful: 1,
+        failed: 0,
+        unconfirmed: 1,
+        conflicted: 0,
+        partiallyApplied: 0,
+        notProcessed: 0,
+      },
+    });
+    vi.mocked(fixture.repository.getOwnedOperationProgress).mockResolvedValue(operation);
+    vi.mocked(fixture.repository.getLatestOwnedOperationProgress).mockResolvedValue(operation);
+    vi.mocked(fixture.repository.requestOperationCancellation).mockResolvedValue({
+      operation: { ...operation, stateVersion: 5, cancelRequestedAt: new Date().toISOString() },
+    });
+    const current = await fixture.api.request(
+      'https://example.test/api/tasks/operations/current/progress',
+      { headers },
+      environment,
+    );
+    expect(current.status).toBe(200);
+    expect((await current.json()) as unknown).toMatchObject({
+      progress: { processed: 2, remaining: 1, percent: 66 },
+    });
+    const cancelled = await fixture.api.request(
+      `https://example.test/api/tasks/operations/${operation.id}/cancel`,
+      { method: 'POST', headers, body: '{}' },
+      environment,
+    );
+    expect(cancelled.status).toBe(200);
+    expect((await cancelled.json()) as unknown).toMatchObject({
+      operation: { stateVersion: 5 },
+      processed: 2,
+    });
+    expect(fixture.repository.requestOperationCancellation).toHaveBeenCalledOnce();
+  });
+
+  it('rejects cancellation for a report viewer and does not expose another owner', async () => {
+    const viewer = await setup({ permissions: ['app_access', 'view_own_reports'] });
+    const cancelled = await viewer.api.request(
+      'https://example.test/api/tasks/operations/323e4567-e89b-42d3-a456-426614174000/cancel',
+      { method: 'POST', headers, body: '{}' },
+      environment,
+    );
+    expect(cancelled.status).toBe(403);
+    expect(viewer.repository.requestOperationCancellation).not.toHaveBeenCalled();
+    vi.mocked(viewer.repository.getOwnedOperationProgress).mockRejectedValue(
+      new DataAccessError('UNAVAILABLE_RECORD', false),
+    );
+    const progress = await viewer.api.request(
+      'https://example.test/api/tasks/operations/323e4567-e89b-42d3-a456-426614174000/progress',
+      { headers },
+      environment,
+    );
+    expect(progress.status).toBe(404);
+  });
+
+  it('returns only a bounded owner result page with safe task metadata', async () => {
+    const viewer = await setup({ permissions: ['app_access', 'view_own_reports'] });
+    const operationId = '323e4567-e89b-42d3-a456-426614174000';
+    vi.mocked(viewer.repository.listOwnedOperationProgressResults).mockResolvedValue({
+      items: [
+        {
+          taskId: '42',
+          title: 'Task',
+          taskUrl: 'https://portal.bitrix24.ru/tasks/42',
+          outcome: 'not_processed',
+          changedFieldIds: [],
+          appliedFieldIds: [],
+          failedFieldIds: [],
+          reasonCode: 'CANCELLED',
+          reasonMessage: 'Операция остановлена.',
+          canRetry: true,
+          refinement: null,
+        },
+      ],
+      nextCursor: null,
+    });
+    const response = await viewer.api.request(
+      `https://example.test/api/tasks/operations/${operationId}/results?limit=20`,
+      { headers },
+      environment,
+    );
+    expect(response.status).toBe(200);
+    expect((await response.json()) as unknown).toMatchObject({
+      items: [{ taskId: '42', outcome: 'not_processed' }],
+    });
+    expect(viewer.repository.listOwnedOperationProgressResults).toHaveBeenCalledWith(
+      expect.objectContaining({ actorId: '10' }),
+      operationId,
+      { limit: 20 },
+    );
+    const invalid = await viewer.api.request(
+      `https://example.test/api/tasks/operations/${operationId}/results?limit=101`,
+      { headers },
+      environment,
+    );
+    expect(invalid.status).toBe(400);
+    expect(viewer.repository.listOwnedOperationProgressResults).toHaveBeenCalledTimes(1);
   });
 });

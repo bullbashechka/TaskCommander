@@ -5,7 +5,7 @@ import { DataAccessError } from './errors';
 const cursorSchema = z
   .object({
     version: z.literal(1),
-    entity: z.enum(['operation-history', 'audit-events']),
+    entity: z.enum(['operation-history', 'audit-events', 'operation-progress-results']),
     scope: z.string().min(1).max(512),
     asOf: z.string().datetime({ offset: true }),
     timestamp: z.string().datetime({ offset: true }),
@@ -89,7 +89,5 @@ export function createNextCursor(
   timestamp: string,
   id: string,
 ): string {
-  return encodeBase64Url(
-    JSON.stringify({ version: 1, entity, scope, asOf, timestamp, id }),
-  );
+  return encodeBase64Url(JSON.stringify({ version: 1, entity, scope, asOf, timestamp, id }));
 }

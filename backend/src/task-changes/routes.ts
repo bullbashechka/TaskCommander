@@ -8,6 +8,9 @@ import {
   launchTaskPreflightRequestSchema,
   operationIdSchema,
   bulkOperationSchema,
+  operationProgressSchema,
+  operationProgressResultsPageSchema,
+  currentOperationProgressSchema,
   preflightPreviewSchema,
   saveBulkOperationDraftRequestSchema,
   taskChangeCatalogResponseSchema,
@@ -15,7 +18,10 @@ import {
   taskPreflightConfirmationSchema,
   type BulkOperationDraft,
   type BulkOperation,
+  type OperationProgress,
+  type OperationProgressResultsPage,
   type PreflightPreview,
+  type TaskOutcome,
 } from '@task-commander/contracts';
 
 import type { VerifiedSessionPrincipal } from '../auth/session-service';
@@ -96,6 +102,20 @@ export type TaskChangeRepository = Readonly<{
     context: DataAccessContext,
     operationId: string,
   ): Promise<BulkOperation>;
+  getOwnedOperationProgress(
+    context: DataAccessContext,
+    operationId: string,
+  ): Promise<BulkOperation>;
+  getLatestOwnedOperationProgress(context: DataAccessContext): Promise<BulkOperation | null>;
+  listOwnedOperationProgressResults(
+    context: DataAccessContext,
+    operationId: string,
+    request: { cursor?: string; limit?: number },
+  ): Promise<{ items: TaskOutcome[]; nextCursor: string | null }>;
+  requestOperationCancellation(
+    context: DataAccessContext,
+    input: { operationId: string; correlationId: string },
+  ): Promise<{ operation: BulkOperation }>;
   launchConfirmedTaskPreflight(
     context: DataAccessContext,
     input: {
@@ -158,6 +178,33 @@ export type TaskChangeRouteDependencies = Readonly<{
 
 type Variables = { correlationId: string };
 const launchRetryEmptyRequestSchema = z.object({}).strict();
+const progressResultsQuerySchema = z
+  .object({
+    cursor: z.string().min(1).max(2048).optional(),
+    limit: z.coerce.number().int().min(1).max(100).optional(),
+  })
+  .strict();
+
+function toProgress(operation: BulkOperation): OperationProgress {
+  const summary = operation.summary;
+  const processed =
+    summary.successful +
+    summary.failed +
+    summary.unconfirmed +
+    summary.conflicted +
+    summary.partiallyApplied +
+    summary.notProcessed;
+  if (processed > summary.eligible) throw new DataAccessError('INTEGRITY', false);
+  return operationProgressSchema.parse({
+    operation,
+    processed,
+    remaining: summary.eligible - processed,
+    percent:
+      summary.eligible === 0
+        ? 100
+        : Math.min(100, Math.floor((processed * 100) / summary.eligible)),
+  });
+}
 
 function asJson(value: unknown): Json {
   return JSON.parse(JSON.stringify(value)) as Json;
@@ -281,6 +328,32 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
       `${authorization.principal.portalId}:${authorization.principal.userId}:task-preflight`,
     );
     return authorization;
+  }
+
+  async function authorizeProgress(context: {
+    env: RuntimeEnvironment;
+    req: { header(name: string): string | undefined };
+    get(name: 'correlationId'): string;
+  }) {
+    const principal = await dependencies.readPrincipal(
+      context.env,
+      context.req.header('cookie') ?? null,
+      context.get('correlationId'),
+    );
+    try {
+      const access = await dependencies.readEffectiveAccess(context.env, principal);
+      if (
+        !(['run_bulk_operations', 'view_own_reports', 'view_all_reports'] as const).some(
+          (permission) => access.permissions.includes(permission),
+        )
+      ) {
+        throw new ApiHttpError(403, 'FORBIDDEN');
+      }
+      return { principal, access, dataContext: createDataAccessContext(access) };
+    } catch (error) {
+      if (error instanceof EffectiveAccessError) throw toAuthorizationApiError(error);
+      throw error;
+    }
   }
 
   function createAdapter(
@@ -633,6 +706,84 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
       );
     } catch (error) {
       if (error instanceof ApiHttpError) throw error;
+      throwDataApiError(error);
+    }
+  });
+
+  routes.get('/operations/current/progress', async (context) => {
+    const { dataContext } = await authorizeProgress(context);
+    try {
+      const operation = await dependencies
+        .createRepository(context.env)
+        .getLatestOwnedOperationProgress(dataContext);
+      return context.json(
+        currentOperationProgressSchema.parse({
+          progress: operation ? toProgress(operation) : null,
+        }),
+      );
+    } catch (error) {
+      throwDataApiError(error);
+    }
+  });
+
+  routes.get('/operations/:operationId/progress', async (context) => {
+    const { dataContext } = await authorizeProgress(context);
+    const operationId = context.req.param('operationId');
+    if (!operationIdSchema.safeParse(operationId).success) throw new ApiHttpError(404, 'NOT_FOUND');
+    try {
+      const operation = await dependencies
+        .createRepository(context.env)
+        .getOwnedOperationProgress(dataContext, operationId);
+      return context.json(toProgress(operation));
+    } catch (error) {
+      throwDataApiError(error);
+    }
+  });
+
+  routes.get('/operations/:operationId/results', async (context) => {
+    const { dataContext } = await authorizeProgress(context);
+    const operationId = context.req.param('operationId');
+    if (!operationIdSchema.safeParse(operationId).success) throw new ApiHttpError(404, 'NOT_FOUND');
+    const query = progressResultsQuerySchema.safeParse(context.req.query());
+    if (!query.success) throw new ApiHttpError(400, 'INVALID_REQUEST');
+    try {
+      const page: OperationProgressResultsPage = await dependencies
+        .createRepository(context.env)
+        .listOwnedOperationProgressResults(dataContext, operationId, query.data);
+      return context.json(operationProgressResultsPageSchema.parse(page));
+    } catch (error) {
+      throwDataApiError(error);
+    }
+  });
+
+  routes.post('/operations/:operationId/cancel', async (context) => {
+    await requireRateLimit(
+      context.env.ACCESS_FANOUT_RATE_LIMITER,
+      `client:${clientRateLimitKey(context.req.raw)}:operation-cancel`,
+    );
+    const { principal, access, dataContext } = await authorizeProgress(context);
+    await requireRateLimit(
+      context.env.ACCESS_FANOUT_RATE_LIMITER,
+      `${principal.portalId}:${principal.userId}:operation-cancel`,
+    );
+    if (
+      !access.permissions.includes('app_access') ||
+      !access.permissions.includes('run_bulk_operations')
+    ) {
+      throw new ApiHttpError(403, 'FORBIDDEN');
+    }
+    const operationId = context.req.param('operationId');
+    if (!operationIdSchema.safeParse(operationId).success) throw new ApiHttpError(404, 'NOT_FOUND');
+    await parseJsonBody(context.req.raw, launchRetryEmptyRequestSchema, 128);
+    try {
+      const result = await dependencies
+        .createRepository(context.env)
+        .requestOperationCancellation(dataContext, {
+          operationId,
+          correlationId: context.get('correlationId'),
+        });
+      return context.json(toProgress(result.operation));
+    } catch (error) {
       throwDataApiError(error);
     }
   });

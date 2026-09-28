@@ -6,6 +6,7 @@ import {
   useQueryClient,
 } from '@tanstack/react-query';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from '@tanstack/react-router';
 
 import type {
   BulkOperationDraft,
@@ -374,6 +375,7 @@ function SavedFilterDialog({
 }
 
 export function TaskFiltersPage() {
+  const navigate = useNavigate();
   const app = useAppAccess();
   const queryClient = useQueryClient();
   const catalog = useQuery({
@@ -671,6 +673,9 @@ export function TaskFiltersPage() {
     return (
       <div className="page-content">
         <BulkChangeEditor
+          onOperationLaunched={(operation) => {
+            void navigate({ to: '/operations/$operationId', params: { operationId: operation.id } });
+          }}
           filters={editorSession.filters}
           initialDraft={editorSession.initialDraft}
           initialRevision={editorSession.initialRevision}

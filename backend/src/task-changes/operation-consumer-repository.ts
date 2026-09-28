@@ -118,6 +118,68 @@ export class OperationConsumerRepository {
     );
   }
 
+  public async acquireExecutionLease(
+    portalId: string,
+    operationId: string,
+    launchAttempt: number,
+    leaseId: string,
+  ) {
+    return z.boolean().parse(
+      await this.call('acquire_operation_execution_lease', {
+        p_portal_id: portalId,
+        p_operation_id: operationId,
+        p_launch_attempt: launchAttempt,
+        p_lease_id: leaseId,
+      }),
+    );
+  }
+
+  public async renewExecutionLease(input: {
+    portalId: string;
+    operationId: string;
+    launchAttempt: number;
+    leaseId: string;
+    taskId: string | null;
+    claimId: string | null;
+  }) {
+    return z.boolean().parse(
+      await this.call('renew_operation_execution_lease', {
+        p_portal_id: input.portalId,
+        p_operation_id: input.operationId,
+        p_launch_attempt: input.launchAttempt,
+        p_lease_id: input.leaseId,
+        p_task_id: input.taskId,
+        p_claim_id: input.claimId,
+      }),
+    );
+  }
+
+  public async releaseExecutionLease(
+    portalId: string,
+    operationId: string,
+    launchAttempt: number,
+    leaseId: string,
+  ) {
+    await this.call('release_operation_execution_lease', {
+      p_portal_id: portalId,
+      p_operation_id: operationId,
+      p_launch_attempt: launchAttempt,
+      p_lease_id: leaseId,
+    });
+  }
+
+  public async expireExecutionLeases(limit: number) {
+    return z
+      .number()
+      .int()
+      .nonnegative()
+      .parse(
+        await this.call('expire_operation_execution_leases', {
+          p_limit: limit,
+        }),
+      );
+  }
+
   public async reserveRateSlot(portalId: string, operationId: string, launchAttempt: number) {
     const value = await this.call('reserve_operation_api_slot', {
       p_portal_id: portalId,

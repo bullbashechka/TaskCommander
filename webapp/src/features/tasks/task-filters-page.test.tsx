@@ -26,6 +26,11 @@ import { AppAccessProvider, type AppAccessSnapshot } from '@/app/app-context';
 
 import { TaskFiltersPage } from './task-filters-page';
 
+vi.mock('@tanstack/react-router', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@tanstack/react-router')>()),
+  useNavigate: () => vi.fn(),
+}));
+
 vi.mock('@/app/app-api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/app/app-api')>()),
   createSavedTaskFilter: vi.fn(),

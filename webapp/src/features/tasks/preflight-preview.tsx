@@ -28,11 +28,13 @@ export function PreflightPreviewScreen({
   preview,
   catalog,
   onBack,
+  onOperationLaunched,
   canRetryLaunch = false,
 }: {
   preview: PreflightPreview;
   catalog: TaskChangeCatalogResponse;
   onBack(): void;
+  onOperationLaunched?(operation: BulkOperation): void;
   canRetryLaunch?: boolean;
 }) {
   const [acknowledged, setAcknowledged] = useState(false);
@@ -121,6 +123,7 @@ export function PreflightPreviewScreen({
       });
       if (identity === requestIdentity.current) {
         setOperation(result);
+        onOperationLaunched?.(result);
         confirmationRef.current = null;
         setConfirmation(null);
         setModalOpen(false);

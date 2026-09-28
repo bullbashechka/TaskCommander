@@ -170,8 +170,8 @@ async function createHarness(count: number, failFirstSend = false, lostResponse 
       launch_attempt: 1,
       idempotency_key: `confirmation:${token}`,
       preflight_snapshot: { draftId, draftRevision: 2 },
-      cancel_requested_at: null,
-      interruption_requested_at: null,
+      cancel_requested_at: null as string | null,
+      interruption_requested_at: null as string | null,
     },
     plan: { ...encrypted, payloadVersion: 1 },
     access: null,
@@ -181,6 +181,9 @@ async function createHarness(count: number, failFirstSend = false, lostResponse 
     return { operation: { status: 'completed' } };
   });
   const consumerRepository = {
+    acquireExecutionLease: vi.fn().mockResolvedValue(true),
+    renewExecutionLease: vi.fn().mockResolvedValue(true),
+    releaseExecutionLease: vi.fn().mockResolvedValue(undefined),
     readExecution: vi
       .fn()
       .mockImplementation(async () => (stored.operation.status === 'completed' ? null : stored)),
@@ -238,6 +241,7 @@ async function createHarness(count: number, failFirstSend = false, lostResponse 
     startOperation: vi.fn().mockResolvedValue({ operation: { status: 'running' } }),
     requestOperationInterruption: vi.fn(),
     finalizeOperation,
+    stored,
   } as unknown as TaskCommanderRepositories;
   const env = {
     OPERATION_PLAN_KEY_V1: keyBase64,
@@ -259,6 +263,21 @@ async function createHarness(count: number, failFirstSend = false, lostResponse 
 }
 
 describe('operation consumer continuation', () => {
+  it('stops claiming after the current task when cancellation is requested', async () => {
+    const harness = await createHarness(3);
+    vi.mocked(harness.consumerRepository.record).mockImplementationOnce(async (input) => {
+      harness.recorded.add(input.taskId);
+      harness.outcomes.push(input.outcome);
+      harness.stored.operation.cancel_requested_at = new Date().toISOString();
+      return { inserted: true } as Awaited<ReturnType<OperationConsumerRepository['record']>>;
+    });
+    await executeOperationMessage(harness);
+    expect(harness.recorded.size).toBe(1);
+    expect(harness.consumerRepository.claim).toHaveBeenCalledTimes(1);
+    expect(harness.finalizeOperation).toHaveBeenCalledOnce();
+    expect(harness.consumerRepository.releaseExecutionLease).toHaveBeenCalledOnce();
+  });
+
   it('finalizes exactly 100 eligible tasks without another Queue message', async () => {
     const harness = await createHarness(100);
     await executeOperationMessage(harness);
@@ -282,6 +301,160 @@ describe('operation consumer continuation', () => {
     expect(harness.outcomes.every((outcome) => outcome === 'success')).toBe(true);
     expect(harness.send).toHaveBeenCalledOnce();
     expect(harness.finalizeOperation).toHaveBeenCalledOnce();
+  });
+
+  it('releases the first delivery before Queue can deliver its continuation', async () => {
+    const harness = await createHarness(101);
+    let held = false;
+    vi.mocked(harness.consumerRepository.acquireExecutionLease).mockImplementation(async () => {
+      if (held) return false;
+      held = true;
+      return true;
+    });
+    vi.mocked(harness.consumerRepository.releaseExecutionLease).mockImplementation(async () => {
+      held = false;
+    });
+    harness.send.mockImplementationOnce(async () => {
+      await executeOperationMessage(harness);
+    });
+    await executeOperationMessage(harness);
+    expect(harness.recorded.size).toBe(101);
+    expect(harness.consumerRepository.acquireExecutionLease).toHaveBeenCalledTimes(2);
+    expect(harness.consumerRepository.releaseExecutionLease).toHaveBeenCalled();
+    expect(harness.finalizeOperation).toHaveBeenCalledOnce();
+  });
+
+  it('stops renewing a hung write and rejects its late response after watchdog interruption', async () => {
+    const harness = await createHarness(1);
+    let resolveWrite!: (
+      result: Awaited<ReturnType<typeof harness.adapter.tasks.applyChange>>,
+    ) => void;
+    const write = new Promise<Awaited<ReturnType<typeof harness.adapter.tasks.applyChange>>>(
+      (resolve) => {
+        resolveWrite = resolve;
+      },
+    );
+    vi.spyOn(harness.adapter.tasks, 'applyChange').mockReturnValue(write);
+    vi.useFakeTimers();
+    try {
+      const execution = executeOperationMessage(harness);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(harness.adapter.tasks.applyChange).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(480_000);
+      harness.stored.operation.status = 'interrupted';
+      const renewals = vi.mocked(harness.consumerRepository.renewExecutionLease).mock.calls.length;
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(harness.consumerRepository.renewExecutionLease).toHaveBeenCalledTimes(renewals);
+      resolveWrite({ ok: true, value: { kind: 'conflict' } });
+      await expect(execution).rejects.toThrow('Operation execution lease lost.');
+      expect(harness.consumerRepository.record).not.toHaveBeenCalled();
+      expect(harness.consumerRepository.releaseExecutionLease).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not renew a claim after its result commits but before the RPC responds', async () => {
+    const harness = await createHarness(1);
+    let respond!: () => void;
+    const response = new Promise<void>((resolve) => {
+      respond = resolve;
+    });
+    vi.mocked(harness.consumerRepository.record).mockImplementation(async (input) => {
+      harness.recorded.add(input.taskId);
+      harness.outcomes.push(input.outcome);
+      await response;
+      return { inserted: true } as Awaited<ReturnType<OperationConsumerRepository['record']>>;
+    });
+    vi.mocked(harness.consumerRepository.renewExecutionLease).mockImplementation(
+      async (input) => !input.taskId || !harness.recorded.has(input.taskId),
+    );
+    vi.useFakeTimers();
+    try {
+      const execution = executeOperationMessage(harness);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(harness.recorded.has('1000')).toBe(true);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(harness.consumerRepository.renewExecutionLease).toHaveBeenCalledWith(
+        expect.objectContaining({ taskId: null, claimId: null }),
+      );
+      respond();
+      await execution;
+      expect(harness.finalizeOperation).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not renew a released claim while a transient release response is delayed', async () => {
+    const harness = await createHarness(1);
+    vi.spyOn(harness.adapter.tasks, 'readForChange').mockResolvedValueOnce({
+      ok: false,
+      failure: { kind: 'temporary_failure', reasonCode: 'upstream_unavailable' },
+    });
+    let respond!: () => void;
+    const response = new Promise<void>((resolve) => {
+      respond = resolve;
+    });
+    let released = false;
+    vi.mocked(harness.consumerRepository.release).mockImplementation(async () => {
+      released = true;
+      await response;
+      return true;
+    });
+    vi.mocked(harness.consumerRepository.renewExecutionLease).mockImplementation(
+      async (input) => !input.taskId || !released,
+    );
+    vi.useFakeTimers();
+    try {
+      const execution = executeOperationMessage(harness);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(released).toBe(true);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(harness.consumerRepository.renewExecutionLease).toHaveBeenCalledWith(
+        expect.objectContaining({ taskId: null, claimId: null }),
+      );
+      respond();
+      await expect(execution).rejects.toThrow('Task reread temporarily unavailable.');
+      expect(harness.consumerRepository.releaseExecutionLease).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not renew a rate-limited writing claim after release commits', async () => {
+    const harness = await createHarness(1);
+    vi.spyOn(harness.adapter.tasks, 'applyChange').mockResolvedValueOnce({
+      ok: false,
+      failure: { kind: 'rate_limited', limit: 'intensity', retryAt: null },
+    });
+    let respond!: () => void;
+    const response = new Promise<void>((resolve) => {
+      respond = resolve;
+    });
+    let released = false;
+    vi.mocked(harness.consumerRepository.releaseRateLimited).mockImplementation(async () => {
+      released = true;
+      await response;
+      return true;
+    });
+    vi.mocked(harness.consumerRepository.renewExecutionLease).mockImplementation(
+      async (input) => !input.taskId || !released,
+    );
+    vi.useFakeTimers();
+    try {
+      const execution = executeOperationMessage(harness);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(released).toBe(true);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(harness.consumerRepository.renewExecutionLease).toHaveBeenCalledWith(
+        expect.objectContaining({ taskId: null, claimId: null }),
+      );
+      respond();
+      await expect(execution).rejects.toThrow('Task write rate limited.');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('retains the first 100 results when continuation send fails and redelivery resumes', async () => {
@@ -370,6 +543,9 @@ describe('operation consumer continuation', () => {
       expect(harness.consumerRepository.markWriting).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(120_001);
       await execution;
+      expect(harness.consumerRepository.renewExecutionLease).toHaveBeenCalledWith(
+        expect.objectContaining({ taskId: '1000' }),
+      );
       expect(harness.consumerRepository.markWriting).toHaveBeenCalledOnce();
       expect(harness.outcomes).toEqual(['success']);
     } finally {

@@ -867,6 +867,102 @@ export class TaskCommanderRepositories {
     return mapOperation(row as unknown as OperationRow);
   }
 
+  public async getOwnedOperationProgress(
+    context: DataAccessContext,
+    operationId: string,
+  ): Promise<BulkOperation> {
+    requireDataAccessContext(context);
+    if (
+      !hasPermission(context, 'run_bulk_operations') &&
+      !hasPermission(context, 'view_own_reports') &&
+      !hasPermission(context, 'view_all_reports')
+    ) {
+      requireRepositoryPermission(context, 'view_own_reports');
+    }
+    return this.getOwnedOperation(context, operationId);
+  }
+
+  public async getLatestOwnedOperationProgress(
+    context: DataAccessContext,
+  ): Promise<BulkOperation | null> {
+    requireDataAccessContext(context);
+    if (
+      !hasPermission(context, 'run_bulk_operations') &&
+      !hasPermission(context, 'view_own_reports') &&
+      !hasPermission(context, 'view_all_reports')
+    ) {
+      requireRepositoryPermission(context, 'view_own_reports');
+    }
+    const { data, error } = await this.client
+      .from('bulk_operation')
+      .select('*')
+      .eq('portal_id', context.portalId)
+      .eq('initiator_id', context.actorId)
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) throw toDataAccessError(error);
+    return data ? mapOperation(data) : null;
+  }
+
+  public async listOwnedOperationProgressResults(
+    context: DataAccessContext,
+    operationId: string,
+    request: PageRequest = {},
+  ): Promise<CursorPage<TaskOutcome>> {
+    await this.getOwnedOperationProgress(context, operationId);
+    const scope = `${scopeKey(context, 'own')}:${operationId}`;
+    const page = resolvePageRequest(request, 'operation-progress-results', scope);
+    let query = this.client
+      .from('task_processing_result')
+      .select('*')
+      .eq('operation_id', operationId)
+      .lte('created_at', page.asOf)
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
+      .limit(page.limit + 1);
+    if (page.before) {
+      query = query.or(
+        `created_at.lt.${page.before.timestamp},and(created_at.eq.${page.before.timestamp},id.lt.${page.before.id})`,
+      );
+    }
+    const rows = await requireData(query);
+    const visible = rows.slice(0, page.limit);
+    const ids = visible.map((row) => row.id);
+    const refinements: DatabaseTable<'task_result_refinement'>[] =
+      ids.length === 0
+        ? []
+        : await requireData(
+            this.client
+              .from('task_result_refinement')
+              .select('*')
+              .in('source_task_processing_result_id', ids),
+          );
+    const bySource = new Map(
+      refinements.map((refinement) => [
+        refinement.source_task_processing_result_id,
+        mapTaskOutcomeRefinement(taskResultRefinementRowSchema.parse(refinement)),
+      ]),
+    );
+    const last = visible.at(-1);
+    return {
+      items: visible.map((row) =>
+        mapTaskOutcome(row, this.trustedPortalOrigins, bySource.get(row.id) ?? null),
+      ),
+      nextCursor:
+        rows.length > page.limit && last
+          ? createNextCursor(
+              'operation-progress-results',
+              scope,
+              page.asOf,
+              last.created_at,
+              last.id,
+            )
+          : null,
+    };
+  }
+
   public async claimOperationLaunchDispatch(
     portalId: string,
     operationId: string,
@@ -1115,11 +1211,18 @@ export class TaskCommanderRepositories {
     input: { operationId: string; correlationId: string; kind: 'cancel' },
   ): Promise<OperationCommandResult> {
     const operation = await this.getOwnedOperation(context, input.operationId);
+    const rpc = this.client.rpc.bind(this.client) as unknown as (
+      name: 'request_owned_operation_cancellation',
+      args: Record<string, unknown>,
+    ) => PromiseLike<{ data: Json | null; error: unknown | null }>;
     const payload = await requireData(
-      this.client.rpc('request_bulk_operation_cancellation', {
+      rpc('request_owned_operation_cancellation', {
         p_portal_id: context.portalId,
+        p_owner_id: context.actorId,
         p_operation_id: operation.id,
         p_correlation_id: input.correlationId,
+        p_expected_access_version: context.accessVersion,
+        p_is_bitrix_admin: context.isBitrixAdmin,
       }),
     );
     return this.resolveOperationCommand(payload);

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 
 import type {
   BulkOperationDraft,
+  BulkOperation,
   PreflightPreview,
   TaskChangeAction,
   TaskChangeCatalogResponse,
@@ -44,6 +45,7 @@ type Props = {
   replaceExpired: boolean;
   onBack(): void;
   onSaved(draft: BulkOperationDraft): void;
+  onOperationLaunched?(operation: BulkOperation): void;
 };
 
 const actionLabels: Readonly<Record<TaskChangeAction, string>> = {
@@ -405,6 +407,7 @@ export function BulkChangeEditor({
   replaceExpired,
   onBack,
   onSaved,
+  onOperationLaunched,
 }: Props) {
   const app = useAppAccess();
   const queryClient = useQueryClient();
@@ -814,6 +817,7 @@ export function BulkChangeEditor({
       <PreflightPreviewScreen
         canRetryLaunch={app?.access.permissions.includes('retry_operations') ?? false}
         catalog={catalog.data}
+        onOperationLaunched={onOperationLaunched}
         onBack={() => {
           preflightGeneration.current += 1;
           returnFocusToHeading.current = true;

@@ -111,3 +111,9 @@ export async function redriveStalledOperations(
     }
   }
 }
+
+export async function maintainOperationExecutions(env: RuntimeEnvironment): Promise<void> {
+  const repository = new OperationConsumerRepository(env);
+  await repository.expireExecutionLeases(100);
+  await redriveStalledOperations(env, repository);
+}
