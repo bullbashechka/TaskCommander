@@ -10,7 +10,7 @@ describe('runtime probe consumer', () => {
     vi.restoreAllMocks();
   });
 
-  it('retries an operation envelope until the execution consumer is installed', async () => {
+  it('retries a valid operation envelope when execution dependencies fail', async () => {
     const batch = createMessageBatch(queueName, [
       {
         id: 'queued-operation',
@@ -32,6 +32,37 @@ describe('runtime probe consumer', () => {
     await expect(getQueueResult(batch, context)).resolves.toMatchObject({
       retryMessages: [{ msgId: 'queued-operation' }],
       explicitAcks: [],
+    });
+  });
+
+  it('acknowledges an operation only after the execution handler resolves', async () => {
+    const batch = createMessageBatch(queueName, [
+      {
+        id: 'executed-operation',
+        timestamp: new Date(),
+        attempts: 1,
+        body: {
+          schemaVersion: 1,
+          messageId: '123e4567-e89b-42d3-a456-426614174001',
+          kind: 'operation.execute',
+          portalId: 'portal-1',
+          operationId: '123e4567-e89b-42d3-a456-426614174000',
+          launchAttempt: 1,
+          createdAt: '2026-09-28T00:00:00.000Z',
+        },
+      },
+    ]);
+    const context = createExecutionContext();
+    const execute = vi.fn().mockResolvedValue(undefined);
+    await consumeRuntimeProbeBatch(batch, env, execute);
+    await expect(getQueueResult(batch, context)).resolves.toMatchObject({
+      explicitAcks: ['executed-operation'],
+      retryMessages: [],
+    });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execute.mock.calls[0]?.[0]).toMatchObject({
+      launchAttempt: 1,
+      operationId: '123e4567-e89b-42d3-a456-426614174000',
     });
   });
 

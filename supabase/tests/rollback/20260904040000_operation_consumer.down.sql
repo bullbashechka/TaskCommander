@@ -1,0 +1,17 @@
+drop function public.record_claimed_task_result(text,uuid,integer,text,uuid,text,text,text,text[],text[],text[],text,text,text,boolean,text);
+drop function public.claim_stalled_operation_executions(integer);
+drop function public.refine_claimed_task_result(text,uuid,text,uuid,text,text);
+drop function public.apply_claimed_mock_task_change(text,uuid,integer,text,uuid,bigint,jsonb,jsonb);
+drop function public.mark_operation_task_writing(text,uuid,integer,text,uuid,text,bigint,bigint,text[],text,text,text,smallint);
+drop function public.claim_operation_task(text,uuid,integer,text,uuid);
+drop function public.read_operation_task_claim(text,uuid,text);
+drop function public.release_prepared_operation_task(text,uuid,text,uuid);
+drop function public.release_rate_limited_operation_task(text,uuid,text,uuid);
+drop function public.read_operation_execution(text,uuid,integer);
+drop function public.reserve_operation_api_slot(text,uuid,integer);
+drop function public.read_mock_task_state(text,text);
+drop function public.list_mock_task_state(text);
+drop function public.mutate_mock_task_state(text,text,bigint,jsonb);
+drop table public.mock_task_state;
+drop table public.operation_api_rate_slot;
+drop table public.operation_task_claim;

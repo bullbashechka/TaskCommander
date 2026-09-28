@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { TaskCommanderRepositories } from '../src/data';
+import type { OperationConsumerRepository } from '../src/task-changes/operation-consumer-repository';
 import {
   dispatchOperationLaunch,
   dispatchPendingOperationLaunches,
+  redriveStalledOperations,
 } from '../src/task-changes/dispatch';
 
 const dispatch = {
@@ -101,5 +103,22 @@ describe('operation launch dispatch', () => {
         ),
       }),
     );
+  });
+
+  it('redrives a stalled running attempt with its stable envelope after a send failure', async () => {
+    const item = fixture();
+    const repository = {
+      claimStalledExecutions: vi.fn().mockResolvedValue([dispatch]),
+    } as unknown as OperationConsumerRepository;
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      item.send.mockRejectedValueOnce(new Error('temporary queue failure'));
+      await redriveStalledOperations(item.env, repository);
+      await redriveStalledOperations(item.env, repository);
+      expect(item.send).toHaveBeenCalledTimes(2);
+      expect(item.send.mock.calls[0]?.[0]).toEqual(item.send.mock.calls[1]?.[0]);
+    } finally {
+      log.mockRestore();
+    }
   });
 });

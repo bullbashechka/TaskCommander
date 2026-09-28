@@ -17,6 +17,13 @@
     "ACCESS_COMMANDS_QUEUE_NAME": "task-commander-local-access-commands-v1",
   },
   "queues": {
+    "producers": [
+      {
+        "binding": "OPERATIONS_QUEUE",
+        "queue": "task-commander-local-operations-v1",
+        "remote": false,
+      },
+    ],
     "consumers": [
       {
         "queue": "task-commander-local-operations-v1",

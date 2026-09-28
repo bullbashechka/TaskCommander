@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import consumerConfig from '../wrangler.consumer.jsonc?raw';
 import {
   getRuntimeReadiness,
   hasLocalIdentityConfiguration,
@@ -14,6 +15,12 @@ const validConfiguration = {
 };
 
 describe('local identity configuration', () => {
+  it('binds the consumer as a producer for operation continuation', () => {
+    const producers = consumerConfig.match(/"producers"\s*:\s*\[([\s\S]*?)\]/)?.[1] ?? '';
+    expect(producers).toMatch(/"binding"\s*:\s*"OPERATIONS_QUEUE"/);
+    expect(producers).toMatch(/"queue"\s*:\s*"task-commander-local-operations-v1"/);
+  });
+
   it('requires the local mock adapter and distinct signing keys', () => {
     const equivalentEncodedSecretA = '\ud800'.repeat(11);
     const equivalentEncodedSecretB = '\ud801'.repeat(11);

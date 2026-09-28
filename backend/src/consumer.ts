@@ -1,7 +1,10 @@
 import { accessPermissionCatalog } from '@task-commander/contracts';
 
 import { accessCommandQueueMessageSchema } from './contracts/access-command-queue';
-import { operationQueueMessageSchema } from './contracts/operation-queue';
+import {
+  operationQueueMessageSchema,
+  type OperationQueueMessage,
+} from './contracts/operation-queue';
 import { createAccessManagementRepository, type AccessManagementRepository } from './data';
 import {
   getRequiredR2Binding,
@@ -11,6 +14,7 @@ import {
 import { createBitrixAdapter } from './integrations/bitrix/factory';
 import type { BitrixFailure } from './integrations/bitrix/contract';
 import { isRuntimeProbeMessage, verifyRuntimeProbeArtifact } from './runtime/probe';
+import { executeOperationMessage } from './task-changes/operation-executor';
 
 function getSafeSchemaVersion(value: unknown): number | undefined {
   if (typeof value !== 'object' || value === null) {
@@ -23,14 +27,28 @@ function getSafeSchemaVersion(value: unknown): number | undefined {
 
 export async function consumeRuntimeProbeBatch(
   batch: MessageBatch<unknown>,
-  env: Pick<RuntimeEnvironment, 'REPORTS_BUCKET'>,
+  env: RuntimeEnvironment,
+  executeOperation: (message: OperationQueueMessage, env: RuntimeEnvironment) => Promise<void> = (
+    message,
+    env,
+  ) => executeOperationMessage({ env, message }),
 ): Promise<void> {
   for (const message of batch.messages) {
     const operation = operationQueueMessageSchema.safeParse(message.body);
     if (operation.success) {
-      // Task execution starts in 022. Never acknowledge a valid operation without a worker.
-      // Finite Queue retries lead to DLQ; the durable outbox republishes a still-launching attempt.
-      message.retry();
+      try {
+        await executeOperation(operation.data, env);
+        message.ack();
+      } catch (error) {
+        console.error(
+          JSON.stringify({
+            event: 'operation_execution_failed',
+            operationId: operation.data.operationId,
+            errorName: error instanceof Error ? error.name : 'unknown',
+          }),
+        );
+        message.retry();
+      }
       continue;
     }
     if (!isRuntimeProbeMessage(message.body)) {

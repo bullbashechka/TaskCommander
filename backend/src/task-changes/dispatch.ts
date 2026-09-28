@@ -1,6 +1,7 @@
 import { createOperationQueueMessage } from '../contracts/operation-queue';
 import { createTaskCommanderRepositories, type TaskCommanderRepositories } from '../data';
 import { getRequiredQueueBinding, type RuntimeEnvironment } from '../runtime/configuration';
+import { OperationConsumerRepository } from './operation-consumer-repository';
 
 type DispatchRepository = Pick<
   TaskCommanderRepositories,
@@ -75,6 +76,36 @@ export async function dispatchPendingOperationLaunches(
           event: 'operation_launch_dispatch_failed',
           operationId: dispatch.operation_id,
           errorName: error instanceof Error ? error.name : 'unknown',
+        }),
+      );
+    }
+  }
+}
+
+export async function redriveStalledOperations(
+  env: RuntimeEnvironment,
+  repository: Pick<
+    OperationConsumerRepository,
+    'claimStalledExecutions'
+  > = new OperationConsumerRepository(env),
+): Promise<void> {
+  const stalled = await repository.claimStalledExecutions(100);
+  for (const dispatch of stalled) {
+    try {
+      await getRequiredQueueBinding(env.OPERATIONS_QUEUE).send(
+        createOperationQueueMessage({
+          portalId: dispatch.portal_id,
+          operationId: dispatch.operation_id,
+          launchAttempt: dispatch.launch_attempt,
+          messageId: dispatch.message_id,
+          createdAt: dispatch.created_at,
+        }),
+      );
+    } catch {
+      console.error(
+        JSON.stringify({
+          event: 'operation_execution_redrive_failed',
+          operationId: dispatch.operation_id,
         }),
       );
     }

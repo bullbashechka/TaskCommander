@@ -149,7 +149,10 @@ export type TaskChangeRouteDependencies = Readonly<{
     env: RuntimeEnvironment,
     principal: VerifiedSessionPrincipal,
   ): Promise<EffectiveAccess>;
-  createAdapter(env: RuntimeEnvironment, input: { currentUserId: string }): BitrixAdapter;
+  createAdapter(
+    env: RuntimeEnvironment,
+    input: { currentUserId: string; portalId?: string },
+  ): BitrixAdapter;
   createRepository(env: RuntimeEnvironment): TaskChangeRepository;
 }>;
 
@@ -280,9 +283,13 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
     return authorization;
   }
 
-  function createAdapter(env: RuntimeEnvironment, currentUserId: string): BitrixAdapter {
+  function createAdapter(
+    env: RuntimeEnvironment,
+    currentUserId: string,
+    portalId: string,
+  ): BitrixAdapter {
     try {
-      return dependencies.createAdapter(env, { currentUserId });
+      return dependencies.createAdapter(env, { currentUserId, portalId });
     } catch {
       throw new ApiHttpError(503, 'UPSTREAM_UNAVAILABLE');
     }
@@ -301,7 +308,7 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
 
   routes.get('/change-fields', async (context) => {
     const { principal, access } = await authorize(context);
-    const adapter = createAdapter(context.env, principal.userId);
+    const adapter = createAdapter(context.env, principal.userId, principal.portalId);
     const capabilities = await loadCapabilities(adapter);
     return context.json(
       taskChangeCatalogResponseSchema.parse(
@@ -327,7 +334,7 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
       saveBulkOperationDraftRequestSchema,
       131_072,
     );
-    const adapter = createAdapter(context.env, principal.userId);
+    const adapter = createAdapter(context.env, principal.userId, principal.portalId);
     const capabilities = await loadCapabilities(adapter);
     try {
       requireValidTaskSearchDefinition(input, createTaskFilterCatalog(capabilities));
@@ -398,7 +405,11 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
       throw new ApiHttpError(409, 'CONFLICT');
     }
 
-    const adapter = createAdapter(context.env, authorization.principal.userId);
+    const adapter = createAdapter(
+      context.env,
+      authorization.principal.userId,
+      authorization.principal.portalId,
+    );
     const capabilities = await loadCapabilities(adapter);
     const catalog = createTaskChangeCatalog(capabilities, authorization.access.fieldScope);
     try {

@@ -58,7 +58,9 @@
 - [x] [021. Реализовать создание и постановку операции в очередь](tasks/021-operation-enqueue.md)
 
 Реализация 021 завершена; пользовательская проверка ожидается: `bun run check`, `bun run db:docker:test`.
-- [ ] [022. Реализовать Worker consumer массовой операции](tasks/022-queue-consumer.md)
+- [x] [022. Реализовать Worker consumer массовой операции](tasks/022-queue-consumer.md)
+
+Реализация 022 завершена на тестовом mock; пользовательская проверка ожидается: `bun run check`, `bun run db:docker:test`. Реальный Bitrix не проверен.
 - [ ] [023. Реализовать прогресс, отмену и прерывание операции](tasks/023-progress-cancellation.md)
 - [ ] [024. Реализовать повторный прогон неуспешных задач](tasks/024-retry-operation.md)
 - [ ] [025. Реализовать восстановление предыдущих значений](tasks/025-restore-operation.md)

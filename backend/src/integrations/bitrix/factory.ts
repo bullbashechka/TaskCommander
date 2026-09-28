@@ -1,6 +1,7 @@
 import type { RuntimeEnvironment } from '../../runtime/configuration';
 import type { BitrixAdapter } from './contract';
 import { createMockBitrixAdapter } from './mock';
+import { createSupabaseMockTaskPersistence } from './mock/persistence';
 import { enforceBitrixOriginPolicy } from './trusted-origin-adapter';
 
 export class BitrixAdapterConfigurationError extends Error {}
@@ -11,10 +12,18 @@ export function isSupportedBitrixAdapterConfiguration(env: RuntimeEnvironment): 
 
 export function createBitrixAdapter(
   env: RuntimeEnvironment,
-  options: { currentUserId?: string } = {},
+  options: { currentUserId?: string; portalId?: string } = {},
 ): BitrixAdapter {
   if (isSupportedBitrixAdapterConfiguration(env)) {
-    return enforceBitrixOriginPolicy(createMockBitrixAdapter(options), env);
+    return enforceBitrixOriginPolicy(
+      createMockBitrixAdapter({
+        currentUserId: options.currentUserId,
+        taskPersistence: options.portalId
+          ? createSupabaseMockTaskPersistence(env, options.portalId)
+          : undefined,
+      }),
+      env,
+    );
   }
 
   throw new BitrixAdapterConfigurationError(

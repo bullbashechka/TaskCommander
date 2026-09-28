@@ -6,6 +6,7 @@ import { createMockOrganization } from './organization';
 import { createMockScenario, type MockScenarioController } from './scenario';
 import { createMockPortalState, type MockPortalOptions, type MockPortalState } from './state';
 import { createMockTasks } from './tasks';
+import type { MockTaskPersistence } from './persistence';
 import { createMockUsers } from './users';
 
 export interface MockBitrixAdapter extends BitrixAdapter {
@@ -15,6 +16,7 @@ export interface MockBitrixAdapter extends BitrixAdapter {
 
 export interface CreateMockBitrixAdapterOptions extends MockPortalOptions {
   scenario?: MockScenarioController;
+  taskPersistence?: MockTaskPersistence;
 }
 
 export function createMockBitrixAdapter(
@@ -26,7 +28,7 @@ export function createMockBitrixAdapter(
   return {
     state,
     scenario,
-    tasks: createMockTasks(state, scenario),
+    tasks: createMockTasks(state, scenario, options.taskPersistence),
     users: createMockUsers(state, scenario),
     organization: createMockOrganization(state, scenario),
     calendar: createMockCalendar(state, scenario),

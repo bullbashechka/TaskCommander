@@ -11,6 +11,52 @@ function expectSuccess<T>(result: { ok: true; value: T } | { ok: false }): T {
 }
 
 describe('mock Bitrix task changes', () => {
+  it('compares all relevant fields when only one field is written', async () => {
+    const state = createMockPortalState();
+    const tasks = createMockTasks(state);
+    const snapshot = expectSuccess(
+      await tasks.readForChange({
+        taskId: mockFixtureIds.visibleTask,
+        fieldIds: ['title', 'description'],
+      }),
+    );
+    const changedTask = state.getMutableTask(mockFixtureIds.visibleTask);
+    if (!changedTask) throw new Error('Visible fixture is unavailable.');
+    changedTask.values.description = 'Concurrent edit';
+    const result = expectSuccess(
+      await tasks.applyChange({
+        taskId: snapshot.taskId,
+        expectedRelevantVersion: snapshot.relevantVersion,
+        relevantFieldIds: ['title', 'description'],
+        targetValues: { title: 'New title' },
+      }),
+    );
+    expect(result.kind).toBe('conflict');
+  });
+
+  it('includes the paired start date in a deadline write version', async () => {
+    const state = createMockPortalState();
+    const tasks = createMockTasks(state);
+    const snapshot = expectSuccess(
+      await tasks.readForChange({
+        taskId: mockFixtureIds.visibleTask,
+        fieldIds: ['deadline', 'start_date'],
+      }),
+    );
+    const changedTask = state.getMutableTask(mockFixtureIds.visibleTask);
+    if (!changedTask) throw new Error('Visible fixture is unavailable.');
+    changedTask.values.start_date = '2026-08-11T10:00:00+05:00';
+    const result = expectSuccess(
+      await tasks.applyChange({
+        taskId: snapshot.taskId,
+        expectedRelevantVersion: snapshot.relevantVersion,
+        relevantFieldIds: ['deadline', 'start_date'],
+        targetValues: { deadline: '2026-08-20T10:00:00+05:00' },
+      }),
+    );
+    expect(result.kind).toBe('conflict');
+  });
+
   it('detects a relevant field change as a conflict', async () => {
     const state = createMockPortalState();
     const tasks = createMockTasks(state);

@@ -84,7 +84,7 @@ export interface ApiDependencies {
   readonly createSettingsReader?: (env: RuntimeEnvironment) => EffectiveAccessSettingsReader;
   readonly createBitrixAdapter?: (
     env: RuntimeEnvironment,
-    input: { currentUserId: string },
+    input: { currentUserId: string; portalId?: string },
   ) => BitrixAdapter;
   readonly createAccessManagementRepository?: (
     env: RuntimeEnvironment,
@@ -312,7 +312,10 @@ export function createApi(dependencies: ApiDependencies = {}) {
 
     let rawPage: unknown;
     try {
-      const adapter = bitrixAdapterFactory(context.env, { currentUserId: principal.userId });
+      const adapter = bitrixAdapterFactory(context.env, {
+        currentUserId: principal.userId,
+        portalId: principal.portalId,
+      });
       const capabilities = await adapter.tasks.getFieldCapabilities();
       if (!capabilities.ok) throw toTaskFilterBitrixApiError(capabilities.failure);
       const catalog = createTaskFilterCatalog(capabilities.value);
@@ -332,14 +335,10 @@ export function createApi(dependencies: ApiDependencies = {}) {
     if (!page.success) throw new ApiHttpError(503, 'UPSTREAM_UNAVAILABLE');
 
     const pageStart = (request.page - 1) * request.pageSize;
-    const expectedItemCount = Math.min(
-      request.pageSize,
-      Math.max(0, page.data.total - pageStart),
-    );
+    const expectedItemCount = Math.min(request.pageSize, Math.max(0, page.data.total - pageStart));
     const expectedHasNextPage = pageStart + expectedItemCount < page.data.total;
     const invalidPagination =
-      page.data.items.length !== expectedItemCount ||
-      page.data.hasNextPage !== expectedHasNextPage;
+      page.data.items.length !== expectedItemCount || page.data.hasNextPage !== expectedHasNextPage;
     if (invalidPagination) throw new ApiHttpError(503, 'UPSTREAM_UNAVAILABLE');
 
     return context.json(
@@ -370,7 +369,10 @@ export function createApi(dependencies: ApiDependencies = {}) {
 
     let rawResolution: unknown;
     try {
-      const adapter = bitrixAdapterFactory(context.env, { currentUserId: principal.userId });
+      const adapter = bitrixAdapterFactory(context.env, {
+        currentUserId: principal.userId,
+        portalId: principal.portalId,
+      });
       const capabilities = await adapter.tasks.getFieldCapabilities();
       if (!capabilities.ok) throw toTaskFilterBitrixApiError(capabilities.failure);
       const catalog = createTaskFilterCatalog(capabilities.value);

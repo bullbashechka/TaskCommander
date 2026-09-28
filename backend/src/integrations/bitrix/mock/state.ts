@@ -77,6 +77,7 @@ export interface MockPortalState {
   now: string;
   timeZone: string;
   taskOverrides: Map<string, MockTask>;
+  mutationVersions: Map<string, number>;
   users: Map<string, MockUserRecord>;
   departments: Map<string, MockDepartmentRecord>;
   calendar: MockCalendarRecord;
@@ -190,6 +191,7 @@ export function createMockPortalState(options: MockPortalOptions = {}): MockPort
     now: options.now ?? '2026-08-10T09:00:00+05:00',
     timeZone: options.timeZone ?? 'Asia/Qyzylorda',
     taskOverrides,
+    mutationVersions: new Map(),
     users,
     departments,
     calendar: {

@@ -18,6 +18,7 @@ import {
   taskSelectAllRequestSchema,
 } from '../schemas';
 import type { MockTask } from './fixtures';
+import type { MockTaskPersistence } from './persistence';
 import type { MockScenarioController, MockScenarioEffect } from './scenario';
 import type { MockPortalState } from './state';
 import { createRelevantVersion } from './version';
@@ -491,15 +492,20 @@ function valuesEqual(
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-function applyTaskMutation(state: MockPortalState, effect: MockScenarioEffect): void {
+async function applyTaskMutation(
+  state: MockPortalState,
+  effect: MockScenarioEffect,
+  persistence?: MockTaskPersistence,
+): Promise<void> {
   if (effect.kind !== 'mutate_task') {
     return;
   }
 
-  const task = state.getMutableTask(effect.taskId);
-  if (!task) {
+  const current = state.getMutableTask(effect.taskId);
+  if (!current) {
     return;
   }
+  const task = persistence ? { ...current, values: { ...current.values } } : current;
 
   if (effect.patch.status !== undefined) {
     task.status = effect.patch.status;
@@ -513,6 +519,12 @@ function applyTaskMutation(state: MockPortalState, effect: MockScenarioEffect): 
         task.title = value;
       }
     }
+  }
+  if (persistence) {
+    const version = await persistence.mutate(task, state.mutationVersions.get(task.id) ?? 0);
+    if (version === null) throw new Error('Mock task scenario mutation was superseded.');
+    state.taskOverrides.set(task.id, task);
+    state.mutationVersions.set(task.id, version);
   }
 }
 
@@ -551,6 +563,9 @@ async function createChangeSnapshot(
     value: {
       ...snapshotWithoutVersion,
       relevantVersion: await createRelevantVersion(snapshotWithoutVersion),
+      ...(state.mutationVersions.has(task.id)
+        ? { mutationVersion: state.mutationVersions.get(task.id) }
+        : {}),
     },
   };
 }
@@ -617,14 +632,35 @@ function filterAndSortTasks(state: MockPortalState, request: TaskSearchRequest):
 export function createMockTasks(
   state: MockPortalState,
   scenario: MockScenarioController = { take: () => [] },
+  persistence?: MockTaskPersistence,
 ): BitrixTasks {
+  async function hydrateTask(taskId: string): Promise<void> {
+    if (!persistence) return;
+    const stored = await persistence.read(taskId);
+    if (stored) {
+      state.taskOverrides.set(taskId, stored.task);
+      state.mutationVersions.set(taskId, stored.mutationVersion);
+    } else {
+      state.mutationVersions.set(taskId, 0);
+    }
+  }
+
+  async function hydrateAll(): Promise<void> {
+    if (!persistence) return;
+    for (const stored of await persistence.list()) {
+      state.taskOverrides.set(stored.task.id, stored.task);
+      state.mutationVersions.set(stored.task.id, stored.mutationVersion);
+    }
+  }
+
   return {
     async getFieldCapabilities() {
       return { ok: true, value: fieldCapabilities };
     },
     async search(input) {
+      await hydrateAll();
       const effects = scenario.take('tasks.search');
-      for (const effect of effects) applyTaskMutation(state, effect);
+      for (const effect of effects) await applyTaskMutation(state, effect, persistence);
       const failure = getFailure(effects);
       if (failure) return { ok: false, failure };
 
@@ -649,9 +685,10 @@ export function createMockTasks(
       return { ok: true, value: page };
     },
     async selectAll(input) {
+      await hydrateAll();
       const request = taskSelectAllRequestSchema.parse(input);
       const effects = scenario.take('tasks.selectAll');
-      for (const effect of effects) applyTaskMutation(state, effect);
+      for (const effect of effects) await applyTaskMutation(state, effect, persistence);
       const failure = getFailure(effects);
       if (failure) return { ok: false, failure };
 
@@ -670,22 +707,28 @@ export function createMockTasks(
       return { ok: true, value: resolution };
     },
     async readForChange(input) {
+      await hydrateTask(input.taskId);
       const request = taskReadForChangeRequestSchema.parse(input);
       const effects = scenario.take('tasks.readForChange', request.taskId);
-      for (const effect of effects) applyTaskMutation(state, effect);
+      for (const effect of effects) await applyTaskMutation(state, effect, persistence);
       const failure = getFailure(effects);
       if (failure) return { ok: false, failure };
       return createChangeSnapshot(state, request.taskId, request.fieldIds);
     },
     async applyChange(input) {
       const request = taskApplyRequestSchema.parse(input);
+      await hydrateTask(request.taskId);
       const effects = scenario.take('tasks.applyChange', request.taskId);
-      for (const effect of effects) applyTaskMutation(state, effect);
+      for (const effect of effects) await applyTaskMutation(state, effect, persistence);
       const failure = getFailure(effects);
       if (failure) return { ok: false, failure };
 
       const fieldIds = Object.keys(request.targetValues);
-      const current = await createChangeSnapshot(state, request.taskId, fieldIds);
+      const relevantFieldIds = request.relevantFieldIds ?? fieldIds;
+      if (!fieldIds.every((fieldId) => relevantFieldIds.includes(fieldId))) {
+        return { ok: false, failure: { kind: 'invalid_external_response' } };
+      }
+      const current = await createChangeSnapshot(state, request.taskId, relevantFieldIds);
       if (!current.ok) return current;
       if (current.value.relevantVersion !== request.expectedRelevantVersion) {
         return { ok: true, value: { kind: 'conflict', reason: 'state_changed' } };
@@ -714,6 +757,60 @@ export function createMockTasks(
           !valuesEqual(getFieldValue(task, fieldId), request.targetValues[fieldId] ?? null),
       );
       if (changedFieldIds.length === 0) return { ok: true, value: { kind: 'no_change' } };
+
+      if (persistence) {
+        if (!request.executionFence) {
+          return {
+            ok: false,
+            failure: { kind: 'unsupported_capability', capability: 'fenced_mock_write' },
+          };
+        }
+        const droppedResponse = effects.find(
+          (effect): effect is Extract<MockScenarioEffect, { kind: 'apply_then_drop_response' }> =>
+            effect.kind === 'apply_then_drop_response',
+        );
+        const persistedValues = droppedResponse
+          ? Object.fromEntries(
+              Object.entries(request.targetValues).filter(([fieldId]) =>
+                droppedResponse.appliedFieldIds.includes(fieldId),
+              ),
+            )
+          : request.targetValues;
+        if (droppedResponse && Object.keys(persistedValues).length === 0) {
+          return {
+            ok: false,
+            failure: { kind: 'temporary_failure', reasonCode: 'write_response_lost' },
+          };
+        }
+        const written = await persistence.apply({
+          taskId: request.taskId,
+          baseTask: task,
+          targetValues: persistedValues,
+          executionFence: request.executionFence,
+        });
+        if (written.kind === 'stale' || written.kind === 'conflict') {
+          return { ok: true, value: { kind: 'conflict', reason: 'state_changed' } };
+        }
+        if (written.kind === 'invalid') {
+          return { ok: false, failure: { kind: 'invalid_external_response' } };
+        }
+        if (written.kind === 'no_change') return { ok: true, value: { kind: 'no_change' } };
+        await hydrateTask(request.taskId);
+        if (droppedResponse) {
+          return {
+            ok: false,
+            failure: { kind: 'temporary_failure', reasonCode: 'write_response_lost' },
+          };
+        }
+        return {
+          ok: true,
+          value: {
+            kind: 'success',
+            appliedFieldIds: written.appliedFieldIds,
+            afterMutationVersion: written.afterMutationVersion,
+          },
+        };
+      }
 
       const droppedResponse = effects.find(
         (effect): effect is Extract<MockScenarioEffect, { kind: 'apply_then_drop_response' }> =>

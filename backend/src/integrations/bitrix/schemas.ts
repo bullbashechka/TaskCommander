@@ -189,6 +189,7 @@ export const taskChangeSnapshotSchema = z
     isRecurrenceRule: z.boolean(),
     deadlineManagedBySubtasks: z.boolean(),
     relevantVersion: z.string().trim().min(1).max(256),
+    mutationVersion: z.number().int().nonnegative().optional(),
   })
   .strict();
 
@@ -203,6 +204,17 @@ export const taskApplyRequestSchema = z
   .object({
     taskId: bitrixIdSchema,
     expectedRelevantVersion: z.string().trim().min(1).max(256),
+    relevantFieldIds: z.array(fieldIdSchema).min(1).max(256).optional(),
+    executionFence: z
+      .object({
+        portalId: z.string().trim().min(1).max(128),
+        operationId: z.string().uuid(),
+        launchAttempt: z.number().int().positive(),
+        claimId: z.string().uuid(),
+        expectedMutationVersion: z.number().int().nonnegative(),
+      })
+      .strict()
+      .optional(),
     targetValues: z
       .record(fieldIdSchema, bitrixTaskValueSchema)
       .refine((values) => Object.keys(values).length > 0, 'At least one target value is required.'),
@@ -214,6 +226,7 @@ export const taskApplyOutcomeSchema = z.discriminatedUnion('kind', [
     .object({
       kind: z.literal('success'),
       appliedFieldIds: z.array(fieldIdSchema).min(1).max(256),
+      afterMutationVersion: z.number().int().positive().optional(),
     })
     .strict(),
   z.object({ kind: z.literal('no_change') }).strict(),
