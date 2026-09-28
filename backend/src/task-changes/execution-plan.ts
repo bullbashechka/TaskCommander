@@ -1,6 +1,8 @@
 import {
   bulkOperationDraftSchema,
   preflightPreviewSchema,
+  taskChangeValueSchema,
+  restoreTaskIntentMetadataSchema,
   type BulkOperationDraft,
   type PreflightPreview,
 } from '@task-commander/contracts';
@@ -20,6 +22,10 @@ function decodeBase64(value: string): Uint8Array {
   return Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
 }
 
+const restoreIntentSchema = restoreTaskIntentMetadataSchema.extend({
+  targetValues: z.record(z.string(), taskChangeValueSchema),
+}).strict();
+
 const executionPlanSchema = z
   .object({
     draftId: bulkOperationDraftSchema.shape.id,
@@ -31,11 +37,15 @@ const executionPlanSchema = z
     retrySourceOperationId: bulkOperationDraftSchema.shape.retrySourceOperationId,
     retrySourceStateVersion: bulkOperationDraftSchema.shape.retrySourceStateVersion,
     retryIntents: bulkOperationDraftSchema.shape.retryIntents,
+    restoreSourceOperationId: bulkOperationDraftSchema.shape.restoreSourceOperationId,
+    restoreSourceStateVersion: bulkOperationDraftSchema.shape.restoreSourceStateVersion,
+    restoreIntents: z.array(restoreIntentSchema).min(1).max(1000).nullable().optional(),
     preflight: preflightPreviewSchema,
   })
   .strict();
 
 export type ExecutionPlan = z.infer<typeof executionPlanSchema>;
+export type RestoreTaskIntent = NonNullable<ExecutionPlan['restoreIntents']>[number];
 
 function planAssociatedData(input: {
   portalId: string;
@@ -56,6 +66,7 @@ export async function encryptExecutionPlan(input: {
   token: string;
   draft: BulkOperationDraft;
   preview: PreflightPreview;
+  restoreIntents?: RestoreTaskIntent[];
 }): Promise<{ ciphertext: string; nonce: string; keyVersion: string }> {
   let keyBytes: Uint8Array;
   if (!hasValidOperationPlanKey(input.keyBase64)) {
@@ -89,6 +100,9 @@ export async function encryptExecutionPlan(input: {
       retrySourceOperationId: input.draft.retrySourceOperationId,
       retrySourceStateVersion: input.draft.retrySourceStateVersion,
       retryIntents: input.draft.retryIntents,
+      restoreSourceOperationId: input.draft.restoreSourceOperationId,
+      restoreSourceStateVersion: input.draft.restoreSourceStateVersion,
+      restoreIntents: input.restoreIntents ?? null,
       preflight: input.preview,
     }),
   );
@@ -148,7 +162,11 @@ export async function decryptExecutionPlan(input: {
       (plan.retrySourceOperationId == null ||
         plan.retrySourceStateVersion == null ||
         plan.retryIntents.length !== plan.selectedTaskIds.length ||
-        plan.retryIntents.some((intent, index) => intent.taskId !== plan.selectedTaskIds[index])))
+        plan.retryIntents.some((intent, index) => intent.taskId !== plan.selectedTaskIds[index]))) ||
+    (plan.restoreSourceOperationId != null &&
+      (plan.restoreSourceStateVersion == null ||
+        plan.restoreIntents?.length !== plan.selectedTaskIds.length ||
+        plan.restoreIntents.some((intent, index) => intent.taskId !== plan.selectedTaskIds[index])))
   ) {
     throw new Error('Operation plan identity mismatch.');
   }
@@ -191,4 +209,84 @@ export async function encryptPreviousValues(input: {
     keyVersion: 'v1',
     payloadVersion: 1,
   };
+}
+
+export async function decryptPreviousValues(input: {
+  keyBase64: string | undefined;
+  portalId: string;
+  ownerId: string;
+  operationId: string;
+  taskId: string;
+  beforeVersion: string;
+  ciphertext: string;
+  nonce: string;
+  keyVersion: string;
+}): Promise<Record<string, z.infer<typeof taskChangeValueSchema>>> {
+  if (!hasValidOperationPlanKey(input.keyBase64) || input.keyVersion !== 'v1') {
+    throw new RuntimeConfigurationError('Operation result key is invalid.');
+  }
+  const nonce = decodeBase64(input.nonce);
+  if (nonce.byteLength !== 12) throw new Error('Invalid protected result nonce.');
+  const key = await crypto.subtle.importKey('raw', decodeBase64(input.keyBase64 ?? ''), 'AES-GCM', false, ['decrypt']);
+  const plaintext = await crypto.subtle.decrypt({
+    name: 'AES-GCM', iv: nonce,
+    additionalData: new TextEncoder().encode(
+      `task-commander:previous-values:v1:${input.portalId}:${input.ownerId}:${input.operationId}:${input.taskId}:${input.beforeVersion}`,
+    ),
+  }, key, decodeBase64(input.ciphertext));
+  return z.record(taskChangeValueSchema).parse(JSON.parse(new TextDecoder().decode(plaintext)));
+}
+
+export async function encryptPrivateRestoreData(input: {
+  keyBase64: string | undefined;
+  portalId: string;
+  ownerId: string;
+  draftId: string;
+  sourceOperationId: string;
+  sourceStateVersion: number;
+  revision: number;
+  purpose: 'intents' | 'preview';
+  value: RestoreTaskIntent[] | PreflightPreview;
+}): Promise<{ ciphertext: string; nonce: string; keyVersion: string }> {
+  if (!hasValidOperationPlanKey(input.keyBase64)) throw new RuntimeConfigurationError('Operation plan key is invalid.');
+  const key = await crypto.subtle.importKey('raw', decodeBase64(input.keyBase64 ?? ''), 'AES-GCM', false, ['encrypt']);
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt({
+    name: 'AES-GCM', iv: nonce,
+    additionalData: restoreAssociatedData(input),
+  }, key, new TextEncoder().encode(JSON.stringify(input.value)));
+  return { ciphertext: encodeBase64(new Uint8Array(ciphertext)), nonce: encodeBase64(nonce), keyVersion: 'v1' };
+}
+
+export async function decryptPrivateRestoreData(input: {
+  keyBase64: string | undefined;
+  portalId: string;
+  ownerId: string;
+  draftId: string;
+  sourceOperationId: string;
+  sourceStateVersion: number;
+  revision: number;
+  purpose: 'intents' | 'preview';
+  ciphertext: string;
+  nonce: string;
+  keyVersion: string;
+}): Promise<RestoreTaskIntent[] | PreflightPreview> {
+  if (!hasValidOperationPlanKey(input.keyBase64) || input.keyVersion !== 'v1') throw new RuntimeConfigurationError('Operation plan key is invalid.');
+  const nonce = decodeBase64(input.nonce);
+  if (nonce.byteLength !== 12) throw new Error('Invalid restore nonce.');
+  const key = await crypto.subtle.importKey('raw', decodeBase64(input.keyBase64 ?? ''), 'AES-GCM', false, ['decrypt']);
+  const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce, additionalData: restoreAssociatedData(input) }, key, decodeBase64(input.ciphertext));
+  const raw = JSON.parse(new TextDecoder().decode(plaintext));
+  return input.purpose === 'intents'
+    ? z.array(restoreIntentSchema).min(1).max(1000).parse(raw)
+    : preflightPreviewSchema.parse(raw);
+}
+
+function restoreAssociatedData(input: {
+  portalId: string; ownerId: string; draftId: string; sourceOperationId: string;
+  sourceStateVersion: number; revision: number; purpose: 'intents' | 'preview';
+}): Uint8Array {
+  return new TextEncoder().encode(
+    `task-commander:restore-${input.purpose}:v1:${input.portalId}:${input.ownerId}:${input.draftId}:${input.sourceOperationId}:${input.sourceStateVersion}:${input.revision}`,
+  );
 }

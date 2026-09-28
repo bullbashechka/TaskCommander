@@ -55,6 +55,7 @@ export const preflightDispositionSchema = z.enum([
   'eligible',
   'excluded_by_preflight',
   'no_change',
+  'conflict',
 ]);
 
 export const taskOutcomeStatusSchema = z.enum([
@@ -128,6 +129,7 @@ export const preflightTaskEntrySchema = z
     relevantVersion: z.string().trim().min(1).max(256).nullable(),
     currentValues: z.record(fieldIdSchema, taskChangeValueSchema).nullable(),
     targetValues: z.record(fieldIdSchema, taskChangeValueSchema).nullable(),
+    valuesOmitted: z.boolean().optional(),
   })
   .strict()
   .superRefine((entry, context) => {
@@ -151,8 +153,8 @@ export const preflightTaskEntrySchema = z
         entry.reasonCode !== null ||
         entry.reasonMessage !== null ||
         entry.relevantVersion === null ||
-        entry.currentValues === null ||
-        entry.targetValues === null
+        (!entry.valuesOmitted && (entry.currentValues === null || entry.targetValues === null)) ||
+        (entry.valuesOmitted && (entry.currentValues !== null || entry.targetValues !== null))
       ) {
         context.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid eligible entry.' });
       }
@@ -164,10 +166,22 @@ export const preflightTaskEntrySchema = z
         entry.reasonCode !== null ||
         entry.reasonMessage !== null ||
         entry.relevantVersion === null ||
-        entry.currentValues === null ||
-        entry.targetValues === null
+        (!entry.valuesOmitted && (entry.currentValues === null || entry.targetValues === null)) ||
+        (entry.valuesOmitted && (entry.currentValues !== null || entry.targetValues !== null))
       ) {
         context.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid no-change entry.' });
+      }
+      return;
+    }
+    if (entry.disposition === 'conflict') {
+      if (
+        entry.changedFieldIds.length !== 0 ||
+        entry.reasonCode === null ||
+        entry.reasonMessage === null ||
+        entry.currentValues !== null ||
+        entry.targetValues !== null
+      ) {
+        context.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid conflict entry.' });
       }
       return;
     }
@@ -228,6 +242,7 @@ export const preflightPreviewSchema = z
       (entry) => entry.disposition === 'excluded_by_preflight',
     ).length;
     const unchanged = preview.entries.filter((entry) => entry.disposition === 'no_change').length;
+    const conflicted = preview.entries.filter((entry) => entry.disposition === 'conflict').length;
     const executionCounters = [
       preview.summary.successful,
       preview.summary.failed,
@@ -243,7 +258,8 @@ export const preflightPreviewSchema = z
       preview.summary.eligible !== eligible ||
       preview.summary.excluded !== excluded ||
       preview.summary.unchanged !== unchanged ||
-      executionCounters.some((count) => count !== 0) ||
+      preview.summary.conflicted !== conflicted ||
+      executionCounters.some((count, index) => index !== 3 && count !== 0) ||
       preview.canProceed !== eligible > 0
     ) {
       context.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid preflight summary.' });
@@ -264,6 +280,37 @@ export const retryTaskIntentSchema = z
   });
 
 export type RetryTaskIntent = z.infer<typeof retryTaskIntentSchema>;
+
+export const restoreTaskIntentMetadataSchema = z
+  .object({
+    taskId: bitrixIdSchema,
+    fieldIds: z.array(fieldIdSchema).min(1).max(64).refine((ids) => new Set(ids).size === ids.length),
+    afterVersion: z.string().regex(/^mock:[1-9][0-9]*$/),
+  })
+  .strict();
+
+export const restoreSourceTaskSchema = z
+  .object({
+    taskId: bitrixIdSchema,
+    title: z.string().trim().min(1).max(1024).nullable(),
+    taskUrl: safeHttpsUrlSchema.nullable(),
+    appliedFieldIds: z.array(fieldIdSchema).min(1).max(64),
+  })
+  .strict();
+
+export const restoreSourceAvailabilitySchema = z
+  .object({
+    sourceOperationId: operationIdSchema,
+    sourceStateVersion: positiveIntegerSchema,
+    tasks: z.array(restoreSourceTaskSchema).max(1000),
+  })
+  .strict();
+
+export const prepareRestoreDraftRequestSchema = z
+  .object({ selectedTaskIds: z.array(bitrixIdSchema).min(1).max(1000).refine((ids) => new Set(ids).size === ids.length) })
+  .strict();
+
+export type RestoreTaskIntentMetadata = z.infer<typeof restoreTaskIntentMetadataSchema>;
 
 export const retryDraftRecoverySchema = z
   .object({ draftId: draftIdSchema, revision: positiveIntegerSchema })
@@ -298,6 +345,9 @@ export const bulkOperationDraftSchema = z
     retrySourceOperationId: operationIdSchema.nullable().optional(),
     retrySourceStateVersion: positiveIntegerSchema.nullable().optional(),
     retryIntents: z.array(retryTaskIntentSchema).min(1).max(1000).nullable().optional(),
+    restoreSourceOperationId: operationIdSchema.nullable().optional(),
+    restoreSourceStateVersion: positiveIntegerSchema.nullable().optional(),
+    restoreIntents: z.array(restoreTaskIntentMetadataSchema).min(1).max(1000).nullable().optional(),
     createdAt: isoDateTimeSchema,
     updatedAt: isoDateTimeSchema,
     expiresAt: isoDateTimeSchema,
@@ -311,6 +361,16 @@ export const bulkOperationDraftSchema = z
       retry !== (draft.retryIntents != null)
     ) {
       context.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid retry draft.' });
+    }
+    const restore = draft.restoreSourceOperationId != null;
+    if (
+      restore !== (draft.restoreSourceStateVersion != null) ||
+      restore !== (draft.restoreIntents != null) ||
+      (restore && retry) ||
+      (restore && draft.restoreIntents?.length !== draft.selectedTaskIds.length) ||
+      (restore && draft.restoreIntents?.some((intent, index) => intent.taskId !== draft.selectedTaskIds[index]))
+    ) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid restore draft.' });
     }
     if (
       retry &&
