@@ -2,6 +2,8 @@ import {
   apiErrorResponseSchema,
   bulkOperationDraftAvailabilitySchema,
   bulkOperationDraftSchema,
+  retryDraftRecoveryAvailabilitySchema,
+  retryDraftRecoverySchema,
   bulkOperationSchema,
   operationProgressSchema,
   operationProgressResultsPageSchema,
@@ -30,6 +32,7 @@ import {
   type OperationProgress,
   type OperationProgressResultsPage,
   type BulkOperationDraftAvailability,
+  type RetryDraftRecovery,
   type ConfirmTaskPreflightRequest,
   type LaunchTaskPreflightRequest,
   type PreflightPreview,
@@ -336,6 +339,30 @@ export function getBulkOperationDraft(
   return requestJson('/api/tasks/draft', bulkOperationDraftAvailabilitySchema, signal);
 }
 
+export function getRetryDraftRecovery(
+  signal?: AbortSignal,
+): Promise<{ retryDraft: RetryDraftRecovery | null }> {
+  return requestJson(
+    '/api/tasks/draft/retry-recovery',
+    retryDraftRecoveryAvailabilitySchema,
+    signal,
+  );
+}
+
+export function discardRetryDraft(input: RetryDraftRecovery, signal?: AbortSignal): Promise<void> {
+  const parsed = retryDraftRecoverySchema.parse(input);
+  return requestJson(
+    '/api/tasks/draft/retry-recovery',
+    retryDraftRecoveryAvailabilitySchema,
+    signal,
+    {
+      method: 'DELETE',
+      headers: jsonHeaders,
+      body: JSON.stringify(parsed),
+    },
+  ).then(() => undefined);
+}
+
 export function saveBulkOperationDraft(
   input: SaveBulkOperationDraftRequest,
   signal?: AbortSignal,
@@ -403,6 +430,18 @@ export function retryTaskOperationLaunch(
       headers: jsonHeaders,
       body: '{}',
     },
+  );
+}
+
+export function prepareRetryOperationDraft(
+  operationId: string,
+  signal?: AbortSignal,
+): Promise<BulkOperationDraft> {
+  return requestJson(
+    `/api/tasks/operations/${encodeURIComponent(operationId)}/retry-draft`,
+    bulkOperationDraftSchema,
+    signal,
+    { method: 'POST', headers: jsonHeaders, body: '{}' },
   );
 }
 

@@ -156,8 +156,12 @@ export async function executeOperationMessage(input: {
   const adapter =
     input.adapter ??
     createBitrixAdapter(env, { currentUserId: ownerId, portalId: message.portalId });
-  const fields = readFieldIds(plan.changes);
-  const requiredFields = plan.changes.map((change) => change.fieldId);
+  const intentByTask = new Map(plan.retryIntents?.map((intent) => [intent.taskId, intent]) ?? []);
+  const requiredFieldsForTask = (taskId: string) =>
+    intentByTask.has(taskId)
+      ? Object.keys(intentByTask.get(taskId)?.targetValues ?? {})
+      : plan.changes.map((change) => change.fieldId);
+  const requiredFields = [...new Set(plan.selectedTaskIds.flatMap(requiredFieldsForTask))];
   const capabilities = await adapter.tasks.getFieldCapabilities();
   if (!capabilities.ok) {
     if (retryable(capabilities.failure))
@@ -300,7 +304,7 @@ export async function executeOperationMessage(input: {
         title: snapshot?.title ?? null,
         taskUrl: snapshot?.taskUrl ?? null,
         outcome,
-        requestedFieldIds: requiredFields,
+        requestedFieldIds: requiredFieldsForTask(entry.taskId),
         appliedFieldIds,
         failedFieldIds:
           outcome === 'success'
@@ -324,6 +328,8 @@ export async function executeOperationMessage(input: {
     let processedThisDelivery = 0;
     for (const entry of plan.preflight.entries) {
       if (entry.disposition !== 'eligible') continue;
+      const taskRequiredFields = requiredFieldsForTask(entry.taskId);
+      const fields = readFieldIds(taskRequiredFields.map((fieldId) => ({ fieldId })));
       if (processedThisDelivery >= 100) {
         const latest = await consumer.readExecution(
           message.portalId,
@@ -367,7 +373,7 @@ export async function executeOperationMessage(input: {
         throw new RetryableOperationError('Actor revalidation temporarily unavailable.');
       }
       if (
-        !accessIsCurrent(currentExecution, accessVersion, requiredFields) ||
+        !accessIsCurrent(currentExecution, accessVersion, taskRequiredFields) ||
         !currentActor.ok ||
         !currentActor.value.isActive ||
         currentActor.value.id !== ownerId ||
@@ -463,7 +469,7 @@ export async function executeOperationMessage(input: {
         snapshot.status === 'completed' ||
         snapshot.isTemplate ||
         snapshot.isRecurrenceRule ||
-        !requiredFields.every((fieldId) => snapshot.editableFieldIds.includes(fieldId)) ||
+        !taskRequiredFields.every((fieldId) => snapshot.editableFieldIds.includes(fieldId)) ||
         snapshot.mutationVersion === undefined
       ) {
         await record(entry, claim, 'conflict', snapshot, 'TASK_STATE_CHANGED');
@@ -554,7 +560,7 @@ export async function executeOperationMessage(input: {
           beforeVersion,
           beforeMutationVersion: snapshot.mutationVersion,
           actorAccessVersion: accessVersion,
-          requiredFieldIds: requiredFields,
+          requiredFieldIds: taskRequiredFields,
           protectedResult,
         }))
       ) {

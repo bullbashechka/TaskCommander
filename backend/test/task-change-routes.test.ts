@@ -7,6 +7,7 @@ import {
   taskChangeCatalogResponseSchema,
   preflightPreviewSchema,
   taskPreflightConfirmationSchema,
+  taskOutcomeSchema,
   type BulkOperationDraft,
 } from '@task-commander/contracts';
 
@@ -15,6 +16,7 @@ import { resolveEffectiveAccess } from '../src/data/access';
 import { DataAccessError } from '../src/data/errors';
 import type { Json } from '../src/data/database.types';
 import { createMockBitrixAdapter } from '../src/integrations/bitrix/mock';
+import { encryptExecutionPlan } from '../src/task-changes/execution-plan';
 import type { TaskChangeRepository } from '../src/task-changes/routes';
 import { createVerifiedTestPrincipal } from './verified-session-test-helper';
 
@@ -133,6 +135,11 @@ async function setup(input?: {
     readConfirmedOperationReceipt: vi.fn(),
     getOwnedOperationProgress: vi.fn(),
     getLatestOwnedOperationProgress: vi.fn().mockResolvedValue(null),
+    readRetrySource: vi.fn(),
+    listTaskResults: vi.fn(),
+    saveRetryDraft: vi.fn(),
+    getRetryDraftRecovery: vi.fn().mockResolvedValue(null),
+    discardRetryDraft: vi.fn().mockResolvedValue(false),
     listOwnedOperationProgressResults: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
     requestOperationCancellation: vi.fn(),
     launchConfirmedTaskPreflight: vi.fn(),
@@ -221,6 +228,391 @@ const currentDraft: BulkOperationDraft = {
 };
 
 describe('task change routes', () => {
+  it('recovers a retry draft by revision after retry permission is revoked without exposing values', async () => {
+    const saved = await setup();
+    const descriptor = { draftId: currentDraft.id, revision: currentDraft.revision };
+    vi.mocked(saved.repository.getRetryDraftRecovery).mockResolvedValue(descriptor);
+    vi.mocked(saved.repository.discardRetryDraft).mockResolvedValue(true);
+    const read = await saved.api.request(
+      'https://example.test/api/tasks/draft/retry-recovery',
+      { headers },
+      environment,
+    );
+    expect(read.status).toBe(200);
+    expect(await read.json()).toEqual({ retryDraft: descriptor });
+    const discard = await saved.api.request(
+      'https://example.test/api/tasks/draft/retry-recovery',
+      { method: 'DELETE', headers, body: JSON.stringify(descriptor) },
+      environment,
+    );
+    expect(discard.status).toBe(200);
+    expect(saved.repository.discardRetryDraft).toHaveBeenCalledWith(expect.anything(), descriptor);
+  });
+
+  it('does not return out-of-scope retry targets or original commands from GET draft', async () => {
+    const draft = bulkOperationDraftSchema.parse({
+      ...currentDraft,
+      selectedTaskIds: ['42'],
+      changes: [{ fieldId: 'tags', kind: 'tags', action: 'replace', values: ['private'] }],
+      retrySourceOperationId: '323e4567-e89b-42d3-a456-426614174024',
+      retrySourceStateVersion: 8,
+      retryIntents: [{ taskId: '42', targetValues: { tags: ['private'] } }],
+    });
+    const saved = await setup({
+      currentDraft: draft,
+      permissions: [
+        'app_access',
+        'run_bulk_operations',
+        'change_allowed_fields',
+        'view_own_reports',
+        'retry_operations',
+      ],
+      allowedFieldIds: ['title'],
+    });
+    const response = await saved.api.request(
+      'https://example.test/api/tasks/draft',
+      { headers },
+      environment,
+    );
+    expect(response.status).toBe(409);
+    expect(await response.text()).not.toContain('private');
+    expect(saved.repository.readRetrySource).not.toHaveBeenCalled();
+  });
+
+  it('returns 409 without retry values when the source was refined or archived', async () => {
+    const draft = bulkOperationDraftSchema.parse({
+      ...currentDraft,
+      selectedTaskIds: ['42'],
+      retrySourceOperationId: '323e4567-e89b-42d3-a456-426614174024',
+      retrySourceStateVersion: 8,
+      retryIntents: [{ taskId: '42', targetValues: { title: 'Private target' } }],
+    });
+    const saved = await setup({
+      currentDraft: draft,
+      permissions: [
+        'app_access',
+        'run_bulk_operations',
+        'change_allowed_fields',
+        'view_own_reports',
+        'retry_operations',
+      ],
+    });
+    vi.mocked(saved.repository.readRetrySource).mockRejectedValue(
+      new DataAccessError('UNAVAILABLE_RECORD', false),
+    );
+    const response = await saved.api.request(
+      'https://example.test/api/tasks/draft',
+      { headers },
+      environment,
+    );
+    expect(response.status).toBe(409);
+    expect(await response.text()).not.toContain('Private target');
+  });
+
+  it('renews an awaiting retry preflight at the current revision', async () => {
+    const sourceId = '323e4567-e89b-42d3-a456-426614174024';
+    const retryDraft = bulkOperationDraftSchema.parse({
+      ...currentDraft,
+      revision: 2,
+      status: 'awaiting_confirmation',
+      selectedTaskIds: ['42'],
+      retrySourceOperationId: sourceId,
+      retrySourceStateVersion: 8,
+      retryIntents: [{ taskId: '42', targetValues: { title: 'Fresh target' } }],
+    });
+    const saved = await setup({
+      currentDraft: retryDraft,
+      permissions: [
+        'app_access',
+        'run_bulk_operations',
+        'change_allowed_fields',
+        'view_own_reports',
+        'retry_operations',
+      ],
+    });
+    vi.mocked(saved.repository.readRetrySource).mockResolvedValue({
+      operation: bulkOperationSchema.parse({
+        id: sourceId,
+        type: 'bulk_change',
+        status: 'completed_with_errors',
+        stateVersion: 8,
+        launchAttempt: 1,
+        initiatorId: '10',
+        sourceOperationId: null,
+        createdAt: '2026-09-28T09:00:00Z',
+        startedAt: '2026-09-28T09:01:00Z',
+        completedAt: '2026-09-28T09:02:00Z',
+        cancelRequestedAt: null,
+        interruptionRequestedAt: null,
+        interruptionReasonCode: null,
+        summary: {
+          selected: 1,
+          eligible: 1,
+          excluded: 0,
+          unchanged: 0,
+          successful: 0,
+          failed: 1,
+          unconfirmed: 0,
+          conflicted: 0,
+          partiallyApplied: 0,
+          notProcessed: 0,
+        },
+      }),
+      plan: { ciphertext: '', nonce: '', keyVersion: 'v1', payloadVersion: 1 },
+      token: '223e4567-e89b-42d3-a456-426614174024',
+      draftId: retryDraft.id,
+      draftRevision: 2,
+    });
+    const response = await saved.api.request(
+      'https://example.test/api/tasks/preflight',
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          draftId: retryDraft.id,
+          expectedRevision: retryDraft.revision,
+        }),
+      },
+      environment,
+    );
+    expect(response.status).toBe(200);
+    const preview = preflightPreviewSchema.parse(await response.json());
+    expect(preview.sourceDraftRevision).toBe(2);
+    expect(preview.draftRevision).toBe(3);
+    expect(saved.repository.saveTaskPreflight).toHaveBeenCalledOnce();
+  });
+
+  it('prepares retry of a retry from per-task targets and effective outcomes', async () => {
+    const sourceId = '323e4567-e89b-42d3-a456-426614174024';
+    const token = '223e4567-e89b-42d3-a456-426614174024';
+    const sourceDraft = {
+      ...currentDraft,
+      revision: 2,
+      selectedTaskIds: ['42', '43', '44'],
+      changes: [
+        ...currentDraft.changes,
+        { fieldId: 'tags', kind: 'tags', action: 'replace', values: ['red'] },
+      ] as BulkOperationDraft['changes'],
+      retrySourceOperationId: '323e4567-e89b-42d3-a456-426614174023',
+      retrySourceStateVersion: 7,
+      retryIntents: [
+        { taskId: '42', targetValues: { title: 'Target A' } },
+        { taskId: '43', targetValues: { title: 'Target B', tags: ['red'] } },
+        { taskId: '44', targetValues: { title: 'Target C' } },
+      ],
+    } satisfies BulkOperationDraft;
+    const sourcePreview = preflightPreviewSchema.parse({
+      draftId: sourceDraft.id,
+      sourceDraftRevision: 1,
+      draftRevision: 2,
+      actorAccessVersion: 1,
+      checkedAt: '2026-09-28T09:00:00Z',
+      canProceed: true,
+      entries: ['42', '43', '44'].map((taskId, index) => ({
+        taskId,
+        title: `Task ${taskId}`,
+        taskUrl: `https://portal.bitrix24.ru/tasks/${taskId}`,
+        disposition: 'eligible',
+        changedFieldIds: index === 1 ? ['title', 'tags'] : ['title'],
+        reasonCode: null,
+        reasonMessage: null,
+        relevantVersion: `v${taskId}`,
+        currentValues: index === 1 ? { title: 'Before', tags: [] } : { title: 'Before' },
+        targetValues:
+          index === 1
+            ? { title: 'Target B', tags: ['red'] }
+            : { title: index === 0 ? 'Target A' : 'Target C' },
+      })),
+      summary: {
+        selected: 3,
+        eligible: 3,
+        excluded: 0,
+        unchanged: 0,
+        successful: 0,
+        failed: 0,
+        unconfirmed: 0,
+        conflicted: 0,
+        partiallyApplied: 0,
+        notProcessed: 0,
+      },
+    });
+    const encrypted = await encryptExecutionPlan({
+      keyBase64: environment.OPERATION_PLAN_KEY_V1,
+      portalId: 'portal-1',
+      ownerId: '10',
+      token,
+      draft: sourceDraft,
+      preview: sourcePreview,
+    });
+    const sourceOperation = bulkOperationSchema.parse({
+      id: sourceId,
+      type: 'retry',
+      status: 'completed_with_errors',
+      stateVersion: 8,
+      launchAttempt: 1,
+      initiatorId: '10',
+      sourceOperationId: sourceDraft.retrySourceOperationId,
+      createdAt: '2026-09-28T09:00:00Z',
+      startedAt: '2026-09-28T09:01:00Z',
+      completedAt: '2026-09-28T09:02:00Z',
+      cancelRequestedAt: null,
+      interruptionRequestedAt: null,
+      interruptionReasonCode: null,
+      summary: {
+        selected: 3,
+        eligible: 3,
+        excluded: 0,
+        unchanged: 0,
+        successful: 1,
+        failed: 0,
+        unconfirmed: 1,
+        conflicted: 0,
+        partiallyApplied: 1,
+        notProcessed: 0,
+      },
+    });
+    const result = (
+      taskId: string,
+      outcome: 'unconfirmed' | 'partially_applied',
+      refined = false,
+    ) =>
+      taskOutcomeSchema.parse({
+        taskId,
+        title: null,
+        taskUrl: null,
+        outcome,
+        changedFieldIds: taskId === '43' ? ['title', 'tags'] : ['title'],
+        appliedFieldIds: taskId === '43' ? ['title'] : [],
+        failedFieldIds: taskId === '43' ? ['tags'] : ['title'],
+        reasonCode: null,
+        reasonMessage: null,
+        canRetry: false,
+        refinement: refined
+          ? {
+              outcome: 'success',
+              appliedFieldIds: ['title'],
+              failedFieldIds: [],
+              reasonCode: null,
+              reasonMessage: null,
+              canRetry: false,
+              refinedAt: '2026-09-28T09:03:00Z',
+            }
+          : null,
+      });
+    const saved = await setup({
+      permissions: [
+        'app_access',
+        'run_bulk_operations',
+        'change_allowed_fields',
+        'view_own_reports',
+        'retry_operations',
+      ],
+    });
+    vi.mocked(saved.repository.readRetrySource).mockResolvedValue({
+      operation: sourceOperation,
+      plan: { ...encrypted, payloadVersion: 1 },
+      token,
+      draftId: sourceDraft.id,
+      draftRevision: 2,
+    });
+    vi.mocked(saved.repository.listTaskResults).mockResolvedValue([
+      result('42', 'unconfirmed'),
+      result('43', 'partially_applied'),
+      result('44', 'unconfirmed', true),
+    ]);
+    vi.mocked(saved.repository.saveRetryDraft).mockImplementation(async (_context, input) =>
+      bulkOperationDraftSchema.parse({
+        ...currentDraft,
+        revision: 1,
+        selectedTaskIds: input.selectedTaskIds,
+        changes: input.changes,
+        retrySourceOperationId: input.sourceOperationId,
+        retrySourceStateVersion: input.sourceStateVersion,
+        retryIntents: input.intents,
+      }),
+    );
+    const response = await saved.api.request(
+      `https://example.test/api/tasks/operations/${sourceId}/retry-draft`,
+      { method: 'POST', headers, body: '{}' },
+      environment,
+    );
+    expect(response.status).toBe(200);
+    expect(saved.repository.saveRetryDraft).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        intents: [
+          { taskId: '42', targetValues: { title: 'Target A' } },
+          { taskId: '43', targetValues: { tags: ['red'] } },
+        ],
+        changes: [
+          { fieldId: 'tags', kind: 'tags', action: 'replace', values: ['red'] },
+          { fieldId: 'title', kind: 'text', action: 'set', value: 'Target A' },
+        ],
+      }),
+    );
+    const denied = await setup({
+      permissions: [
+        'app_access',
+        'run_bulk_operations',
+        'change_allowed_fields',
+        'view_own_reports',
+        'retry_operations',
+      ],
+      allowedFieldIds: ['title'],
+    });
+    vi.mocked(denied.repository.readRetrySource).mockResolvedValue({
+      operation: sourceOperation,
+      plan: { ...encrypted, payloadVersion: 1 },
+      token,
+      draftId: sourceDraft.id,
+      draftRevision: 2,
+    });
+    const forbidden = await denied.api.request(
+      `https://example.test/api/tasks/operations/${sourceId}/retry-draft`,
+      { method: 'POST', headers, body: '{}' },
+      environment,
+    );
+    expect(forbidden.status).toBe(403);
+    expect(denied.repository.saveRetryDraft).not.toHaveBeenCalled();
+
+    vi.mocked(denied.repository.listTaskResults).mockResolvedValue([
+      result('42', 'unconfirmed'),
+      taskOutcomeSchema.parse({
+        ...result('43', 'partially_applied'),
+        appliedFieldIds: ['tags'],
+        failedFieldIds: ['title'],
+      }),
+      result('44', 'unconfirmed', true),
+    ]);
+    vi.mocked(denied.repository.saveRetryDraft).mockImplementation(async (_context, input) =>
+      bulkOperationDraftSchema.parse({
+        ...currentDraft,
+        revision: 1,
+        selectedTaskIds: input.selectedTaskIds,
+        changes: input.changes,
+        retrySourceOperationId: input.sourceOperationId,
+        retrySourceStateVersion: input.sourceStateVersion,
+        retryIntents: input.intents,
+      }),
+    );
+    const titleOnly = await denied.api.request(
+      `https://example.test/api/tasks/operations/${sourceId}/retry-draft`,
+      { method: 'POST', headers, body: '{}' },
+      environment,
+    );
+    expect(titleOnly.status).toBe(200);
+    expect(denied.repository.saveRetryDraft).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        changes: [{ fieldId: 'title', kind: 'text', action: 'set', value: 'Target A' }],
+        intents: [
+          { taskId: '42', targetValues: { title: 'Target A' } },
+          { taskId: '43', targetValues: { title: 'Target B' } },
+        ],
+      }),
+    );
+  });
+
   it('returns only supported, editable and allowlisted fields without completed status', async () => {
     const { api } = await setup({
       allowedFieldIds: ['title', 'status', 'tags', 'attachments'],

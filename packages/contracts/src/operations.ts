@@ -250,6 +250,31 @@ export const preflightPreviewSchema = z
     }
   });
 
+export const retryTaskIntentSchema = z
+  .object({
+    taskId: bitrixIdSchema,
+    targetValues: z.record(fieldIdSchema, taskChangeValueSchema),
+  })
+  .strict()
+  .superRefine((intent, context) => {
+    const fields = Object.keys(intent.targetValues);
+    if (fields.length < 1 || fields.length > 64) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid retry field count.' });
+    }
+  });
+
+export type RetryTaskIntent = z.infer<typeof retryTaskIntentSchema>;
+
+export const retryDraftRecoverySchema = z
+  .object({ draftId: draftIdSchema, revision: positiveIntegerSchema })
+  .strict();
+
+export const retryDraftRecoveryAvailabilitySchema = z
+  .object({ retryDraft: retryDraftRecoverySchema.nullable() })
+  .strict();
+
+export type RetryDraftRecovery = z.infer<typeof retryDraftRecoverySchema>;
+
 export const bulkOperationDraftSchema = z
   .object({
     id: draftIdSchema,
@@ -270,11 +295,32 @@ export const bulkOperationDraftSchema = z
       .refine(
         (changes) => new Set(changes.map((change) => change.fieldId)).size === changes.length,
       ),
+    retrySourceOperationId: operationIdSchema.nullable().optional(),
+    retrySourceStateVersion: positiveIntegerSchema.nullable().optional(),
+    retryIntents: z.array(retryTaskIntentSchema).min(1).max(1000).nullable().optional(),
     createdAt: isoDateTimeSchema,
     updatedAt: isoDateTimeSchema,
     expiresAt: isoDateTimeSchema,
   })
-  .strict();
+  .strict()
+  .superRefine((draft, context) => {
+    const retry =
+      draft.retrySourceOperationId !== null && draft.retrySourceOperationId !== undefined;
+    if (
+      retry !== (draft.retrySourceStateVersion != null) ||
+      retry !== (draft.retryIntents != null)
+    ) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid retry draft.' });
+    }
+    if (
+      retry &&
+      draft.retryIntents &&
+      (draft.retryIntents.length !== draft.selectedTaskIds.length ||
+        draft.retryIntents.some((intent, index) => intent.taskId !== draft.selectedTaskIds[index]))
+    ) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid retry selection.' });
+    }
+  });
 
 export const bulkOperationDraftAvailabilitySchema = z
   .object({ draft: bulkOperationDraftSchema.nullable() })

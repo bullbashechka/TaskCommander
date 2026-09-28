@@ -12,7 +12,12 @@ import { executeOperationMessage } from '../src/task-changes/operation-executor'
 import type { OperationConsumerRepository } from '../src/task-changes/operation-consumer-repository';
 import type { TaskCommanderRepositories } from '../src/data';
 
-async function createHarness(count: number, failFirstSend = false, lostResponse = false) {
+async function createHarness(
+  count: number,
+  failFirstSend = false,
+  lostResponse = false,
+  retryTargets?: string[],
+) {
   const keyBase64 = btoa(String.fromCharCode(...new Uint8Array(32).fill(23)));
   const draftId = '10000000-0000-4000-8000-000000000022';
   const token = '123e4567-e89b-42d3-a456-426614174021';
@@ -106,6 +111,14 @@ async function createHarness(count: number, failFirstSend = false, lostResponse 
     updatedAt: '2026-09-28T00:00:00.000Z',
     expiresAt: '2026-09-29T00:00:00.000Z',
   } as BulkOperationDraft;
+  if (retryTargets) {
+    draft.retrySourceOperationId = '123e4567-e89b-42d3-a456-426614174020';
+    draft.retrySourceStateVersion = 7;
+    draft.retryIntents = selectedTaskIds.map((taskId, index) => ({
+      taskId,
+      targetValues: { title: retryTargets[index] ?? 'After' },
+    }));
+  }
   const preview = {
     draftId,
     sourceDraftRevision: 1,
@@ -123,7 +136,7 @@ async function createHarness(count: number, failFirstSend = false, lostResponse 
       reasonMessage: null,
       relevantVersion: snapshots[index]?.relevantVersion ?? '',
       currentValues: { title: snapshots[index]?.values.title ?? null },
-      targetValues: { title: 'After' },
+      targetValues: { title: retryTargets?.[index] ?? 'After' },
     })),
     summary: {
       selected: count,
@@ -251,6 +264,7 @@ async function createHarness(count: number, failFirstSend = false, lostResponse 
     message,
     consumerRepository,
     operations,
+    stored,
     env,
     adapter,
     recorded,
@@ -263,6 +277,14 @@ async function createHarness(count: number, failFirstSend = false, lostResponse 
 }
 
 describe('operation consumer continuation', () => {
+  it('applies distinct absolute targets for a retry of a retry', async () => {
+    const harness = await createHarness(2, false, false, ['Target A', 'Target B']);
+    await executeOperationMessage(harness);
+    expect(harness.outcomes).toEqual(['success', 'success']);
+    expect(harness.saved.get('1000')?.task.values.title).toBe('Target A');
+    expect(harness.saved.get('1001')?.task.values.title).toBe('Target B');
+  });
+
   it('stops claiming after the current task when cancellation is requested', async () => {
     const harness = await createHarness(3);
     vi.mocked(harness.consumerRepository.record).mockImplementationOnce(async (input) => {

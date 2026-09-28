@@ -12,6 +12,7 @@ import {
   retryTaskOperationLaunch,
 } from '@/app/app-api';
 import { useAppAccess } from '@/app/app-context';
+import { canStartBulkChange } from '@/app/access-policy';
 import { AppState } from '@/components/ui/app-state';
 import { Card } from '@/components/ui/card';
 
@@ -389,6 +390,23 @@ export function OperationProgressPage({ operationId }: { operationId?: string })
   const canCancel = app?.access.permissions.includes('run_bulk_operations') ?? false;
   const canRetryLaunch =
     canCancel && (app?.access.permissions.includes('retry_operations') ?? false);
+  const canPrepareRetry = Boolean(
+    app &&
+    canStartBulkChange(app) &&
+    app.access.permissions.includes('retry_operations') &&
+    (operation.initiatorId === app.principal.userId
+      ? app.access.permissions.includes('view_own_reports')
+      : app.access.permissions.includes('view_all_reports')) &&
+    (operation.type === 'bulk_change' || operation.type === 'retry') &&
+    terminal.has(operation.status) &&
+    operation.status !== 'launch_failed' &&
+    summary.failed +
+      summary.unconfirmed +
+      summary.conflicted +
+      summary.partiallyApplied +
+      summary.notProcessed >
+      0,
+  );
   return (
     <div className="page-content">
       <nav aria-label="Хлебные крошки" className="breadcrumbs">
@@ -473,6 +491,15 @@ export function OperationProgressPage({ operationId }: { operationId?: string })
           >
             {retryPending ? 'Повторяем запуск…' : 'Повторить запуск'}
           </button>
+        ) : null}
+        {canPrepareRetry ? (
+          <Link
+            className="button-secondary"
+            to="/operations/$operationId/retry"
+            params={{ operationId: operation.id }}
+          >
+            Повторить отдельные задачи
+          </Link>
         ) : null}
       </Card>
       <Card>

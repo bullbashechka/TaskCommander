@@ -1,6 +1,29 @@
 import { describe, expect, it } from 'vitest';
 
-import { preflightPreviewSchema, taskPreflightRequestSchema } from './operations';
+import {
+  preflightPreviewSchema,
+  retryTaskIntentSchema,
+  taskPreflightRequestSchema,
+} from './operations';
+
+describe('retry intent contract', () => {
+  it('preserves field 64 without a numeric bit mask', () => {
+    const targetValues = Object.fromEntries(
+      Array.from({ length: 64 }, (_, index) => [`field_${index + 1}`, `target_${index + 1}`]),
+    );
+    const intent = retryTaskIntentSchema.parse({ taskId: '42', targetValues });
+    expect(intent.targetValues.field_64).toBe('target_64');
+    expect(
+      retryTaskIntentSchema.safeParse({
+        taskId: '42',
+        targetValues: {
+          ...targetValues,
+          field_65: 'too many',
+        },
+      }).success,
+    ).toBe(false);
+  });
+});
 
 const eligibleEntry = {
   taskId: '42',

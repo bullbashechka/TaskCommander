@@ -12,9 +12,11 @@ import {
   AppApiError,
   createSavedTaskFilter,
   deleteSavedTaskFilter,
+  discardRetryDraft,
   fetchTaskChangeCatalog,
   fetchTaskFilterCatalog,
   getBulkOperationDraft,
+  getRetryDraftRecovery,
   listSavedTaskFilters,
   selectAllTasks,
   searchTaskFilterUsers,
@@ -35,9 +37,11 @@ vi.mock('@/app/app-api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/app/app-api')>()),
   createSavedTaskFilter: vi.fn(),
   deleteSavedTaskFilter: vi.fn(),
+  discardRetryDraft: vi.fn(),
   fetchTaskChangeCatalog: vi.fn(),
   fetchTaskFilterCatalog: vi.fn(),
   getBulkOperationDraft: vi.fn(),
+  getRetryDraftRecovery: vi.fn(),
   listSavedTaskFilters: vi.fn(),
   selectAllTasks: vi.fn(),
   searchTaskFilterUsers: vi.fn(),
@@ -190,6 +194,8 @@ describe('task filter page', () => {
     vi.mocked(fetchTaskFilterCatalog).mockResolvedValue(catalog);
     vi.mocked(fetchTaskChangeCatalog).mockResolvedValue(changeCatalog);
     vi.mocked(getBulkOperationDraft).mockResolvedValue({ draft: null });
+    vi.mocked(getRetryDraftRecovery).mockResolvedValue({ retryDraft: null });
+    vi.mocked(discardRetryDraft).mockResolvedValue();
     vi.mocked(listSavedTaskFilters).mockResolvedValue([saved]);
     vi.mocked(searchTasks).mockResolvedValue({
       items: [firstTask],
@@ -676,6 +682,25 @@ describe('task filter page', () => {
     await waitFor(() => expect(editorHeading).toHaveFocus());
     expect(screen.getByText('1 задача')).toBeInTheDocument();
     expect(getBulkOperationDraft).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets the ordinary editor discard a stale retry draft after retry permission is revoked', async () => {
+    const descriptor = { draftId: '123e4567-e89b-42d3-a456-426614174000', revision: 3 };
+    vi.mocked(getBulkOperationDraft)
+      .mockRejectedValueOnce(new AppApiError('Conflict', 'temporary', 409, 'CONFLICT'))
+      .mockResolvedValue({ draft: null });
+    vi.mocked(getRetryDraftRecovery).mockResolvedValue({ retryDraft: descriptor });
+    renderPage(appSnapshot);
+    fireEvent.click(
+      await screen.findByRole('checkbox', { name: `Выбрать задачу: ${firstTask.title}` }),
+    );
+    const discard = await screen.findByRole('button', {
+      name: 'Удалить устаревший черновик повтора',
+    });
+    fireEvent.click(discard);
+    await waitFor(() => expect(discardRetryDraft).toHaveBeenCalledWith(descriptor));
+    const configure = screen.getByRole('button', { name: 'Настроить изменения' });
+    await waitFor(() => expect(configure).toBeEnabled());
   });
 
   it('restores an existing operation draft only after an explicit action', async () => {

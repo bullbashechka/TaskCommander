@@ -32,6 +32,51 @@ async function setup(changes: BulkOperationDraft['changes'], selectedTaskIds = [
 }
 
 describe('task preflight orchestration', () => {
+  it('checks absolute retry targets independently for every task', async () => {
+    const { adapter, catalog, draft } = await setup(
+      [{ fieldId: 'title', kind: 'text', action: 'set', value: 'Original relative metadata' }],
+      [mockFixtureIds.visibleTask, mockFixtureIds.subtask],
+    );
+    draft.retrySourceOperationId = '123e4567-e89b-42d3-a456-426614174099';
+    draft.retrySourceStateVersion = 9;
+    draft.retryIntents = [
+      { taskId: mockFixtureIds.visibleTask, targetValues: { title: 'Retry target one' } },
+      { taskId: mockFixtureIds.subtask, targetValues: { title: 'Retry target two' } },
+    ];
+    const preview = await buildTaskPreflight({
+      adapter,
+      catalog,
+      draft,
+      actorAccessVersion: 7,
+      trustedPortalOrigins: portalOrigins,
+    });
+    expect(preview.entries.map((entry) => entry.targetValues?.title)).toEqual([
+      'Retry target one',
+      'Retry target two',
+    ]);
+    expect(preview.entries.map((entry) => entry.changedFieldIds)).toEqual([['title'], ['title']]);
+  });
+
+  it('classifies an already reached retry target as no change', async () => {
+    const { adapter, catalog, draft } = await setup([
+      { fieldId: 'title', kind: 'text', action: 'set', value: 'Old relative command' },
+    ]);
+    draft.retrySourceOperationId = '123e4567-e89b-42d3-a456-426614174099';
+    draft.retrySourceStateVersion = 9;
+    draft.retryIntents = [
+      { taskId: mockFixtureIds.visibleTask, targetValues: { title: 'Fixture visible task' } },
+    ];
+    const preview = await buildTaskPreflight({
+      adapter,
+      catalog,
+      draft,
+      actorAccessVersion: 7,
+      trustedPortalOrigins: portalOrigins,
+    });
+    expect(preview.entries[0]?.disposition).toBe('no_change');
+    expect(preview.canProceed).toBe(false);
+  });
+
   it('preserves selection order across eligible, excluded, and no-change tasks', async () => {
     const { adapter, catalog, draft } = await setup(
       [{ fieldId: 'title', kind: 'text', action: 'set', value: 'Fixture visible task' }],

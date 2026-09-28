@@ -37,3 +37,7 @@
 ## Зависимости
 
 019–023.
+
+## Implementation and review
+
+Implemented retry selection from the effective source result and encrypted per-task plan, renewed preflight and confirmation, an atomic retry launch linked to its source, and UI navigation back to progress. The retry draft stores only fields selected for execution. Ordinary bulk-edit access can discard a stale retry draft by ID and revision without reading its values. Independent reviews reached 9/10 and 7/10; the two remaining findings were addressed before this commit. Verification remains with the user: `bun run check` and `bun run db:docker:test`. Real Bitrix24 execution remains unverified without a portal.

@@ -16,6 +16,7 @@ import {
   type BulkOperationDraft,
   type TaskOutcome,
   type TaskOutcomeRefinement,
+  type RetryTaskIntent,
   type UserAccess,
   type OperationAuditReasonCode,
 } from '@task-commander/contracts';
@@ -412,6 +413,11 @@ function mapSavedFilter(row: DatabaseTable<'saved_filter'>): SavedFilter {
 }
 
 function mapDraft(row: DatabaseTable<'operation_draft'>): BulkOperationDraft {
+  const retry = row as DatabaseTable<'operation_draft'> & {
+    retry_source_operation_id?: string | null;
+    retry_source_state_version?: number | null;
+    retry_intents?: Json | null;
+  };
   const filterSnapshot =
     row.filter_snapshot === null
       ? { filters: [] }
@@ -425,6 +431,9 @@ function mapDraft(row: DatabaseTable<'operation_draft'>): BulkOperationDraft {
     sort: row.sort_snapshot ?? { fieldId: 'deadline', direction: 'asc' },
     selectedTaskIds: row.selected_task_ids,
     changes: row.changes,
+    retrySourceOperationId: retry.retry_source_operation_id ?? null,
+    retrySourceStateVersion: retry.retry_source_state_version ?? null,
+    retryIntents: retry.retry_intents ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     expiresAt: row.expires_at,
@@ -661,6 +670,136 @@ export class TaskCommanderRepositories {
       .maybeSingle();
     if (error) throw toDataAccessError(error);
     return data ? { draft: mapDraft(data), preflightSnapshot: data.preflight_snapshot } : null;
+  }
+
+  public async readRetrySource(
+    context: DataAccessContext,
+    operationId: string,
+  ): Promise<{
+    operation: BulkOperation;
+    plan: { ciphertext: string; nonce: string; keyVersion: string; payloadVersion: number };
+    token: string;
+    draftId: string;
+    draftRevision: number;
+  }> {
+    requireRepositoryPermission(context, 'retry_operations');
+    getReportVisibility(context);
+    const rpc = this.client.rpc.bind(this.client) as unknown as (
+      name: 'read_retry_source',
+      args: Record<string, unknown>,
+    ) => PromiseLike<{ data: Json | null; error: unknown | null }>;
+    const payload = await requireData(
+      rpc('read_retry_source', {
+        p_portal_id: context.portalId,
+        p_actor_id: context.actorId,
+        p_source_id: operationId,
+        p_access_version: context.accessVersion,
+        p_is_bitrix_admin: context.isBitrixAdmin,
+      }),
+    );
+    const parsed = z
+      .object({
+        operation: z
+          .object({
+            idempotency_key: z.string().startsWith('confirmation:'),
+            preflight_snapshot: z
+              .object({
+                draftId: z.string().uuid(),
+                draftRevision: z.number().int().positive(),
+              })
+              .passthrough(),
+          })
+          .passthrough(),
+        plan: z
+          .object({
+            ciphertext: z.string(),
+            nonce: z.string(),
+            keyVersion: z.string(),
+            payloadVersion: z.number().int(),
+          })
+          .strict(),
+      })
+      .strict()
+      .parse(payload);
+    return {
+      operation: mapOperation(parsed.operation as unknown as OperationRow),
+      plan: parsed.plan,
+      token: parsed.operation.idempotency_key.slice('confirmation:'.length),
+      draftId: parsed.operation.preflight_snapshot.draftId,
+      draftRevision: parsed.operation.preflight_snapshot.draftRevision,
+    };
+  }
+
+  public async saveRetryDraft(
+    context: DataAccessContext,
+    input: {
+      sourceOperationId: string;
+      sourceStateVersion: number;
+      selectedTaskIds: string[];
+      changes: Json;
+      intents: RetryTaskIntent[];
+    },
+  ): Promise<BulkOperationDraft> {
+    requireRepositoryPermission(context, 'retry_operations');
+    const rpc = this.client.rpc.bind(this.client) as unknown as (
+      name: 'save_retry_operation_draft',
+      args: Record<string, unknown>,
+    ) => PromiseLike<{ data: Json | null; error: unknown | null }>;
+    const row = await requireData(
+      rpc('save_retry_operation_draft', {
+        p_portal_id: context.portalId,
+        p_owner_id: context.actorId,
+        p_source_id: input.sourceOperationId,
+        p_source_state_version: input.sourceStateVersion,
+        p_access_version: context.accessVersion,
+        p_is_bitrix_admin: context.isBitrixAdmin,
+        p_selected_task_ids: input.selectedTaskIds,
+        p_changes: input.changes,
+        p_intents: input.intents as Json,
+      }),
+    );
+    return mapDraft(row as unknown as OperationDraftRow);
+  }
+
+  public async getRetryDraftRecovery(
+    context: DataAccessContext,
+  ): Promise<{ draftId: string; revision: number } | null> {
+    requireDataAccessContext(context);
+    const { data, error } = await this.client
+      .from('operation_draft')
+      .select('id,revision,retry_source_operation_id')
+      .eq('portal_id', context.portalId)
+      .eq('owner_id', context.actorId)
+      .gt('expires_at', new Date().toISOString())
+      .maybeSingle();
+    if (error) throw toDataAccessError(error);
+    const row = data as unknown as {
+      id: string;
+      revision: number;
+      retry_source_operation_id: string | null;
+    } | null;
+    return row?.retry_source_operation_id ? { draftId: row.id, revision: row.revision } : null;
+  }
+
+  public async discardRetryDraft(
+    context: DataAccessContext,
+    input: { draftId: string; revision: number },
+  ): Promise<boolean> {
+    requireDataAccessContext(context);
+    const rpc = this.client.rpc.bind(this.client) as unknown as (
+      name: 'discard_retry_operation_draft',
+      args: Record<string, unknown>,
+    ) => PromiseLike<{ data: boolean | null; error: unknown | null }>;
+    return requireData(
+      rpc('discard_retry_operation_draft', {
+        p_portal_id: context.portalId,
+        p_owner_id: context.actorId,
+        p_draft_id: input.draftId,
+        p_expected_revision: input.revision,
+        p_access_version: context.accessVersion,
+        p_is_bitrix_admin: context.isBitrixAdmin,
+      }),
+    );
   }
 
   public async saveDraft(

@@ -2,12 +2,14 @@ import { z } from 'zod';
 
 import {
   preflightPreviewSchema,
+  bulkChangeCommandSchema,
   type BulkChangeCommand,
   type BulkOperationDraft,
   type PreflightPreview,
   type PreflightTaskEntry,
   type TaskChangeCatalogResponse,
   type TaskChangeValue,
+  type RetryTaskIntent,
 } from '@task-commander/contracts';
 
 import type { BitrixAdapter, TaskChangeSnapshot } from '../integrations/bitrix/contract';
@@ -23,6 +25,7 @@ import {
   TaskChangeCalculationError,
   type TaskChangeCalculation,
 } from './calculation';
+import { InvalidTaskChangeDefinitionError, requireValidBulkChanges } from './catalog';
 
 const taskReadConcurrency = 8;
 const directoryConcurrency = 4;
@@ -52,6 +55,26 @@ export interface BuildTaskPreflightInput {
   actorAccessVersion: number | null;
   trustedPortalOrigins: readonly string[];
   now?: () => Date;
+}
+
+function absoluteRetryCommands(
+  intent: RetryTaskIntent,
+  catalog: TaskChangeCatalogResponse,
+): BulkChangeCommand[] {
+  const fields = new Map(catalog.fields.map((field) => [field.id, field]));
+  const commands = Object.entries(intent.targetValues).map(([fieldId, value]) => {
+    const field = fields.get(fieldId);
+    if (!field) throw new Error('Retry field is no longer available.');
+    const candidate: unknown =
+      value === null || (Array.isArray(value) && value.length === 0)
+        ? { fieldId, kind: field.kind, action: 'clear' }
+        : Array.isArray(value)
+          ? { fieldId, kind: field.kind, action: 'replace', values: value }
+          : { fieldId, kind: field.kind, action: 'set', value };
+    return bulkChangeCommandSchema.parse(candidate);
+  });
+  requireValidBulkChanges(commands, catalog);
+  return commands;
 }
 
 type PreliminaryResult =
@@ -482,15 +505,31 @@ function calculatedEntry(
 export async function buildTaskPreflight(
   input: BuildTaskPreflightInput,
 ): Promise<PreflightPreview> {
-  const fieldIds = input.draft.changes.map((command) => command.fieldId);
-  const readFieldIds = [...fieldIds];
-  if (fieldIds.some((fieldId) => fieldId === 'start_date' || fieldId === 'deadline')) {
-    if (!readFieldIds.includes('start_date')) readFieldIds.push('start_date');
-    if (!readFieldIds.includes('deadline')) readFieldIds.push('deadline');
-  }
+  const retryByTask = new Map(
+    input.draft.retryIntents?.map((intent) => [intent.taskId, intent]) ?? [],
+  );
+  const fieldIds = input.draft.retryIntents
+    ? [...new Set(input.draft.retryIntents.flatMap((intent) => Object.keys(intent.targetValues)))]
+    : input.draft.changes.map((command) => command.fieldId);
+  const fieldsForTask = (taskId: string) =>
+    retryByTask.get(taskId) ? Object.keys(retryByTask.get(taskId)?.targetValues ?? {}) : fieldIds;
+  const readFieldsForTask = (taskId: string) => {
+    const fields = [...fieldsForTask(taskId)];
+    if (fields.includes('start_date') || fields.includes('deadline')) {
+      if (!fields.includes('start_date')) fields.push('start_date');
+      if (!fields.includes('deadline')) fields.push('deadline');
+    }
+    return fields;
+  };
   const consumeInputBytes = byteBudget(preflightApplicationByteLimit);
   const reads = await mapConcurrent(input.draft.selectedTaskIds, taskReadConcurrency, (taskId) =>
-    readTask(input.adapter, taskId, readFieldIds, input.trustedPortalOrigins, consumeInputBytes),
+    readTask(
+      input.adapter,
+      taskId,
+      readFieldsForTask(taskId),
+      input.trustedPortalOrigins,
+      consumeInputBytes,
+    ),
   );
   const snapshots = reads.flatMap((result) =>
     result.kind === 'snapshot' ? [result.snapshot] : [],
@@ -500,9 +539,15 @@ export async function buildTaskPreflight(
       !snapshot.isTemplate &&
       !snapshot.isRecurrenceRule &&
       snapshot.status !== 'completed' &&
-      fieldIds.every((fieldId) => snapshot.editableFieldIds.includes(fieldId)),
+      fieldsForTask(snapshot.taskId).every((fieldId) =>
+        snapshot.editableFieldIds.includes(fieldId),
+      ),
   );
-  const calendar = await loadCalendar(input.adapter, input.draft.changes, calculableSnapshots);
+  const calendar = await loadCalendar(
+    input.adapter,
+    input.draft.retryIntents ? [] : input.draft.changes,
+    calculableSnapshots,
+  );
   const preliminary = reads.map((result): PreliminaryResult => {
     if (result.kind !== 'snapshot') return result;
     const snapshot = result.snapshot;
@@ -526,7 +571,11 @@ export async function buildTaskPreflight(
         }),
       };
     }
-    if (!fieldIds.every((fieldId) => snapshot.editableFieldIds.includes(fieldId))) {
+    if (
+      !fieldsForTask(snapshot.taskId).every((fieldId) =>
+        snapshot.editableFieldIds.includes(fieldId),
+      )
+    ) {
       return {
         kind: 'entry',
         entry: excludedEntry({
@@ -540,12 +589,13 @@ export async function buildTaskPreflight(
       };
     }
     try {
+      const intent = retryByTask.get(snapshot.taskId);
       return {
         kind: 'calculated',
         snapshot,
         calculation: calculateTaskChanges({
           snapshot,
-          commands: input.draft.changes,
+          commands: intent ? absoluteRetryCommands(intent, input.catalog) : input.draft.changes,
           catalog: input.catalog,
           calendar,
         }),
@@ -553,6 +603,24 @@ export async function buildTaskPreflight(
     } catch (error) {
       if (error instanceof TaskChangeCalculationError) {
         return { kind: 'entry', entry: calculationFailureEntry(snapshot, error) };
+      }
+      if (
+        input.draft.retryIntents &&
+        (error instanceof z.ZodError ||
+          error instanceof InvalidTaskChangeDefinitionError ||
+          (error instanceof Error && error.message === 'Retry field is no longer available.'))
+      ) {
+        return {
+          kind: 'entry',
+          entry: excludedEntry({
+            taskId: snapshot.taskId,
+            title: snapshot.title,
+            taskUrl: snapshot.taskUrl,
+            relevantVersion: snapshot.relevantVersion,
+            reasonCode: 'RETRY_TARGET_INVALID',
+            reasonMessage: 'Исходная цель изменения больше недопустима для задачи.',
+          }),
+        };
       }
       return globalFailure('UPSTREAM_UNAVAILABLE');
     }

@@ -4,6 +4,9 @@ import { z } from 'zod';
 import {
   bulkOperationDraftAvailabilitySchema,
   bulkOperationDraftSchema,
+  bulkChangeCommandSchema,
+  retryDraftRecoveryAvailabilitySchema,
+  retryDraftRecoverySchema,
   confirmTaskPreflightRequestSchema,
   launchTaskPreflightRequestSchema,
   operationIdSchema,
@@ -22,6 +25,9 @@ import {
   type OperationProgressResultsPage,
   type PreflightPreview,
   type TaskOutcome,
+  type RetryTaskIntent,
+  type TaskChangeValue,
+  type BulkChangeCommand,
 } from '@task-commander/contracts';
 
 import type { VerifiedSessionPrincipal } from '../auth/session-service';
@@ -52,7 +58,7 @@ import {
   requireValidBulkChanges,
 } from './catalog';
 import { buildTaskPreflight, TaskPreflightError } from './preflight';
-import { encryptExecutionPlan } from './execution-plan';
+import { decryptExecutionPlan, encryptExecutionPlan } from './execution-plan';
 import { dispatchOperationLaunch } from './dispatch';
 
 export type TaskChangeRepository = Readonly<{
@@ -107,6 +113,34 @@ export type TaskChangeRepository = Readonly<{
     operationId: string,
   ): Promise<BulkOperation>;
   getLatestOwnedOperationProgress(context: DataAccessContext): Promise<BulkOperation | null>;
+  readRetrySource(
+    context: DataAccessContext,
+    operationId: string,
+  ): Promise<{
+    operation: BulkOperation;
+    plan: { ciphertext: string; nonce: string; keyVersion: string; payloadVersion: number };
+    token: string;
+    draftId: string;
+    draftRevision: number;
+  }>;
+  listTaskResults(context: DataAccessContext, operationId: string): Promise<TaskOutcome[]>;
+  saveRetryDraft(
+    context: DataAccessContext,
+    input: {
+      sourceOperationId: string;
+      sourceStateVersion: number;
+      selectedTaskIds: string[];
+      changes: Json;
+      intents: RetryTaskIntent[];
+    },
+  ): Promise<BulkOperationDraft>;
+  getRetryDraftRecovery(
+    context: DataAccessContext,
+  ): Promise<{ draftId: string; revision: number } | null>;
+  discardRetryDraft(
+    context: DataAccessContext,
+    input: { draftId: string; revision: number },
+  ): Promise<boolean>;
   listOwnedOperationProgressResults(
     context: DataAccessContext,
     operationId: string,
@@ -269,6 +303,11 @@ function sameAccess(left: EffectiveAccess, right: EffectiveAccess): boolean {
   );
 }
 
+function fieldsWithinScope(access: EffectiveAccess, fieldIds: readonly string[]): boolean {
+  const scope = access.fieldScope;
+  return scope.kind === 'all' || fieldIds.every((fieldId) => scope.fieldIds.includes(fieldId));
+}
+
 function previewMatchesDraft(preview: PreflightPreview, draft: BulkOperationDraft): boolean {
   const fieldIds = draft.changes.map((change) => change.fieldId);
   return (
@@ -277,14 +316,18 @@ function previewMatchesDraft(preview: PreflightPreview, draft: BulkOperationDraf
     preview.draftRevision === draft.revision + 1 &&
     preview.entries.length === draft.selectedTaskIds.length &&
     preview.entries.every((entry, index) => {
+      const expectedFieldIds = draft.retryIntents
+        ? Object.keys(draft.retryIntents[index]?.targetValues ?? {})
+        : fieldIds;
       if (entry.taskId !== draft.selectedTaskIds[index]) return false;
-      if (entry.changedFieldIds.some((fieldId) => !fieldIds.includes(fieldId))) return false;
+      if (entry.changedFieldIds.some((fieldId) => !expectedFieldIds.includes(fieldId)))
+        return false;
       if (entry.currentValues === null || entry.targetValues === null) {
         return entry.currentValues === null && entry.targetValues === null;
       }
       return (
-        sameSet(Object.keys(entry.currentValues), fieldIds) &&
-        sameSet(Object.keys(entry.targetValues), fieldIds)
+        sameSet(Object.keys(entry.currentValues), expectedFieldIds) &&
+        sameSet(Object.keys(entry.targetValues), expectedFieldIds)
       );
     })
   );
@@ -292,6 +335,33 @@ function previewMatchesDraft(preview: PreflightPreview, draft: BulkOperationDraf
 
 export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies) {
   const routes = new Hono<{ Bindings: RuntimeEnvironment; Variables: Variables }>();
+
+  async function requireRetrySourceCurrent(
+    repository: TaskChangeRepository,
+    dataContext: DataAccessContext,
+    access: EffectiveAccess,
+    draft: BulkOperationDraft,
+  ): Promise<void> {
+    if (!draft.retrySourceOperationId) return;
+    if (!draft.retrySourceStateVersion) throw new ApiHttpError(409, 'CONFLICT');
+    const fieldIds =
+      draft.retryIntents?.flatMap((intent) => Object.keys(intent.targetValues)) ?? [];
+    if (!access.permissions.includes('retry_operations') || !fieldsWithinScope(access, fieldIds))
+      throw new ApiHttpError(409, 'CONFLICT');
+    try {
+      const source = await repository.readRetrySource(dataContext, draft.retrySourceOperationId);
+      if (source.operation.stateVersion !== draft.retrySourceStateVersion)
+        throw new ApiHttpError(409, 'CONFLICT');
+    } catch (error) {
+      if (error instanceof ApiHttpError) throw error;
+      if (
+        error instanceof DataAccessError &&
+        (error.code === 'UNAVAILABLE_RECORD' || error.code === 'CONFLICT')
+      )
+        throw new ApiHttpError(409, 'CONFLICT');
+      throwDataApiError(error);
+    }
+  }
 
   async function authorize(context: {
     env: RuntimeEnvironment;
@@ -391,11 +461,42 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
   });
 
   routes.get('/draft', async (context) => {
-    const { dataContext } = await authorize(context);
+    const { access, dataContext } = await authorize(context);
     try {
-      const draft = await dependencies.createRepository(context.env).getCurrentDraft(dataContext);
+      const repository = dependencies.createRepository(context.env);
+      const draft = await repository.getCurrentDraft(dataContext);
+      if (draft?.retrySourceOperationId)
+        await requireRetrySourceCurrent(repository, dataContext, access, draft);
       return context.json(bulkOperationDraftAvailabilitySchema.parse({ draft }));
     } catch (error) {
+      if (error instanceof ApiHttpError) throw error;
+      throwDataApiError(error);
+    }
+  });
+
+  routes.get('/draft/retry-recovery', async (context) => {
+    const { dataContext } = await authorize(context);
+    try {
+      const retryDraft = await dependencies
+        .createRepository(context.env)
+        .getRetryDraftRecovery(dataContext);
+      return context.json(retryDraftRecoveryAvailabilitySchema.parse({ retryDraft }));
+    } catch (error) {
+      throwDataApiError(error);
+    }
+  });
+
+  routes.delete('/draft/retry-recovery', async (context) => {
+    const { dataContext } = await authorize(context);
+    const input = await parseJsonBody(context.req.raw, retryDraftRecoverySchema, 256);
+    try {
+      const discarded = await dependencies
+        .createRepository(context.env)
+        .discardRetryDraft(dataContext, input);
+      if (!discarded) throw new ApiHttpError(409, 'CONFLICT');
+      return context.json(retryDraftRecoveryAvailabilitySchema.parse({ retryDraft: null }));
+    } catch (error) {
+      if (error instanceof ApiHttpError) throw error;
       throwDataApiError(error);
     }
   });
@@ -458,6 +559,12 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
     if (!current || current.draft.id !== input.draftId) {
       throw new ApiHttpError(409, 'CONFLICT');
     }
+    await requireRetrySourceCurrent(
+      repository,
+      authorization.dataContext,
+      authorization.access,
+      current.draft,
+    );
     if (current.draft.revision === input.expectedRevision + 1) {
       const existing = preflightPreviewSchema.safeParse(current.preflightSnapshot);
       if (
@@ -487,7 +594,7 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
     const catalog = createTaskChangeCatalog(capabilities, authorization.access.fieldScope);
     try {
       requireValidTaskSearchDefinition(current.draft, createTaskFilterCatalog(capabilities));
-      requireValidBulkChanges(current.draft.changes, catalog);
+      if (!current.draft.retryIntents) requireValidBulkChanges(current.draft.changes, catalog);
     } catch (error) {
       if (
         error instanceof InvalidTaskChangeDefinitionError ||
@@ -523,6 +630,7 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
     if (!sameAccess(authorization.access, renewed.access)) {
       throw new ApiHttpError(409, 'CONFLICT');
     }
+    await requireRetrySourceCurrent(repository, renewed.dataContext, renewed.access, current.draft);
     try {
       const saved = await repository.saveTaskPreflight(renewed.dataContext, {
         draftId: input.draftId,
@@ -561,6 +669,7 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
       ) {
         throw new ApiHttpError(409, 'CONFLICT');
       }
+      await requireRetrySourceCurrent(repository, dataContext, access, current.draft);
       const parsed = preflightPreviewSchema.safeParse(current.preflightSnapshot);
       if (
         !parsed.success ||
@@ -641,6 +750,7 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
       ) {
         throw new ApiHttpError(409, 'CONFLICT');
       }
+      await requireRetrySourceCurrent(repository, dataContext, access, current.draft);
       const parsed = preflightPreviewSchema.safeParse(current.preflightSnapshot);
       if (
         !parsed.success ||
@@ -704,6 +814,108 @@ export function createTaskChangeRoutes(dependencies: TaskChangeRouteDependencies
           await repository.readConfirmedOperationReceipt(dataContext, launched.operation.id),
         ),
       );
+    } catch (error) {
+      if (error instanceof ApiHttpError) throw error;
+      throwDataApiError(error);
+    }
+  });
+
+  routes.post('/operations/:operationId/retry-draft', async (context) => {
+    const { principal, access, dataContext } = await authorizePreflight(context);
+    if (
+      !access.permissions.includes('retry_operations') ||
+      !access.permissions.some(
+        (permission) => permission === 'view_own_reports' || permission === 'view_all_reports',
+      )
+    )
+      throw new ApiHttpError(403, 'FORBIDDEN');
+    const operationId = context.req.param('operationId');
+    if (!operationIdSchema.safeParse(operationId).success) throw new ApiHttpError(404, 'NOT_FOUND');
+    await parseJsonBody(context.req.raw, launchRetryEmptyRequestSchema, 128);
+    const repository = dependencies.createRepository(context.env);
+    try {
+      const source = await repository.readRetrySource(dataContext, operationId);
+      if (
+        source.operation.initiatorId === principal.userId
+          ? !access.permissions.includes('view_own_reports')
+          : !access.permissions.includes('view_all_reports')
+      )
+        throw new ApiHttpError(403, 'FORBIDDEN');
+      if (source.plan.payloadVersion !== 1) throw new ApiHttpError(409, 'CONFLICT');
+      const plan = await decryptExecutionPlan({
+        keyBase64: context.env.OPERATION_PLAN_KEY_V1,
+        portalId: principal.portalId,
+        ownerId: source.operation.initiatorId,
+        draftId: source.draftId,
+        draftRevision: source.draftRevision,
+        token: source.token,
+        ...source.plan,
+      });
+      const results = await repository.listTaskResults(dataContext, operationId);
+      const latestSource = await repository.readRetrySource(dataContext, operationId);
+      if (latestSource.operation.stateVersion !== source.operation.stateVersion)
+        throw new ApiHttpError(409, 'CONFLICT');
+      const byTask = new Map(results.map((result) => [result.taskId, result]));
+      const intents: RetryTaskIntent[] = plan.preflight.entries.flatMap((entry) => {
+        const result = byTask.get(entry.taskId);
+        const outcome = result?.refinement?.outcome ?? result?.outcome;
+        if (
+          !result ||
+          entry.disposition !== 'eligible' ||
+          entry.targetValues === null ||
+          !(
+            ['error', 'unconfirmed', 'conflict', 'not_processed', 'partially_applied'] as const
+          ).some((candidate) => candidate === outcome)
+        )
+          return [];
+        const fieldIds =
+          outcome === 'partially_applied'
+            ? (result.refinement?.failedFieldIds ?? result.failedFieldIds)
+            : entry.changedFieldIds;
+        const targetValues: Record<string, TaskChangeValue> = {};
+        for (const fieldId of fieldIds) {
+          const target = entry.targetValues[fieldId];
+          if (!entry.changedFieldIds.includes(fieldId) || target === undefined)
+            throw new ApiHttpError(409, 'CONFLICT');
+          targetValues[fieldId] = target;
+        }
+        if (fieldIds.length === 0) throw new ApiHttpError(409, 'CONFLICT');
+        return [{ taskId: entry.taskId, targetValues }];
+      });
+      if (intents.length === 0) throw new ApiHttpError(409, 'CONFLICT');
+      const sourceKinds = new Map(plan.changes.map((change) => [change.fieldId, change.kind]));
+      const targets = new Map<string, TaskChangeValue>();
+      for (const intent of intents) {
+        for (const [fieldId, value] of Object.entries(intent.targetValues)) {
+          if (!targets.has(fieldId)) targets.set(fieldId, value);
+        }
+      }
+      if (!fieldsWithinScope(access, [...targets.keys()])) throw new ApiHttpError(403, 'FORBIDDEN');
+      const changes: BulkChangeCommand[] = [...targets]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([fieldId, value]) => {
+          const kind = sourceKinds.get(fieldId);
+          if (!kind) throw new ApiHttpError(409, 'CONFLICT');
+          const candidate: unknown =
+            value === null || (Array.isArray(value) && value.length === 0)
+              ? { fieldId, kind, action: 'clear' }
+              : Array.isArray(value)
+                ? { fieldId, kind, action: 'replace', values: value }
+                : { fieldId, kind, action: 'set', value };
+          const parsed = bulkChangeCommandSchema.safeParse(candidate);
+          if (!parsed.success) throw new ApiHttpError(409, 'CONFLICT');
+          return parsed.data;
+        });
+      const renewed = await authorize(context);
+      if (!sameAccess(access, renewed.access)) throw new ApiHttpError(409, 'CONFLICT');
+      const saved = await repository.saveRetryDraft(renewed.dataContext, {
+        sourceOperationId: operationId,
+        sourceStateVersion: source.operation.stateVersion,
+        selectedTaskIds: intents.map((intent) => intent.taskId),
+        changes: asJson(changes),
+        intents,
+      });
+      return context.json(bulkOperationDraftSchema.parse(saved));
     } catch (error) {
       if (error instanceof ApiHttpError) throw error;
       throwDataApiError(error);

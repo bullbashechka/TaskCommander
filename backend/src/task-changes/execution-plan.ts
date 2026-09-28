@@ -28,6 +28,9 @@ const executionPlanSchema = z
     filters: bulkOperationDraftSchema.shape.filters,
     sort: bulkOperationDraftSchema.shape.sort,
     changes: bulkOperationDraftSchema.shape.changes,
+    retrySourceOperationId: bulkOperationDraftSchema.shape.retrySourceOperationId,
+    retrySourceStateVersion: bulkOperationDraftSchema.shape.retrySourceStateVersion,
+    retryIntents: bulkOperationDraftSchema.shape.retryIntents,
     preflight: preflightPreviewSchema,
   })
   .strict();
@@ -83,6 +86,9 @@ export async function encryptExecutionPlan(input: {
       filters: input.draft.filters,
       sort: input.draft.sort,
       changes: input.draft.changes,
+      retrySourceOperationId: input.draft.retrySourceOperationId,
+      retrySourceStateVersion: input.draft.retrySourceStateVersion,
+      retryIntents: input.draft.retryIntents,
       preflight: input.preview,
     }),
   );
@@ -135,7 +141,14 @@ export async function decryptExecutionPlan(input: {
     plan.preflight.draftId !== input.draftId ||
     plan.preflight.draftRevision !== input.draftRevision ||
     plan.selectedTaskIds.length !== plan.preflight.entries.length ||
-    plan.selectedTaskIds.some((taskId, index) => plan.preflight.entries[index]?.taskId !== taskId)
+    plan.selectedTaskIds.some(
+      (taskId, index) => plan.preflight.entries[index]?.taskId !== taskId,
+    ) ||
+    (plan.retryIntents != null &&
+      (plan.retrySourceOperationId == null ||
+        plan.retrySourceStateVersion == null ||
+        plan.retryIntents.length !== plan.selectedTaskIds.length ||
+        plan.retryIntents.some((intent, index) => intent.taskId !== plan.selectedTaskIds[index])))
   ) {
     throw new Error('Operation plan identity mismatch.');
   }

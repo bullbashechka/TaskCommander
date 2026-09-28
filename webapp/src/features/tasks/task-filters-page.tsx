@@ -21,8 +21,10 @@ import {
   AppApiError,
   createSavedTaskFilter,
   deleteSavedTaskFilter,
+  discardRetryDraft,
   fetchTaskFilterCatalog,
   getBulkOperationDraft,
+  getRetryDraftRecovery,
   listSavedTaskFilters,
   selectAllTasks,
   searchTaskFilterUsers,
@@ -430,6 +432,21 @@ export function TaskFiltersPage() {
     queryFn: ({ signal }) => getBulkOperationDraft(signal),
     enabled: app ? canStartBulkChange(app) : false,
     staleTime: 30_000,
+  });
+  const staleRetryDraft = useQuery({
+    queryKey: ['retry-draft-recovery', app?.generation ?? 0, accessFingerprint],
+    queryFn: ({ signal }) => getRetryDraftRecovery(signal),
+    enabled:
+      app !== null &&
+      currentOperationDraft.error instanceof AppApiError &&
+      currentOperationDraft.error.status === 409,
+  });
+  const discardStaleRetryDraft = useMutation({
+    mutationFn: discardRetryDraft,
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['bulk-operation-draft'] });
+      await queryClient.invalidateQueries({ queryKey: ['retry-draft-recovery'] });
+    },
   });
   useEffect(() => {
     if (!defaultSort?.fieldId) return;
@@ -1455,6 +1472,22 @@ export function TaskFiltersPage() {
           <button className="button-link" onClick={clearSelectionState} type="button">
             Очистить
           </button>
+          {staleRetryDraft.data?.retryDraft ? (
+            <button
+              className="button-secondary"
+              disabled={discardStaleRetryDraft.isPending}
+              onClick={() => {
+                if (staleRetryDraft.data?.retryDraft)
+                  discardStaleRetryDraft.mutate(staleRetryDraft.data.retryDraft);
+              }}
+              type="button"
+            >
+              Удалить устаревший черновик повтора
+            </button>
+          ) : null}
+          {discardStaleRetryDraft.isError ? (
+            <span role="alert">Черновик изменился. Обновите страницу и повторите действие.</span>
+          ) : null}
           <button
             className="button-primary"
             disabled={

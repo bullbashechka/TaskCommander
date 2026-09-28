@@ -9,6 +9,75 @@ import {
 } from '../src/task-changes/execution-plan';
 
 describe('private operation execution plan', () => {
+  it('keeps distinct per-task absolute retry targets inside the encrypted plan', async () => {
+    const keyBase64 = btoa(String.fromCharCode(...new Uint8Array(32).fill(31)));
+    const draft = {
+      id: '10000000-0000-4000-8000-000000000024',
+      ownerId: '8001',
+      revision: 2,
+      status: 'awaiting_confirmation',
+      selectedTaskIds: ['42', '43'],
+      filters: [],
+      sort: { fieldId: 'deadline', direction: 'asc' },
+      changes: [{ fieldId: 'title', kind: 'text', action: 'set', value: 'Original' }],
+      retrySourceOperationId: '20000000-0000-4000-8000-000000000024',
+      retrySourceStateVersion: 8,
+      retryIntents: [
+        { taskId: '42', targetValues: { title: 'Target A' } },
+        { taskId: '43', targetValues: { title: 'Target B' } },
+      ],
+      createdAt: '2026-09-28T09:00:00Z',
+      updatedAt: '2026-09-28T09:00:00Z',
+      expiresAt: '2026-09-29T09:00:00Z',
+    } as BulkOperationDraft;
+    const preview = {
+      draftId: draft.id,
+      sourceDraftRevision: 1,
+      draftRevision: 2,
+      actorAccessVersion: 1,
+      checkedAt: '2026-09-28T09:00:00Z',
+      canProceed: true,
+      entries: ['42', '43'].map((taskId, index) => ({
+        taskId,
+        title: null,
+        taskUrl: null,
+        disposition: 'eligible',
+        changedFieldIds: ['title'],
+        reasonCode: null,
+        reasonMessage: null,
+        relevantVersion: `v${index}`,
+        currentValues: { title: 'Before' },
+        targetValues: { title: index === 0 ? 'Target A' : 'Target B' },
+      })),
+      summary: {
+        selected: 2,
+        eligible: 2,
+        excluded: 0,
+        unchanged: 0,
+        successful: 0,
+        failed: 0,
+        unconfirmed: 0,
+        conflicted: 0,
+        partiallyApplied: 0,
+        notProcessed: 0,
+      },
+    } as PreflightPreview;
+    const identity = {
+      keyBase64,
+      portalId: 'portal-1',
+      ownerId: '8001',
+      draftId: draft.id,
+      draftRevision: draft.revision,
+      token: '30000000-0000-4000-8000-000000000024',
+    };
+    const encrypted = await encryptExecutionPlan({ ...identity, draft, preview });
+    await expect(decryptExecutionPlan({ ...identity, ...encrypted })).resolves.toMatchObject({
+      retrySourceOperationId: draft.retrySourceOperationId,
+      retrySourceStateVersion: 8,
+      retryIntents: draft.retryIntents,
+    });
+  });
+
   it('encrypts changes and preflight with purpose-bound owner and token', async () => {
     const keyBytes = new Uint8Array(32).fill(17);
     const keyBase64 = btoa(String.fromCharCode(...keyBytes));
